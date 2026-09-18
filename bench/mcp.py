@@ -20,7 +20,7 @@ MAX_BODY = 4 * 1024 * 1024
 
 
 def tool_list():
-    """Gives the eight tools with their input schemas."""
+    """Gives the tools with their input schemas."""
     return [
         {
             "name": spec["name"],
@@ -57,7 +57,9 @@ class Server:
                     "instructions": (
                         "The bench holds a worktree for each branch. Call prepare first. "
                         "Then use find, read and edit. Use pull for a conflict. Use submit "
-                        "to commit and push, or discard to remove your changes."
+                        "to commit and push, or to land (rebase, steps, push, pull request) "
+                        "when the repository has a land block. Use feedback to read what "
+                        "the change caused. Use discard to remove your changes."
                     ),
                 }
             elif method in ("notifications/initialized", "notifications/cancelled", "initialized"):

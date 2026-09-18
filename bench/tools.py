@@ -12,7 +12,7 @@ import re
 import shutil
 import threading
 
-from . import git
+from . import forge, git, landing as landing_module
 
 
 DEFAULT_MAX_BYTES = 16384
@@ -22,6 +22,8 @@ DEFAULT_LIMIT = 200
 CEILING_LIMIT = 2000
 DEFAULT_DEPTH = 2
 CEILING_DEPTH = 12
+DEFAULT_WAIT = 600
+CEILING_WAIT = 3600
 PROTECTED_PREFIXES = (".github/", ".claude/")
 BRANCH_CHARS = re.compile(r"^[A-Za-z0-9._/-]+$")
 REPO_CHARS = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -143,6 +145,13 @@ class Bench:
         self.config = config
         self._locks = {}
         self._guard = threading.Lock()
+        self.landings = landing_module.Landings(self)
+
+    def no_landing(self, repo, branch):
+        """Refuses while a landing of the branch runs."""
+        if self.landings.running(repo, branch):
+            raise Refusal("landing_running", repo=repo.name, branch=branch,
+                          remedy="wait for the landing: call status, or feedback")
 
     def lock(self, name):
         """Gives the lock of one repository. One git operation at a time."""
@@ -332,17 +341,20 @@ def status(bench, args):
         paths = status_paths(path)
         counts = git.line(["rev-list", "--left-right", "--count", "%s...HEAD" % base_head], cwd=path)
         behind, ahead = (counts.split() + ["0", "0"])[:2]
-        return {
-            "repo": repo.name,
-            "branch": branch,
-            "head": head,
-            "base": base,
-            "base_head": base_head,
-            "dirty": len(paths),
-            "paths": paths[:500],
-            "ahead": int(ahead),
-            "behind": int(behind),
-        }
+    item = bench.landings.get(repo, branch)
+    max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 1024, CEILING_MAX_BYTES)
+    return {
+        "repo": repo.name,
+        "branch": branch,
+        "head": head,
+        "base": base,
+        "base_head": base_head,
+        "dirty": len(paths),
+        "paths": paths[:500],
+        "ahead": int(ahead),
+        "behind": int(behind),
+        "landing": item.view(max_bytes) if item else None,
+    }
 
 
 def _find_tree(bench, repo, worktree, args, max_bytes):
@@ -597,6 +609,7 @@ def edit(bench, args):
     operation = operations[0]
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
+        bench.no_landing(repo, branch)
         full, rel = bench.resolve(repo, worktree, args.get("path"), for_write=True,
                                   allow_protected=allow_protected)
         if operation == "replace":
@@ -650,6 +663,7 @@ def pull(bench, args):
         raise Refusal("input", field="from", reason="use base or head")
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
+        bench.no_landing(repo, branch)
         bare = bench.fetch(repo)
         if source == "head":
             remote = "refs/remotes/origin/" + branch
@@ -687,7 +701,7 @@ def pull(bench, args):
 
 
 def submit(bench, args):
-    """Commits every change with the trailers, then pushes."""
+    """Commits every change with the trailers, then pushes, or lands."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     message = _text(args, "message", required=True)
@@ -705,51 +719,217 @@ def submit(bench, args):
     if branch == repo.default_branch:
         raise Refusal("default_branch", branch=branch, default_branch=repo.default_branch,
                       remedy="submit on a work branch, not on the default branch")
+    land = repo.land
+    if land and branch == land.target:
+        raise Refusal("default_branch", branch=branch, default_branch=land.target,
+                      remedy="submit on a work branch, not on the target branch")
+    wait = _int(args, "wait", DEFAULT_WAIT, 0, CEILING_WAIT)
+    max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 1024, CEILING_MAX_BYTES)
+    want_pr = args.get("pull_request", True)
+    title = _text(args, "title", default=message.strip().splitlines()[0][:200])
+    description = _text(args, "description", default="")
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
+        bench.no_landing(repo, branch)
         paths = status_paths(worktree)
-        if not paths:
+        committed = False
+        files = added = removed = 0
+        if paths:
+            git.run(["add", "-A", "--", "."], cwd=worktree)
+            stat = git.out(["diff", "--cached", "--numstat"], cwd=worktree)
+            for row in stat.splitlines():
+                cells = row.split("\t")
+                if len(cells) < 3:
+                    continue
+                files += 1
+                if cells[0].isdigit():
+                    added += int(cells[0])
+                if cells[1].isdigit():
+                    removed += int(cells[1])
+            if max_lines is not None:
+                ceiling = _int(args, "max_lines", 0, 0, 1000000)
+                if added + removed > ceiling:
+                    git.run(["reset", "-q"], cwd=worktree, check=False)
+                    raise Refusal("over_ceiling", lines=added + removed, max_lines=ceiling,
+                                  files=files, remedy="make the change smaller, or raise the ceiling")
+            commit_args = ["commit", "-m", message]
+            for item in clean_trailers:
+                commit_args += ["--trailer", item]
+            code, text, err = git.run(commit_args, cwd=worktree, check=False)
+            if code != 0:
+                raise Refusal("commit_failed", reason=(err or text).strip()[:400])
+            committed = True
+        elif not land or not _has_work_to_land(bench, repo, branch, worktree):
             raise Refusal("nothing_to_commit", repo=repo.name, branch=branch)
-        git.run(["add", "-A", "--", "."], cwd=worktree)
-        stat = git.out(["diff", "--cached", "--numstat"], cwd=worktree)
-        added = removed = 0
-        files = 0
-        for row in stat.splitlines():
-            cells = row.split("\t")
-            if len(cells) < 3:
-                continue
-            files += 1
-            if cells[0].isdigit():
-                added += int(cells[0])
-            if cells[1].isdigit():
-                removed += int(cells[1])
-        if max_lines is not None:
-            ceiling = _int(args, "max_lines", 0, 0, 1000000)
-            if added + removed > ceiling:
-                raise Refusal("over_ceiling", lines=added + removed, max_lines=ceiling,
-                              files=files, remedy="make the change smaller, or raise the ceiling")
-        commit_args = ["commit", "-m", message]
-        for item in clean_trailers:
-            commit_args += ["--trailer", item]
-        code, text, err = git.run(commit_args, cwd=worktree, check=False)
-        if code != 0:
-            raise Refusal("commit_failed", reason=(err or text).strip()[:400])
         commit = head_of(worktree)
-        code, text, err = git.run(["push", "origin", "HEAD:refs/heads/" + branch],
-                                  cwd=worktree, check=False, timeout=600)
-        if code != 0:
-            raise Refusal("push_rejected", commit=commit,
-                          reason=(err or text).strip()[:400],
-                          remedy="use pull from head, then submit again")
-        return {
-            "repo": repo.name,
-            "branch": branch,
-            "commit": commit,
-            "pushed": True,
-            "files": files,
-            "lines_added": added,
-            "lines_removed": removed,
-        }
+        if not land:
+            code, text, err = git.run(["push", "origin", "HEAD:refs/heads/" + branch],
+                                      cwd=worktree, check=False, timeout=600)
+            if code != 0:
+                raise Refusal("push_rejected", commit=commit,
+                              reason=(err or text).strip()[:400],
+                              remedy="use pull from head, then submit again")
+            return {
+                "repo": repo.name,
+                "branch": branch,
+                "commit": commit,
+                "pushed": True,
+                "files": files,
+                "lines_added": added,
+                "lines_removed": removed,
+            }
+        item = bench.landings.get(repo, branch, create=True)
+        item.start(commit, bool(want_pr), title, description, clean_trailers)
+    item.wait(wait)
+    view = item.view(max_bytes)
+    answer = {
+        "repo": repo.name,
+        "branch": branch,
+        "commit": commit,
+        "committed": committed,
+        "files": files,
+        "lines_added": added,
+        "lines_removed": removed,
+        "pushed": view["pushed"],
+        "landing": view,
+    }
+    if view["state"] == "failed":
+        raise Refusal("landing_failed", step=view["failed_step"], reason=view["reason"],
+                      remedy="read landing.steps, fix the worktree, then submit again", **answer)
+    return answer
+
+
+def _has_work_to_land(bench, repo, branch, worktree):
+    """Tells if a clean worktree still has a landing to do."""
+    remote = "refs/remotes/origin/" + branch
+    if not git.ref_exists(remote, cwd=worktree):
+        return True
+    if git.rev_parse(remote, cwd=worktree) != head_of(worktree):
+        return True
+    item = bench.landings.get(repo, branch)
+    return item is not None and item.state.get("state") != "landed"
+
+
+def feedback(bench, args):
+    """Gathers what the change caused: the landing, the pull request, the pipelines, the reviews."""
+    repo = bench.repo(args.get("repo"))
+    branch = check_branch(_text(args, "branch", required=True))
+    max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 1024, CEILING_MAX_BYTES)
+    log_bytes = _int(args, "log_bytes", 4096, 256, 32768)
+    bench.worktree(repo, branch)
+    land = repo.land
+    item = bench.landings.get(repo, branch)
+    answer = {
+        "repo": repo.name,
+        "branch": branch,
+        "target": land.target if land else repo.default_branch,
+        "landing": item.view(max_bytes // 2) if item else None,
+        "pull_request": None,
+        "pipelines": [],
+        "statuses": [],
+        "comments": [],
+        "findings": [],
+        "unavailable": [],
+    }
+    findings = []
+    if item:
+        findings.extend(item.findings(max_bytes // 2))
+    if not land or land.pull_request is None:
+        answer["unavailable"].append("forge: no pull_request block in the land block of bench.json")
+        answer["findings"] = findings
+        return answer
+    try:
+        client = forge.client(repo)
+    except forge.ForgeError as exc:
+        answer["unavailable"].append("forge: %s" % exc)
+        answer["findings"] = findings
+        return answer
+
+    def attempt(name, function, default):
+        try:
+            return function()
+        except forge.ForgeError as exc:
+            answer["unavailable"].append("%s: %s" % (name, exc))
+            return default
+
+    target = land.target
+    pr = attempt("pull_request", lambda: client.find_pull_request(branch, target), None)
+    if pr is None and item and (item.state.get("pull_request") or {}).get("number"):
+        number = item.state["pull_request"]["number"]
+        pr = attempt("pull_request", lambda: client.pull_request(number), None)
+    answer["pull_request"] = pr
+    if pr and pr.get("state") in ("declined", "closed", "superseded"):
+        findings.append({"source": "pull_request", "severity": "error",
+                         "message": "the pull request is %s" % pr["state"], "url": pr.get("url")})
+    if pr and pr.get("changes_requested"):
+        findings.append({"source": "review", "severity": "error",
+                         "message": "changes requested by %s" % ", ".join(pr["changes_requested"]),
+                         "url": pr.get("url")})
+
+    pipelines = attempt("pipelines", lambda: client.pipelines(branch), [])
+    answer["pipelines"] = pipelines[:5]
+    if pipelines:
+        newest = pipelines[0]
+        if newest.get("result") in ("failed", "error", "failure", "stopped", "cancelled"):
+            steps = attempt("steps", lambda: client.steps(newest["id"]), [])
+            newest["steps"] = steps
+            for step in steps:
+                if step.get("result") not in ("failed", "error", "failure"):
+                    continue
+                log = attempt("log", lambda: client.step_log(newest["id"], step["id"]), "")
+                log = landing_module.tail(log, log_bytes)
+                findings.append({
+                    "source": "pipeline", "step": step.get("name"), "severity": "error",
+                    "message": log, "locations": landing_module.locations(log),
+                    "url": newest.get("url"),
+                })
+        elif newest.get("state") in ("in_progress", "pending", "queued", "inprogress"):
+            findings.append({"source": "pipeline", "severity": "info",
+                             "message": "the pipeline is still running", "url": newest.get("url")})
+
+    head = (pr or {}).get("head") or (item.state.get("head") if item else None)
+    if head:
+        statuses = attempt("statuses", lambda: client.statuses(head), [])
+        answer["statuses"] = statuses
+        for status in statuses:
+            if status.get("state") in ("failed", "failure", "error", "stopped"):
+                findings.append({
+                    "source": "status", "name": status.get("name"), "severity": "error",
+                    "message": status.get("description") or "%s failed" % status.get("name"),
+                    "url": status.get("url"),
+                })
+
+    if pr and pr.get("number") is not None:
+        comments = attempt("comments", lambda: client.comments(pr["number"]), [])
+        answer["comments"] = comments[:200]
+        for comment in comments:
+            findings.append({
+                "source": "review", "severity": "comment", "author": comment.get("author"),
+                "path": comment.get("path"), "line": comment.get("line"),
+                "message": comment.get("text"), "created": comment.get("created"),
+                "url": comment.get("url"), "reply_to": comment.get("reply_to"),
+            })
+    answer["findings"] = findings
+    return cap_answer(answer, max_bytes)
+
+
+def cap_answer(answer, max_bytes):
+    """Trims the longest texts of an answer until it fits."""
+    def size():
+        return len(json.dumps(answer))
+    if size() <= max_bytes:
+        return answer
+    for key in ("comments", "statuses", "pipelines"):
+        while answer.get(key) and size() > max_bytes:
+            answer[key] = answer[key][:-1]
+    for finding in answer.get("findings", []):
+        if size() <= max_bytes:
+            break
+        finding["message"] = landing_module.tail(finding.get("message", ""), 1024)
+    if size() > max_bytes and answer.get("landing"):
+        answer["landing"] = {k: v for k, v in answer["landing"].items() if k != "steps"}
+    answer["dropped"] = True
+    return answer
 
 
 def discard(bench, args):
@@ -759,8 +939,10 @@ def discard(bench, args):
     drop = bool(args.get("drop_branch"))
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
+        bench.no_landing(repo, branch)
         bare = bench.bare_dir(repo.name)
         if drop:
+            bench.landings.forget(repo, branch)
             git.run(["worktree", "remove", "--force", worktree], cwd=bare, check=False)
             if os.path.isdir(worktree):
                 shutil.rmtree(worktree, ignore_errors=True)
@@ -937,10 +1119,15 @@ TOOL_SPECS = [
         "name": "submit",
         "function": submit,
         "description": (
-            "Commits every change of the worktree with the message and the trailers, then "
-            "pushes the branch. A clean worktree is refused. The default branch is refused. "
-            "A push that does not land is refused with the reason: pull from head, then "
-            "submit again."
+            "Commits every change of the worktree with the message and the trailers. Then, "
+            "for a repository without a land block, it pushes the branch. For a repository "
+            "with a land block, it lands: it rebases onto the target, runs the configured "
+            "steps (setup, format, test...), pushes, and opens the pull request. The landing "
+            "runs in the background; submit waits up to wait seconds and gives landing.steps "
+            "with the output of each step. A failed step is a refusal landing_failed with the "
+            "output: fix the worktree and submit again. A clean worktree is refused, unless a "
+            "landing is still owed. The default branch is refused. While a landing runs, edit, "
+            "pull and discard are refused; use status or feedback to follow it."
         ),
         "schema": {
             "type": "object",
@@ -952,8 +1139,45 @@ TOOL_SPECS = [
                              "description": "The git trailers, each one as 'Key: value'."},
                 "max_lines": {"type": "integer",
                               "description": "The ceiling on the added lines plus the removed lines."},
+                "wait": {"type": "integer",
+                         "description": "The seconds to wait for the landing. The default is 600. "
+                                        "The ceiling is 3600. Zero gives the answer at once."},
+                "pull_request": {"type": "boolean",
+                                 "description": "False to land without opening the pull request. "
+                                                "The default is true."},
+                "title": {"type": "string",
+                          "description": "The title of the pull request. The default is the first "
+                                         "line of the message."},
+                "description": {"type": "string", "description": "The body of the pull request."},
+                "max_bytes": _MAX_BYTES,
             },
             "required": ["repo", "branch", "message"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "feedback",
+        "function": feedback,
+        "description": (
+            "Gathers what a change caused, after submit: the landing with its steps, the pull "
+            "request and its state, the newest pipelines with the log of each failed step, the "
+            "commit statuses (a quality gate is one), and the review comments. Every item also "
+            "comes as one finding in findings, with a source (landing, pipeline, status, review, "
+            "pull_request), a severity, a message, and the path:line locations it names. Read "
+            "findings, fix the worktree, submit again. Sources the rig cannot reach are named in "
+            "unavailable."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "branch": _BRANCH,
+                "max_bytes": _MAX_BYTES,
+                "log_bytes": {"type": "integer",
+                              "description": "The tail of each failed pipeline log to give. "
+                                             "The default is 4096. The ceiling is 32768."},
+            },
+            "required": ["repo", "branch"],
             "additionalProperties": False,
         },
     },
