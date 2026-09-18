@@ -113,6 +113,26 @@ part, and as `structuredContent.result`. A refusal is a normal answer
 with `isError` true, and its JSON has the field `refused` with the name
 of the refusal. The stdio transport reads one message for each line.
 
+## The rig as a service
+
+On macOS the rig runs as a user LaunchAgent, written and started by the
+Makefile. The variables `PORT`, `CONFIG` and `LABEL` have defaults
+(8101, `~/.config/bench/bench.json`, `io.kopsa.bench`).
+
+```
+make install     # venv, LaunchAgent, start; idempotent
+make status      # is it running, does it answer on /health
+make logs        # follow ~/Library/Logs/bench.log
+make restart     # after a change to bench.json
+make update      # take a new version: git pull, uv sync, restart
+make stop        # stop it and remove the LaunchAgent
+```
+
+A restart cuts a running landing: its state reads as failed with the
+reason "the bench restarted", and the next `submit` on that branch lands
+again. Check `make status` and the landings under `<data_dir>/<repo>/landings/`
+before `make update`.
+
 ## The call form
 
 ```
