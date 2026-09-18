@@ -28,8 +28,9 @@ The configuration is one JSON file. The credential is never in the file.
 }
 ```
 
-The rig makes `<data_dir>/<repo>/bare.git` and
-`<data_dir>/<repo>/wt/<branch>/`. A path that matches a `deny` glob, or
+The key is the repository's name as the forge spells it, `owner/name`
+(the engine names it so), or a plain name. The rig makes
+`<data_dir>/<repo>/bare.git` and `<data_dir>/<repo>/wt/<branch>/`. A path that matches a `deny` glob, or
 that goes out of the worktree, is never served.
 
 ## The landing

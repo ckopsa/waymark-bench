@@ -407,6 +407,19 @@ class TestInput(BenchCase):
         self.assertTrue(refused)
         self.assertEqual(answer["refused"], "repo")
 
+    def test_a_repository_named_as_the_forge_spells_it_is_served(self):
+        # the engine names a repository owner/name, and the clone lives
+        # under <data_dir>/<owner>/<name>/
+        bench = Bench(util.make_config(self.root, self.clone_url, name="ckopsa/demo"))
+        answer, refused = tools.call(bench, "prepare", {"repo": "ckopsa/demo", "branch": "work"})
+        self.assertFalse(refused, answer)
+        self.assertEqual(answer["repo"], "ckopsa/demo")
+        self.assertTrue(os.path.isdir(os.path.join(bench.config.data_dir, "ckopsa", "demo", "bare.git")))
+        for bad in ("a/b/c", "../demo", "a/../b", "/demo", "demo/"):
+            answer, refused = tools.call(bench, "status", {"repo": bad, "branch": "work"})
+            self.assertTrue(refused, bad)
+            self.assertEqual(answer["refused"], "repo")
+
     def test_an_unknown_tool_is_refused(self):
         answer, refused = tools.call(self.bench, "explode", {})
         self.assertTrue(refused)

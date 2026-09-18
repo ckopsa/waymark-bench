@@ -27,7 +27,11 @@ DEFAULT_WAIT = 600
 CEILING_WAIT = 3600
 PROTECTED_PREFIXES = (".github/", ".claude/")
 BRANCH_CHARS = re.compile(r"^[A-Za-z0-9._/-]+$")
-REPO_CHARS = re.compile(r"^[A-Za-z0-9._-]+$")
+# A repository name is the key in bench.json. The engine names a
+# repository as the forge spells it, owner/name, and the clone then
+# lives under <data_dir>/<owner>/<name>/. One slash at most, and no
+# part that walks upward.
+REPO_CHARS = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)?$")
 GREP_LINE = re.compile(r"^(?P<path>.+?)[-:](?P<line>\d+)[-:](?P<text>.*)$")
 
 
@@ -1040,7 +1044,7 @@ def discard(bench, args):
 
 # ---------------------------------------------------------------- schemas
 
-_REPO = {"type": "string", "description": "The repository name in bench.json."}
+_REPO = {"type": "string", "description": "The repository name in bench.json, as the forge spells it: owner/name, or a plain name."}
 _BRANCH = {"type": "string", "description": "The work branch. Use only A-Z a-z 0-9 . _ / -"}
 _MAX_BYTES = {
     "type": "integer",
