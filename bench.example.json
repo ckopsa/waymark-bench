@@ -1,0 +1,10 @@
+{
+  "data_dir": "./data",
+  "repos": {
+    "waymark": {
+      "clone_url": "https://github.com/ckopsa/waymark",
+      "default_branch": "main",
+      "deny": ["*.pem", "*.key", ".env*", "**/secrets/**"]
+    }
+  }
+}
