@@ -72,6 +72,10 @@ class TestHttp(TransportCase):
             self.assertIn("repo", schema["properties"])
             self.assertIn("branch", schema["properties"])
             self.assertIn("repo", schema["required"])
+            self.assertIn("seat", schema["properties"])
+            self.assertIn("sitting", schema["properties"])
+            if tool["name"] in ("find", "read", "edit"):
+                self.assertIn("allow", schema["properties"])
 
     def test_tools_call_gives_text_and_structured_content(self):
         status, answer = self.post({"jsonrpc": "2.0", "id": 3, "method": "tools/call",

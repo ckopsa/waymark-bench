@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 
 from . import forge, git, landing as landing_module
@@ -68,6 +69,41 @@ def _text(args, key, required=False, default=None):
     return value
 
 
+def _globs(args, key):
+    """Gives the list of globs, or None when the argument is not given."""
+    value = args.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise Refusal("input", field=key, reason="a list of globs is necessary")
+    for item in value:
+        if not isinstance(item, str):
+            raise Refusal("input", field=key, reason="each glob is a text")
+    return list(value)
+
+
+def marks_of(args):
+    """Gives the seat and the sitting of the call, when they are given."""
+    marks = {}
+    for key in ("seat", "sitting"):
+        value = args.get(key)
+        if isinstance(value, str) and value:
+            marks[key] = value
+    return marks
+
+
+def log_call(name, args, refused=None):
+    """Writes one short line for the call to the standard error."""
+    fields = ["tool=%s" % name]
+    for key in ("repo", "branch", "seat", "sitting"):
+        value = args.get(key)
+        if isinstance(value, str) and value:
+            fields.append("%s=%s" % (key, value))
+    if refused:
+        fields.append("refused=%s" % refused)
+    print("bench call " + " ".join(fields), file=sys.stderr)
+
+
 def check_branch(name):
     """Validates a branch name. See R-3."""
     if not name or not isinstance(name, str):
@@ -89,6 +125,21 @@ def deny_pattern(path, patterns):
             return pattern
         if pattern.startswith("**/") and fnmatch.fnmatch(path, pattern[3:]):
             return pattern
+    return None
+
+
+def allow_pattern(path, patterns, directory=False):
+    """Gives the allow glob that admits the path, or None.
+
+    A directory is admitted when a glob descends into it.
+    """
+    pattern = deny_pattern(path, patterns)
+    if pattern:
+        return pattern
+    if directory:
+        for item in patterns or []:
+            if item.startswith(path + "/"):
+                return item
     return None
 
 
@@ -225,8 +276,12 @@ class Bench:
 
     # ---------------------------------------------------------- path rules
 
-    def resolve(self, repo, worktree, path, for_write=False, allow_protected=False):
-        """Gives the absolute path inside the worktree, or refuses."""
+    def resolve(self, repo, worktree, path, for_write=False, allow_protected=False, allow=None):
+        """Gives the absolute path inside the worktree, or refuses.
+
+        The deny globs come first. Then allow, when the call gives it:
+        a path that no allow glob admits is refused.
+        """
         rel = clean_path(path)
         if rel == ".":
             return worktree, "."
@@ -235,13 +290,15 @@ class Bench:
         pattern = deny_pattern(rel, repo.deny)
         if pattern:
             raise Refusal("denied", path=rel, pattern=pattern)
-        if for_write and is_protected(rel) and not allow_protected:
-            raise Refusal("protected", path=rel,
-                          reason="a write under .github/ or .claude/ needs the scope to name the path")
         root = os.path.realpath(worktree)
         full = os.path.realpath(os.path.join(root, rel))
         if full != root and not full.startswith(root + os.sep):
             raise Refusal("denied", path=rel, reason="the path is outside the worktree")
+        if allow is not None and not allow_pattern(rel, allow, os.path.isdir(full)):
+            raise Refusal("denied", path=rel, allow=list(allow))
+        if for_write and is_protected(rel) and not allow_protected:
+            raise Refusal("protected", path=rel,
+                          reason="a write under .github/ or .claude/ needs the scope to name the path")
         return full, rel
 
 
@@ -357,9 +414,9 @@ def status(bench, args):
     }
 
 
-def _find_tree(bench, repo, worktree, args, max_bytes):
+def _find_tree(bench, repo, worktree, args, max_bytes, allow=None):
     start_rel = clean_path(_text(args, "path", default=".") or ".")
-    start, rel = bench.resolve(repo, worktree, start_rel)
+    start, rel = bench.resolve(repo, worktree, start_rel, allow=allow)
     depth = _int(args, "depth", DEFAULT_DEPTH, 1, CEILING_DEPTH)
     if not os.path.isdir(start):
         raise Refusal("not_found", path=rel, reason="the path is not a directory")
@@ -372,12 +429,16 @@ def _find_tree(bench, repo, worktree, args, max_bytes):
             dirs[:] = []
         for name in dirs:
             full = os.path.join(root, name)
-            entries.append({"path": os.path.relpath(full, worktree).replace(os.sep, "/"),
-                            "type": "dir"})
+            path_rel = os.path.relpath(full, worktree).replace(os.sep, "/")
+            if allow is not None and not allow_pattern(path_rel, allow, True):
+                continue
+            entries.append({"path": path_rel, "type": "dir"})
         for name in sorted(files):
             full = os.path.join(root, name)
             path_rel = os.path.relpath(full, worktree).replace(os.sep, "/")
             if deny_pattern(path_rel, repo.deny):
+                continue
+            if allow is not None and not allow_pattern(path_rel, allow):
                 continue
             try:
                 size = os.path.getsize(full)
@@ -389,7 +450,7 @@ def _find_tree(bench, repo, worktree, args, max_bytes):
     return {"mode": "tree", "path": rel, "depth": depth, "entries": kept, "dropped": dropped}
 
 
-def _find_glob(bench, repo, worktree, args, max_bytes):
+def _find_glob(bench, repo, worktree, args, max_bytes, allow=None):
     pattern = _text(args, "pattern", required=True)
     text = git.out(["ls-files", "--cached", "--others", "--exclude-standard"], cwd=worktree)
     paths = []
@@ -398,19 +459,21 @@ def _find_glob(bench, repo, worktree, args, max_bytes):
             continue
         if deny_pattern(name, repo.deny):
             continue
+        if allow is not None and not allow_pattern(name, allow):
+            continue
         if fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(os.path.basename(name), pattern):
             paths.append(name)
     kept, dropped = cap_items(sorted(paths), max_bytes, lambda item: len(item) + 4)
     return {"mode": "glob", "pattern": pattern, "paths": kept, "dropped": dropped}
 
 
-def _find_grep(bench, repo, worktree, args, max_bytes):
+def _find_grep(bench, repo, worktree, args, max_bytes, allow=None):
     pattern = _text(args, "pattern", required=True)
     context = _int(args, "context", 0, 0, 10)
     max_matches = _int(args, "max_matches", DEFAULT_MAX_MATCHES, 1, 2000)
     scope = []
     if args.get("path"):
-        _, rel = bench.resolve(repo, worktree, args.get("path"))
+        _, rel = bench.resolve(repo, worktree, args.get("path"), allow=allow)
         scope = ["--", rel]
     count_args = ["grep", "-I", "--untracked", "--no-color", "-c", "-e", pattern] + scope
     code, text, err = git.run(count_args, cwd=worktree, check=False)
@@ -422,6 +485,8 @@ def _find_grep(bench, repo, worktree, args, max_bytes):
             continue
         name, _, count = row.rpartition(":")
         if deny_pattern(name, repo.deny):
+            continue
+        if allow is not None and not allow_pattern(name, allow):
             continue
         try:
             files.append({"path": name, "count": int(count)})
@@ -442,6 +507,8 @@ def _find_grep(bench, repo, worktree, args, max_bytes):
         name = match.group("path")
         if deny_pattern(name, repo.deny):
             continue
+        if allow is not None and not allow_pattern(name, allow):
+            continue
         lines.append({"path": name, "line": int(match.group("line")),
                       "text": match.group("text")[:400]})
     dropped = 0
@@ -460,14 +527,14 @@ def _find_grep(bench, repo, worktree, args, max_bytes):
     }
 
 
-def _find_diff(bench, repo, worktree, args, max_bytes):
+def _find_diff(bench, repo, worktree, args, max_bytes, allow=None):
     base = bench.base_of(repo, check_branch(_text(args, "branch", required=True)))
     base_head = git.rev_parse(base_ref_of(bench.bare_dir(repo.name), base), cwd=worktree)
     # Intent to add: a new file is in the diff, and its content stays out of the index.
     git.run(["add", "-N", "--", "."], cwd=worktree, check=False)
     scope = []
     if args.get("path"):
-        _, rel = bench.resolve(repo, worktree, args.get("path"))
+        _, rel = bench.resolve(repo, worktree, args.get("path"), allow=allow)
         scope = ["--", rel]
     text = git.out(["diff", "--no-color", base_head] + scope, cwd=worktree)
     parts = []
@@ -488,6 +555,8 @@ def _find_diff(bench, repo, worktree, args, max_bytes):
         for pair in names:
             for name in pair:
                 if deny_pattern(name, repo.deny):
+                    denied = True
+                if allow is not None and not allow_pattern(name, allow):
                     denied = True
         if not denied:
             kept_parts.append(part)
@@ -514,16 +583,17 @@ def find(bench, args):
     branch = check_branch(_text(args, "branch", required=True))
     mode = _text(args, "mode", default="tree")
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
+    allow = _globs(args, "allow")
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
         if mode == "tree":
-            answer = _find_tree(bench, repo, worktree, args, max_bytes)
+            answer = _find_tree(bench, repo, worktree, args, max_bytes, allow)
         elif mode == "glob":
-            answer = _find_glob(bench, repo, worktree, args, max_bytes)
+            answer = _find_glob(bench, repo, worktree, args, max_bytes, allow)
         elif mode == "grep":
-            answer = _find_grep(bench, repo, worktree, args, max_bytes)
+            answer = _find_grep(bench, repo, worktree, args, max_bytes, allow)
         elif mode == "diff":
-            answer = _find_diff(bench, repo, worktree, args, max_bytes)
+            answer = _find_diff(bench, repo, worktree, args, max_bytes, allow)
         else:
             raise Refusal("input", field="mode", reason="use tree, glob, grep or diff")
         answer.update({"repo": repo.name, "branch": branch, "max_bytes": max_bytes})
@@ -539,9 +609,10 @@ def read(bench, args):
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
     ref = _text(args, "ref")
     if_hash = _text(args, "if_hash")
+    allow = _globs(args, "allow")
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
-        full, rel = bench.resolve(repo, worktree, args.get("path"))
+        full, rel = bench.resolve(repo, worktree, args.get("path"), allow=allow)
         if ref:
             if ref == "base":
                 ref = bench.base_of(repo, branch)
@@ -589,6 +660,7 @@ def edit(bench, args):
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     allow_protected = bool(args.get("allow_protected"))
+    allow = _globs(args, "allow")
     old = args.get("old")
     new = args.get("new")
     create = bool(args.get("create"))
@@ -611,7 +683,7 @@ def edit(bench, args):
         worktree = bench.worktree(repo, branch)
         bench.no_landing(repo, branch)
         full, rel = bench.resolve(repo, worktree, args.get("path"), for_write=True,
-                                  allow_protected=allow_protected)
+                                  allow_protected=allow_protected, allow=allow)
         if operation == "replace":
             if new is None or not isinstance(new, str) or not isinstance(old, str):
                 raise Refusal("input", field="new", reason="old and new must be texts")
@@ -641,7 +713,7 @@ def edit(bench, args):
             return {"repo": repo.name, "branch": branch, "path": rel, "deleted": True}
         else:
             target, target_rel = bench.resolve(repo, worktree, move_to, for_write=True,
-                                               allow_protected=allow_protected)
+                                               allow_protected=allow_protected, allow=allow)
             if not os.path.exists(full):
                 raise Refusal("not_found", path=rel)
             if os.path.exists(target):
@@ -706,7 +778,11 @@ def submit(bench, args):
     branch = check_branch(_text(args, "branch", required=True))
     message = _text(args, "message", required=True)
     max_lines = args.get("max_lines")
-    trailers = args.get("trailers") or []
+    trailers = args.get("trailers")
+    if trailers is None:
+        # Without trailers, the seat and the sitting of the call are the trailers.
+        trailers = ["Waymark-%s: %s" % (key.capitalize(), value)
+                    for key, value in sorted(marks_of(args).items())]
     if isinstance(trailers, dict):
         trailers = ["%s: %s" % (key, value) for key, value in sorted(trailers.items())]
     if not isinstance(trailers, list):
@@ -970,6 +1046,14 @@ _MAX_BYTES = {
     "type": "integer",
     "description": "The cap on the answer in bytes. The default is 16384. The ceiling is 65536.",
 }
+_ALLOW = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": "The globs that the call may touch. A path that no glob matches is refused.",
+}
+_SEAT = {"type": "string", "description": "The seat that makes the call. The rig writes it in its log."}
+_SITTING = {"type": "string",
+            "description": "The sitting that makes the call. The rig writes it in its log."}
 
 TOOL_SPECS = [
     {
@@ -986,6 +1070,8 @@ TOOL_SPECS = [
                 "branch": _BRANCH,
                 "base": {"type": "string",
                          "description": "The branch to start from. The default is the repository default branch."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
             },
             "required": ["repo", "branch"],
             "additionalProperties": False,
@@ -1001,7 +1087,7 @@ TOOL_SPECS = [
         ),
         "schema": {
             "type": "object",
-            "properties": {"repo": _REPO, "branch": _BRANCH},
+            "properties": {"repo": _REPO, "branch": _BRANCH, "seat": _SEAT, "sitting": _SITTING},
             "required": ["repo", "branch"],
             "additionalProperties": False,
         },
@@ -1013,7 +1099,8 @@ TOOL_SPECS = [
             "Looks in the worktree. Mode tree gives the files under a path to a depth "
             "with their sizes. Mode glob gives the paths that match a pattern. Mode grep "
             "gives the count of matches for each file first, then the lines. Mode diff "
-            "gives the change of the worktree against the base. Every answer has a cap."
+            "gives the change of the worktree against the base. Every answer has a cap. "
+            "With allow, the answer holds only the paths that a glob of the list matches."
         ),
         "schema": {
             "type": "object",
@@ -1032,6 +1119,9 @@ TOOL_SPECS = [
                 "max_matches": {"type": "integer",
                                 "description": "The cap on the lines for mode grep. The default is 200."},
                 "max_bytes": _MAX_BYTES,
+                "allow": _ALLOW,
+                "seat": _SEAT,
+                "sitting": _SITTING,
             },
             "required": ["repo", "branch", "mode"],
             "additionalProperties": False,
@@ -1044,7 +1134,8 @@ TOOL_SPECS = [
             "Gives the lines of one file with their numbers. Use offset and limit for a "
             "range. Use ref to read the file at a git ref, for example base. Give if_hash "
             "with the hash of your last read: if the file did not change, the answer is "
-            "unchanged and the hash, and not the bytes."
+            "unchanged and the hash, and not the bytes. With allow, a path that no glob of "
+            "the list matches is refused."
         ),
         "schema": {
             "type": "object",
@@ -1061,6 +1152,9 @@ TOOL_SPECS = [
                 "if_hash": {"type": "string",
                             "description": "The hash from your last read of this file."},
                 "max_bytes": _MAX_BYTES,
+                "allow": _ALLOW,
+                "seat": _SEAT,
+                "sitting": _SITTING,
             },
             "required": ["repo", "branch", "path"],
             "additionalProperties": False,
@@ -1073,7 +1167,8 @@ TOOL_SPECS = [
             "Changes one path. Give old and new to replace a text: old must be in the file "
             "one time. Give create true with new for a new file. Give delete true to remove "
             "a file. Give move_to to move a file. A write under .github/ or .claude/ is "
-            "refused when the scope does not name the path."
+            "refused when the scope does not name the path. With allow, a path that no glob "
+            "of the list matches is refused."
         ),
         "schema": {
             "type": "object",
@@ -1090,6 +1185,9 @@ TOOL_SPECS = [
                 "move_to": {"type": "string", "description": "The new path of the file."},
                 "allow_protected": {"type": "boolean",
                                     "description": "True to permit a write under .github/ or .claude/."},
+                "allow": _ALLOW,
+                "seat": _SEAT,
+                "sitting": _SITTING,
             },
             "required": ["repo", "branch", "path"],
             "additionalProperties": False,
@@ -1110,6 +1208,8 @@ TOOL_SPECS = [
                 "branch": _BRANCH,
                 "from": {"type": "string", "enum": ["base", "head"],
                          "description": "base merges the base branch in. head moves to the remote branch."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
             },
             "required": ["repo", "branch", "from"],
             "additionalProperties": False,
@@ -1127,7 +1227,9 @@ TOOL_SPECS = [
             "with the output of each step. A failed step is a refusal landing_failed with the "
             "output: fix the worktree and submit again. A clean worktree is refused, unless a "
             "landing is still owed. The default branch is refused. While a landing runs, edit, "
-            "pull and discard are refused; use status or feedback to follow it."
+            "pull and discard are refused; use status or feedback to follow it. Without "
+            "trailers, the rig writes the seat and the sitting as the trailers Waymark-Seat "
+            "and Waymark-Sitting."
         ),
         "schema": {
             "type": "object",
@@ -1150,6 +1252,8 @@ TOOL_SPECS = [
                                          "line of the message."},
                 "description": {"type": "string", "description": "The body of the pull request."},
                 "max_bytes": _MAX_BYTES,
+                "seat": _SEAT,
+                "sitting": _SITTING,
             },
             "required": ["repo", "branch", "message"],
             "additionalProperties": False,
@@ -1176,6 +1280,8 @@ TOOL_SPECS = [
                 "log_bytes": {"type": "integer",
                               "description": "The tail of each failed pipeline log to give. "
                                              "The default is 4096. The ceiling is 32768."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
             },
             "required": ["repo", "branch"],
             "additionalProperties": False,
@@ -1195,6 +1301,8 @@ TOOL_SPECS = [
                 "branch": _BRANCH,
                 "drop_branch": {"type": "boolean",
                                 "description": "True to remove the worktree and the branch."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
             },
             "required": ["repo", "branch"],
             "additionalProperties": False,
@@ -1207,19 +1315,27 @@ TOOLS = {spec["name"]: spec for spec in TOOL_SPECS}
 
 def call(bench, name, args):
     """Calls one tool by name. Gives (answer, refused)."""
-    spec = TOOLS.get(name)
-    if spec is None:
-        return {"refused": "unknown_tool", "tool": name, "known": sorted(TOOLS)}, True
     if args is None:
         args = {}
     if not isinstance(args, dict):
         return {"refused": "input", "reason": "the arguments must be an object"}, True
-    try:
-        return spec["function"](bench, args), False
-    except Refusal as exc:
-        return exc.data, True
-    except git.GitError as exc:
-        return {"refused": "git", "command": " ".join(exc.argv[:3]),
-                "reason": git.scrub(str(exc.stderr))[:600]}, True
-    except Exception as exc:  # A fault is an answer, and never a stack trace.
-        return {"refused": "error", "reason": git.scrub("%s: %s" % (type(exc).__name__, exc))[:600]}, True
+    spec = TOOLS.get(name)
+    if spec is None:
+        answer = {"refused": "unknown_tool", "tool": name, "known": sorted(TOOLS)}
+    else:
+        try:
+            answer = spec["function"](bench, args)
+            log_call(name, args)
+            return answer, False
+        except Refusal as exc:
+            answer = exc.data
+        except git.GitError as exc:
+            answer = {"refused": "git", "command": " ".join(exc.argv[:3]),
+                      "reason": git.scrub(str(exc.stderr))[:600]}
+        except Exception as exc:  # A fault is an answer, and never a stack trace.
+            answer = {"refused": "error",
+                      "reason": git.scrub("%s: %s" % (type(exc).__name__, exc))[:600]}
+    # A refusal gives the seat and the sitting of the call back.
+    answer.update(marks_of(args))
+    log_call(name, args, answer["refused"])
+    return answer, True

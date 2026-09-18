@@ -321,6 +321,85 @@ class TestDiscard(BenchCase):
         self.assertEqual(missing["refused"], "no_worktree")
 
 
+class TestNarrow(BenchCase):
+    """The narrow call: allow, seat and sitting."""
+
+    def test_read_with_allow_serves_the_path_and_refuses_another(self):
+        self.prepared()
+        answer = self.ok("read", branch="work", path="docs/a.txt", allow=["docs/**"])
+        self.assertEqual(answer["lines"][0]["text"], "alpha")
+        refused = self.refused("read", branch="work", path="src/app.py", allow=["docs/**"])
+        self.assertEqual(refused["refused"], "denied")
+        self.assertEqual(refused["path"], "src/app.py")
+        self.assertEqual(refused["allow"], ["docs/**"])
+
+    def test_read_with_an_empty_allow_refuses_every_path(self):
+        self.prepared()
+        answer = self.refused("read", branch="work", path="docs/a.txt", allow=[])
+        self.assertEqual(answer["refused"], "denied")
+        self.assertEqual(answer["allow"], [])
+
+    def test_edit_with_allow_refuses_a_path_outside_it_and_writes_nothing(self):
+        path = self.prepared()
+        answer = self.refused("edit", branch="work", path="src/app.py",
+                              old="MARKER_ONE = 'one'", new="MARKER_ONE = 'two'",
+                              allow=["docs/**"])
+        self.assertEqual(answer["refused"], "denied")
+        self.assertEqual(answer["allow"], ["docs/**"])
+        with open(os.path.join(path, "src/app.py"), encoding="utf-8") as handle:
+            self.assertIn("MARKER_ONE = 'one'", handle.read())
+        self.assertEqual(self.ok("status", branch="work")["dirty"], 0)
+
+    def test_find_tree_with_allow_lists_only_the_matching_paths(self):
+        self.prepared()
+        answer = self.ok("find", branch="work", mode="tree", depth=2, allow=["docs/**"])
+        paths = [entry["path"] for entry in answer["entries"]]
+        self.assertIn("docs", paths)
+        self.assertIn("docs/a.txt", paths)
+        self.assertNotIn("README.md", paths)
+        self.assertNotIn("src", paths)
+        self.assertNotIn("src/app.py", paths)
+        self.assertEqual(answer["dropped"], 0)
+
+    def test_find_grep_with_allow_matches_only_in_the_allowed_paths(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/todo.txt"), "TODO: a note\n")
+        answer = self.ok("find", branch="work", mode="grep", pattern="TODO",
+                         allow=["docs/**"])
+        self.assertEqual(answer["files"], [{"path": "docs/todo.txt", "count": 1}])
+        self.assertEqual([item["path"] for item in answer["lines"]], ["docs/todo.txt"])
+
+    def test_a_deny_glob_wins_over_an_allow_glob(self):
+        self.prepared()
+        answer = self.refused("read", branch="work", path="keys/server.pem",
+                              allow=["keys/**"])
+        self.assertEqual(answer["refused"], "denied")
+        self.assertEqual(answer["pattern"], "*.pem")
+        self.assertNotIn("allow", answer)
+
+    def test_a_refusal_gives_the_seat_and_the_sitting_back(self):
+        self.prepared()
+        answer = self.refused("read", branch="work", path="src/app.py",
+                              allow=["docs/**"], seat="clerk-1", sitting="42")
+        self.assertEqual(answer["seat"], "clerk-1")
+        self.assertEqual(answer["sitting"], "42")
+
+    def test_submit_with_a_seat_and_a_sitting_writes_the_trailers(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\ndelta\ncharlie\n")
+        answer = self.ok("submit", branch="work", message="change one line",
+                         seat="clerk-1", sitting="42")
+        message = util.git(["log", "-1", "--format=%B", answer["commit"]], cwd=path)
+        self.assertIn("Waymark-Seat: clerk-1", message)
+        self.assertIn("Waymark-Sitting: 42", message)
+
+    def test_the_other_tools_take_allow_and_ignore_it(self):
+        answer = self.ok("prepare", branch="work", allow=["docs/**"],
+                         seat="clerk-1", sitting="42")
+        self.assertTrue(answer["created"])
+        self.assertEqual(self.ok("status", branch="work", allow=[])["dirty"], 0)
+
+
 class TestInput(BenchCase):
 
     def test_an_unknown_repository_is_refused(self):

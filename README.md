@@ -144,14 +144,32 @@ person who lands their own branch. A value that parses as JSON is JSON
 (`wait=0`, `pull_request=false`); any other value is a text. It prints
 the answer and exits 1 on a refusal.
 
-## The mount in Gate
+## The row in waymark
 
-Mount the rig as the rig `bench`, so the tools come to a seat as
-`bench__prepare`, `bench__status`, `bench__find`, `bench__read`,
-`bench__edit`, `bench__pull`, `bench__submit`, `bench__feedback` and
-`bench__discard`. Gate
-gives the HTTP address of the rig. The engine calls `prepare` before a
+The engine holds one `mcp_server` row with the name `bench`. The
+transport is stdio. The command is
+`python3 -m bench --stdio --config …`. The `auth_env` is
+`BENCH_GIT_TOKEN`. The powers entries of the row name `find`, `read`,
+`edit` and `pull`. The tools `prepare`, `status`, `submit`, `feedback`
+and `discard` are the engine's own. The engine calls `prepare` before a
 sitting, so the model finds the worktree made.
+
+## The narrow call
+
+Each tool takes `seat` and `sitting`. Each one is a text. The rig
+writes both in its log line for the call. A refusal gives both back.
+On `submit` without `trailers`, the rig writes the trailers
+`Waymark-Seat` and `Waymark-Sitting` from them.
+
+`find`, `read` and `edit` also take `allow`: a list of globs in the
+`deny` grammar. A path must match one glob of the list. The rig
+refuses every other path with `denied` and the list. An empty list
+refuses every path. The `deny` globs come first, and a denied path
+keeps its `denied` answer with the `deny` glob. In `find`, a path that
+no glob matches is not in the answer, and it is not in `dropped`.
+
+The rig holds no seat and no rule between the calls. The engine judges
+the grant, and the rig obeys the arguments of the call.
 
 ## The tests
 
