@@ -12,10 +12,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - name: Install the rig and its dependency
+        run: uv sync
       - name: Set the git identity for the tests
         run: |
           git config --global user.name "waymark-bench-ci"
           git config --global user.email "bench@waymark.invalid"
           git config --global init.defaultBranch main
       - name: Run the tests
-        run: python -m unittest -v
+        run: uv run python -m unittest -v

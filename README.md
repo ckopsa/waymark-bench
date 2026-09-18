@@ -3,8 +3,13 @@
 The bench rig. It is a small MCP server over git. It holds a bare clone
 for each repository and a git worktree for each branch. It gives nine
 tools: `prepare`, `status`, `find`, `read`, `edit`, `pull`, `submit`,
-`feedback` and `discard`. It needs Python 3.11 and git, and no other
-dependency.
+`feedback` and `discard`. It needs Python 3.11, git, and one library:
+pydantic-settings, for the settings.
+
+```
+uv sync                      # makes .venv with the one dependency
+uv run python -m bench --http 8101 --config bench.json
+```
 
 ## Configuration
 
@@ -97,8 +102,8 @@ removes the credential from every message that it gives back.
 ## The two transports
 
 ```
-BENCH_GIT_TOKEN=... python -m bench --http 8101 --config bench.json
-BENCH_GIT_TOKEN=... python -m bench --stdio --config bench.json
+python -m bench --http 8101 --config bench.json
+python -m bench --stdio --config bench.json
 ```
 
 The HTTP transport listens on `/mcp/`. It answers JSON-RPC 2.0 on POST:

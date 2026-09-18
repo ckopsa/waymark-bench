@@ -2,11 +2,12 @@
 
 Two forges are known: Bitbucket Cloud and GitHub. The forge is read from
 the clone URL, or named in the land block of bench.json. The credential
-comes from the environment: BENCH_BITBUCKET_USER and BENCH_BITBUCKET_TOKEN
-for Bitbucket (an app password), BENCH_GITHUB_TOKEN or BENCH_GIT_TOKEN for
-GitHub. On macOS, Bitbucket also reads the keychain item for bitbucket.org
-when the environment has nothing. The rig never writes a credential to
-disk, and it removes the credentials from every message that it gives.
+comes from the settings (settings.py): BENCH_BITBUCKET_USER and
+BENCH_BITBUCKET_TOKEN for Bitbucket (an app password), BENCH_GITHUB_TOKEN
+or BENCH_GIT_TOKEN for GitHub. On macOS, Bitbucket also reads the keychain
+item for bitbucket.org when the settings have nothing. The rig never
+writes a credential to disk, and it removes the credentials from every
+message that it gives.
 
 Every answer of a forge is a plain dictionary in one shape, so that the
 feedback tool can turn Bitbucket and GitHub into the same findings.
@@ -14,13 +15,14 @@ feedback tool can turn Bitbucket and GitHub into the same findings.
 
 import base64
 import json
-import os
 import re
 import subprocess
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from . import settings
 
 
 TIMEOUT = 60
@@ -33,13 +35,8 @@ class ForgeError(Exception):
 
 
 def scrub(text):
-    """Removes every known credential from a text."""
-    text = text or ""
-    for name in ("BENCH_BITBUCKET_TOKEN", "BENCH_GITHUB_TOKEN", "BENCH_GIT_TOKEN"):
-        value = os.environ.get(name)
-        if value:
-            text = text.replace(value, "***")
-    return text
+    """Removes every secret from a text."""
+    return settings.scrub(text)
 
 
 def detect(clone_url):
@@ -128,8 +125,9 @@ class Bitbucket(Client):
     api = "https://api.bitbucket.org/2.0/repositories"
 
     def credential(self):
-        user = os.environ.get("BENCH_BITBUCKET_USER")
-        token = os.environ.get("BENCH_BITBUCKET_TOKEN")
+        current = settings.load()
+        user = current.bitbucket_user
+        token = current.secret("bitbucket_token")
         if user and token:
             return user, token
         found = _keychain_bitbucket()
@@ -281,7 +279,8 @@ class GitHub(Client):
     api = "https://api.github.com/repos"
 
     def credential(self):
-        token = os.environ.get("BENCH_GITHUB_TOKEN") or os.environ.get("BENCH_GIT_TOKEN")
+        current = settings.load()
+        token = current.secret("github_token") or current.secret("git_token")
         if not token:
             raise ForgeError("no GitHub credential: set BENCH_GITHUB_TOKEN or BENCH_GIT_TOKEN")
         return token

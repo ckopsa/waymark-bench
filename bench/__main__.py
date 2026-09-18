@@ -15,18 +15,19 @@ import sys
 import urllib.request
 
 from . import config as config_module
-from . import mcp
+from . import mcp, settings
 from .tools import Bench
 
 
 def parse_args(argv):
+    current = settings.load()
     parser = argparse.ArgumentParser(prog="bench", description="The bench rig: git worktrees over MCP.")
-    parser.add_argument("--config", default=os.environ.get("BENCH_CONFIG", "bench.json"),
-                        help="The path of bench.json.")
+    parser.add_argument("--config", default=current.config,
+                        help="The path of bench.json. The setting is BENCH_CONFIG.")
     parser.add_argument("--http", type=int, metavar="PORT",
                         help="Serve MCP over HTTP at /mcp/ on this port.")
-    parser.add_argument("--host", default=os.environ.get("BENCH_HOST", "127.0.0.1"),
-                        help="The address to listen on. The default is 127.0.0.1.")
+    parser.add_argument("--host", default=current.host,
+                        help="The address to listen on. The default is 127.0.0.1. The setting is BENCH_HOST.")
     parser.add_argument("--stdio", action="store_true",
                         help="Serve MCP over stdin and stdout.")
     return parser.parse_args(argv)
@@ -37,8 +38,9 @@ def parse_call_args(argv):
     parser.add_argument("tool", help="The tool name: prepare, status, find, read, edit, pull, "
                                      "submit, feedback or discard.")
     parser.add_argument("pairs", nargs="*", metavar="key=value", help="The arguments of the tool.")
-    parser.add_argument("--url", default=os.environ.get("BENCH_URL", "http://127.0.0.1:8101/mcp/"),
-                        help="The address of the rig. The default is http://127.0.0.1:8101/mcp/.")
+    parser.add_argument("--url", default=settings.load().url,
+                        help="The address of the rig. The default is http://127.0.0.1:8101/mcp/. "
+                             "The setting is BENCH_URL.")
     parser.add_argument("--timeout", type=int, default=3900, help="The seconds to wait for the answer.")
     return parser.parse_args(argv)
 

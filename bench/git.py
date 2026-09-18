@@ -1,13 +1,16 @@
 """Thin wrappers around the git command.
 
 Every call has a timeout and a working directory. The git credential
-comes from the environment variable BENCH_GIT_TOKEN through a credential
-helper. The rig never writes the credential to disk, and it removes the
+comes from the setting BENCH_GIT_TOKEN (see settings.py) through a
+credential helper that reads it from the environment of the git call.
+The rig never writes the credential to disk, and it removes the
 credential from every message that it gives back.
 """
 
 import os
 import subprocess
+
+from . import settings
 
 
 DEFAULT_TIMEOUT = 120
@@ -39,40 +42,40 @@ class GitError(Exception):
 
 
 def scrub(text):
-    """Removes the token from a text."""
-    if not text:
-        return text or ""
-    token = os.environ.get("BENCH_GIT_TOKEN")
-    if token:
-        text = text.replace(token, "***")
-    return text
+    """Removes every secret from a text."""
+    return settings.scrub(text)
 
 
-def config_args():
+def config_args(token=None):
     """Gives the -c flags for every call."""
     args = list(IDENTITY) + ["-c", "advice.detachedHead=false"]
-    if os.environ.get("BENCH_GIT_TOKEN"):
+    if token:
         # An empty value first: it drops the helpers of the system.
         args += ["-c", "credential.helper=", "-c", "credential.helper=" + CREDENTIAL_HELPER]
     return args
 
 
-def environment():
+def environment(token=None):
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_ASKPASS"] = "true"
     env["LC_ALL"] = "C"
+    if token:
+        env["BENCH_GIT_TOKEN"] = token  # The helper reads it here, wherever it came from.
+    else:
+        env.pop("BENCH_GIT_TOKEN", None)
     return env
 
 
 def run(argv, cwd=None, timeout=DEFAULT_TIMEOUT, check=True):
     """Runs one git command. Gives (returncode, stdout, stderr)."""
-    command = ["git"] + config_args() + list(argv)
+    token = settings.load().secret("git_token")
+    command = ["git"] + config_args(token) + list(argv)
     try:
         proc = subprocess.run(
             command,
             cwd=cwd,
-            env=environment(),
+            env=environment(token),
             timeout=timeout,
             capture_output=True,
             text=True,
