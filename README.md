@@ -165,6 +165,37 @@ reason "the bench restarted", and the next `submit` on that branch lands
 again. Check `make status` and the landings under `<data_dir>/<repo>/landings/`
 before `make update`.
 
+## The rig as a container
+
+The image is `ghcr.io/ckopsa/waymark-bench`, built for arm64 by
+`.github/workflows/image.yml` on each push to main that changes the rig,
+and tagged with the short commit sha and `latest`. A pull request
+builds the image and publishes nothing.
+
+The image holds a configuration with the data directory only,
+`/etc/bench/bench.json` with `data_dir` `/data`. Repositories come from
+the engine through `enroll` and persist in `/data/repos.json`. Mount a
+volume at `/data`: it holds the clones, the worktrees and the landings.
+A container that loses it clones again on the next `enroll` or
+`prepare`.
+
+The job gives the container these things:
+
+| what | how |
+|---|---|
+| the port | publish 8101; the rig binds `0.0.0.0` in the image |
+| the volume | a host volume at `/data` |
+| the git credential | `BENCH_GIT_TOKEN` in the environment |
+| the forge token | `BENCH_GITHUB_TOKEN` (or `BENCH_BITBUCKET_USER` and `BENCH_BITBUCKET_TOKEN`) when `feedback` reads pull requests and pipelines |
+| the health check | `GET /health` answers 200 |
+
+The deploy is one Nomad variable. The workflow writes
+`nomad/jobs/waymark-bench/deploy` with `image_tag`, and the job template
+reads it and restarts the task on the new tag. The workflow needs
+`NOMAD_ADDR` and `NOMAD_TOKEN` in the repository's secrets; without them
+it pushes the image and says that nothing is rolled. `make image` and
+`make deploy` do the same from a laptop, with the same tag.
+
 ## The call form
 
 ```
