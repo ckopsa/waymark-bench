@@ -85,6 +85,7 @@ class Landing:
             "rebased": False,
             "pushed": False,
             "pull_request": None,
+            "auto_merge": None,
             "failed_step": None,
             "reason": None,
             "steps": [],
@@ -202,6 +203,7 @@ class Landing:
                 "rebased": False,
                 "pushed": False,
                 "pull_request": None,
+                "auto_merge": None,
                 "failed_step": None,
                 "reason": None,
                 "steps": [],
@@ -331,6 +333,17 @@ class Landing:
                 return
             with self.lock:
                 self.state["pull_request"] = result
+            if land.pull_request.get("auto_merge"):
+                # The forge merges the pull request when the checks are green.
+                # A forge that refuses is a finding in feedback, not a failure:
+                # the change is pushed and the pull request is open.
+                try:
+                    client.enable_auto_merge(result)
+                    auto = {"enabled": True, "refused": None}
+                except forge.ForgeError as exc:
+                    auto = {"enabled": False, "refused": git.scrub(str(exc))}
+                with self.lock:
+                    self.state["auto_merge"] = auto
             self.finish(item, True, exit_code=0, output=json.dumps(result))
 
         with self.lock:

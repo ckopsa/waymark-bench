@@ -175,6 +175,9 @@ class Bitbucket(Client):
     def pull_request(self, number):
         return self._pr(self.request("GET", self.url("/pullrequests/%s" % number)))
 
+    def enable_auto_merge(self, pr):
+        raise ForgeError("bitbucket does not enable auto-merge on a pull request")
+
     def _pr(self, data):
         approvals = [p.get("user", {}).get("display_name") for p in data.get("participants") or []
                      if p.get("approved")]
@@ -189,6 +192,7 @@ class Bitbucket(Client):
             "source": ((data.get("source") or {}).get("branch") or {}).get("name"),
             "target": ((data.get("destination") or {}).get("branch") or {}).get("name"),
             "head": ((data.get("source") or {}).get("commit") or {}).get("hash"),
+            "node_id": None,
             "approvals": [name for name in approvals if name],
             "changes_requested": [name for name in changes if name],
             "open_tasks": data.get("task_count"),
@@ -277,6 +281,7 @@ class Bitbucket(Client):
 class GitHub(Client):
     provider = "github"
     api = "https://api.github.com/repos"
+    graphql_api = "https://api.github.com/graphql"
 
     def credential(self):
         current = settings.load()
@@ -312,6 +317,30 @@ class GitHub(Client):
     def pull_request(self, number):
         return self._pr(self.request("GET", self.url("/pulls/%s" % number)))
 
+    def graphql(self, query, variables):
+        """Asks the GraphQL API. GitHub answers 200 with `errors`, so the
+        errors are a refusal here too."""
+        data = self.request("POST", self.graphql_api,
+                            {"query": query, "variables": variables})
+        errors = data.get("errors") or []
+        if errors:
+            raise ForgeError("github refused: %s" % "; ".join(
+                str(item.get("message") or item) for item in errors))
+        return data.get("data") or {}
+
+    def enable_auto_merge(self, pr):
+        """Turns auto-merge on for one pull request: the forge merges it when
+        the checks are green. The merge method is the repository's default. A
+        repository that does not allow auto-merge refuses."""
+        node = pr.get("node_id")
+        if not node:
+            node = self.pull_request(pr.get("number")).get("node_id")
+        if not node:
+            raise ForgeError("github gave no node id for pull request %s" % pr.get("number"))
+        self.graphql("mutation($id:ID!){enablePullRequestAutoMerge(input:{pullRequestId:$id})"
+                     "{pullRequest{number}}}", {"id": node})
+        return True
+
     def _pr(self, data):
         state = data.get("state") or ""
         if data.get("merged") or data.get("merged_at"):
@@ -325,6 +354,7 @@ class GitHub(Client):
             "source": (data.get("head") or {}).get("ref"),
             "target": (data.get("base") or {}).get("ref"),
             "head": (data.get("head") or {}).get("sha"),
+            "node_id": data.get("node_id"),
             "approvals": [],
             "changes_requested": [],
             "open_tasks": None,

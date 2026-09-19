@@ -951,6 +951,11 @@ def feedback(bench, args):
         findings.append({"source": "review", "severity": "error",
                          "message": "changes requested by %s" % ", ".join(pr["changes_requested"]),
                          "url": pr.get("url")})
+    auto = (item.state.get("auto_merge") if item else None) or {}
+    if auto.get("refused"):
+        findings.append({"source": "auto_merge", "severity": "warning",
+                         "message": "auto-merge is not on: %s" % auto["refused"],
+                         "url": pr.get("url") if pr else None})
 
     pipelines = attempt("pipelines", lambda: client.pipelines(branch), [])
     answer["pipelines"] = pipelines[:5]

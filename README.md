@@ -88,7 +88,8 @@ worktree. A step with `commit` commits what it changed (a formatter).
         ],
         "env": {"DOCKER_HOST": "unix://~/.colima/default/docker.sock"},
         "pull_request": {"provider": "bitbucket", "workspace": "acme",
-                         "repo": "app", "close_source_branch": true}
+                         "repo": "app", "close_source_branch": true,
+                         "auto_merge": false}
       }
     }
   }
@@ -99,7 +100,12 @@ worktree. A step with `commit` commits what it changed (a formatter).
 names `rebase`, `push` and `pull_request` are the rig's own steps. `env`
 is added to the environment of every step; a `~` is expanded. The
 `pull_request` block names the forge (`bitbucket` or `github`); with
-`true` the forge is read from the clone URL.
+`true` the forge is read from the clone URL. `close_source_branch`
+deletes the branch on the merge. `auto_merge` turns auto-merge on for the
+pull request: the forge merges it when the checks are green, with the
+merge method of the repository. It defaults to false, and only GitHub
+does it. A forge that refuses auto-merge gives a finding `auto_merge` in
+`feedback`; the landing keeps the pull request.
 
 The landing runs in the background. `submit` waits up to `wait` seconds
 (the default is 600) and gives `landing.steps`: one entry for each step,
@@ -113,8 +119,8 @@ on disk under `<data_dir>/<repo>/landings/`, so it outlives a restart.
 and its state, the newest pipelines with the log of each failed step, the
 commit statuses (a quality gate is one), and the review comments. Every
 item also comes as one finding: a `source` (`landing`, `pipeline`,
-`status`, `review`, `pull_request`), a `severity`, a `message`, and the
-`path:line` locations it names. A source the rig cannot reach is named in
+`status`, `review`, `pull_request`, `auto_merge`), a `severity`, a
+`message`, and the `path:line` locations it names. A source the rig cannot reach is named in
 `unavailable`; the answer never fails for it.
 
 ## The credential

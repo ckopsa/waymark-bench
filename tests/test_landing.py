@@ -355,13 +355,22 @@ class TestLandingConfig(unittest.TestCase):
 
 GITHUB_PR = {"number": 7, "html_url": "https://github.com/o/r/pull/7", "state": "open",
              "title": "change one line", "head": {"ref": "work", "sha": "abc123"},
-             "base": {"ref": "main"}}
+             "base": {"ref": "main"}, "node_id": "PR_node_7"}
+GRAPHQL = "https://api.github.com/graphql"
+AUTO_MERGE_ON = {"data": {"enablePullRequestAutoMerge": {"pullRequest": {"number": 7}}}}
 
 
 class TestPullRequestAndFeedback(LandingCase):
 
     def github(self):
         return self.make({"stages": [], "pull_request": {"provider": "github", "owner": "o", "repo": "r"}})
+
+    def github_auto_merge(self):
+        return self.make({"stages": [], "pull_request": {
+            "provider": "github", "owner": "o", "repo": "r", "auto_merge": True}})
+
+    def graphql_calls(self):
+        return [body for method, path, body in self.calls if path == GRAPHQL]
 
     def test_the_landing_opens_the_pull_request_one_time(self):
         self.github()
@@ -384,6 +393,55 @@ class TestPullRequestAndFeedback(LandingCase):
         again = self.ok("submit", branch="work", message="two")
         self.assertFalse(again["landing"]["pull_request"]["created"])
         self.assertEqual([m for m, _, _ in self.calls], ["GET"])
+
+    def test_auto_merge_turns_auto_merge_on_for_the_pull_request(self):
+        self.github_auto_merge()
+        path = self.prepared()
+        self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR),
+                        GRAPHQL: ("POST", AUTO_MERGE_ON)}
+        self.change(path)
+        answer = self.ok("submit", branch="work", message="change one line")
+        landing = answer["landing"]
+        self.assertEqual(landing["steps"][-1]["state"], "passed")
+        self.assertEqual(landing["pull_request"]["number"], 7)
+        self.assertEqual(landing["auto_merge"], {"enabled": True, "refused": None})
+        asked = self.graphql_calls()
+        self.assertEqual(len(asked), 1)
+        self.assertIn("enablePullRequestAutoMerge", asked[0]["query"])
+        self.assertEqual(asked[0]["variables"], {"id": "PR_node_7"})
+
+    def test_a_refused_auto_merge_is_a_finding_and_keeps_the_pull_request(self):
+        self.github_auto_merge()
+        path = self.prepared()
+        refusal = {"errors": [{"message": "Pull request Auto merge is not allowed "
+                                          "for this repository"}]}
+        self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR),
+                        GRAPHQL: ("POST", refusal)}
+        self.change(path)
+        answer = self.ok("submit", branch="work", message="change one line")
+        landing = answer["landing"]
+        self.assertEqual(landing["steps"][-1]["state"], "passed")
+        self.assertEqual(landing["pull_request"]["number"], 7)
+        self.assertFalse(landing["auto_merge"]["enabled"])
+        self.assertIn("not allowed", landing["auto_merge"]["refused"])
+        self.answers = {"/pulls?": ("GET", [GITHUB_PR])}
+        feedback = self.ok("feedback", branch="work")
+        self.assertEqual(feedback["pull_request"]["number"], 7)
+        found = [f for f in feedback["findings"] if f["source"] == "auto_merge"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["severity"], "warning")
+        self.assertIn("not allowed", found[0]["message"])
+        self.assertEqual(found[0]["url"], "https://github.com/o/r/pull/7")
+
+    def test_no_auto_merge_in_the_block_asks_the_forge_for_none(self):
+        self.github()
+        path = self.prepared()
+        self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR)}
+        self.change(path)
+        answer = self.ok("submit", branch="work", message="change one line")
+        self.assertEqual(answer["landing"]["pull_request"]["number"], 7)
+        self.assertIsNone(answer["landing"]["auto_merge"])
+        self.assertEqual(self.graphql_calls(), [])
 
     def test_pull_request_false_lands_without_one(self):
         self.github()
