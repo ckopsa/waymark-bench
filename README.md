@@ -1,10 +1,10 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives nine
+for each repository and a git worktree for each branch. It gives twelve
 tools: `prepare`, `status`, `find`, `read`, `edit`, `pull`, `submit`,
-`feedback` and `discard`. It needs Python 3.11, git, and one library:
-pydantic-settings, for the settings.
+`feedback`, `discard`, `enroll`, `repos` and `unenroll`. It needs Python
+3.11, git, and one library: pydantic-settings, for the settings.
 
 ```
 uv sync                      # makes .venv with the one dependency
@@ -32,6 +32,37 @@ The key is the repository's name as the forge spells it, `owner/name`
 (the engine names it so), or a plain name. The rig makes
 `<data_dir>/<repo>/bare.git` and `<data_dir>/<repo>/wt/<branch>/`. A path that matches a `deny` glob, or
 that goes out of the worktree, is never served.
+
+The file can hold `data_dir` only. The repositories then come from the
+engine: it calls `enroll` for each one. The rig holds those entries in
+`<data_dir>/repos.json`, and it writes that file itself. The rig reads
+bench.json first, and it reads `repos.json` after it. An entry of
+`repos.json` wins over an entry of bench.json with the same name.
+
+## The enrollment
+
+The rig holds a mirror of the engine's rows. It is not a second ledger.
+Only the engine calls these three tools. Put them in no powers entry.
+
+`enroll` puts one repository on the rig. Give `repo` (the name) and
+`clone_url`. Give `default_branch` (the default is `main`), `deny` (the
+default is the rig's list) and `land` (the landing block, as bench.json
+spells it). The rig makes the bare clone one time, then it writes the
+entry in `repos.json`. The answer gives the entry, `bare` (the path of
+the clone) and `cloned` (true when this call made the clone). An
+`enroll` for a name the rig holds replaces the entry and keeps the
+clone. A clone that fails is a refusal `clone_failed` with the reason
+from git, and the rig writes no entry.
+
+`repos` gives every repository on the rig, by name. Each one gives its
+entry, `bare_exists` for the clone on the disk, and `source`: `file` for
+a repository from `enroll`, `config` for a repository from bench.json.
+
+`unenroll` takes one repository off the rig. Give `repo`. The rig
+removes the entry from `repos.json`. The rig keeps the clone and the
+worktrees on the disk, and the answer gives that path as `kept`. A
+repository from bench.json is a refusal `config_repo`: remove it from
+bench.json.
 
 ## The landing
 
@@ -151,8 +182,8 @@ The engine holds one `mcp_server` row with the name `bench`. The
 transport is stdio. The command is
 `python3 -m bench --stdio --config …`. The `auth_env` is
 `BENCH_GIT_TOKEN`. The powers entries of the row name `find`, `read`,
-`edit` and `pull`. The tools `prepare`, `status`, `submit`, `feedback`
-and `discard` are the engine's own. The engine calls `prepare` before a
+`edit` and `pull`. The tools `prepare`, `status`, `submit`, `feedback`,
+`discard`, `enroll`, `repos` and `unenroll` are the engine's own. The engine calls `prepare` before a
 sitting, so the model finds the worktree made.
 
 ## The narrow call

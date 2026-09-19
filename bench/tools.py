@@ -1,4 +1,4 @@
-"""The eight tools of the bench.
+"""The twelve tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -13,7 +13,7 @@ import shutil
 import sys
 import threading
 
-from . import forge, git, landing as landing_module
+from . import config as config_module, forge, git, landing as landing_module
 
 
 DEFAULT_MAX_BYTES = 16384
@@ -200,6 +200,8 @@ class Bench:
         self.config = config
         self._locks = {}
         self._guard = threading.Lock()
+        # bench.json first, then the repositories that the engine enrolled.
+        config.read_repos()
         self.landings = landing_module.Landings(self)
 
     def no_landing(self, repo, branch):
@@ -229,6 +231,10 @@ class Bench:
     def bare_dir(self, name):
         return os.path.join(self.repo_dir(name), "bare.git")
 
+    def bare_exists(self, name):
+        """Tells if the bare clone of one repository is on the disk."""
+        return os.path.isdir(os.path.join(self.bare_dir(name), "objects"))
+
     def wt_dir(self, name, branch):
         return os.path.join(self.repo_dir(name), "wt", *branch.split("/"))
 
@@ -257,7 +263,7 @@ class Bench:
     def ensure_bare(self, repo):
         """Makes the bare clone one time. Gives its path."""
         bare = self.bare_dir(repo.name)
-        if os.path.isdir(os.path.join(bare, "objects")):
+        if self.bare_exists(repo.name):
             return bare
         os.makedirs(os.path.dirname(bare), exist_ok=True)
         git.run(["clone", "--bare", repo.clone_url, bare], timeout=600)
@@ -1042,6 +1048,74 @@ def discard(bench, args):
                 "dropped": False}
 
 
+def _repo_name(args):
+    """Gives the repository name of an enrollment call, or refuses."""
+    name = _text(args, "repo", required=True)
+    if not REPO_CHARS.match(name):
+        raise Refusal("repo", repo=name, reason="the repository name is not permitted")
+    return name
+
+
+def enroll(bench, args):
+    """Puts one repository on the rig, and makes its clone."""
+    name = _repo_name(args)
+    clone_url = _text(args, "clone_url", required=True)
+    default_branch = check_branch(_text(args, "default_branch", default="main"))
+    deny = _globs(args, "deny")
+    try:
+        land = config_module.land_from_dict(name, args.get("land"), default_branch)
+    except config_module.ConfigError as exc:
+        raise Refusal("input", field="land", reason=str(exc))
+    entry = config_module.RepoConfig(
+        name=name, clone_url=clone_url, default_branch=default_branch,
+        deny=deny, land=land, source="file")
+    with bench.lock(name):
+        cloned = not bench.bare_exists(name)
+        try:
+            bare = bench.ensure_bare(entry)
+        except git.GitError as exc:
+            # The entry stays out of the file. An entry from before stays.
+            if cloned:
+                shutil.rmtree(bench.bare_dir(name), ignore_errors=True)
+            raise Refusal("clone_failed", repo=name,
+                          reason=str(exc.stderr).strip()[-600:])
+        bench.config.add_repo(entry)
+        bench.config.write_repos()
+    answer = entry.to_dict()
+    answer["bare"] = bare
+    answer["cloned"] = cloned
+    return answer
+
+
+def repos(bench, args):
+    """Gives every repository on the rig, and where its entry comes from."""
+    items = []
+    for name in bench.config.names():
+        entry = bench.config.repos[name]
+        item = entry.to_dict()
+        item["bare_exists"] = bench.bare_exists(name)
+        item["source"] = entry.source
+        items.append(item)
+    return {"repos": items}
+
+
+def unenroll(bench, args):
+    """Takes one repository off the rig. It keeps the clone."""
+    name = _repo_name(args)
+    with bench.lock(name):
+        entry = bench.config.repos.get(name)
+        if entry is None:
+            raise Refusal("repo", repo=name, reason="the repository is not on the bench",
+                          known=bench.config.names())
+        if entry.source != "file":
+            raise Refusal("config_repo", repo=name,
+                          reason="the repository comes from bench.json",
+                          remedy="remove it from bench.json, then restart the rig")
+        bench.config.drop_repo(name)
+        bench.config.write_repos()
+    return {"repo": name, "kept": bench.bare_dir(name)}
+
+
 # ---------------------------------------------------------------- schemas
 
 _REPO = {"type": "string", "description": "The repository name in bench.json, as the forge spells it: owner/name, or a plain name."}
@@ -1055,6 +1129,8 @@ _ALLOW = {
     "items": {"type": "string"},
     "description": "The globs that the call may touch. A path that no glob matches is refused.",
 }
+_REPO_NAME = {"type": "string",
+              "description": "The repository name, as the forge spells it: owner/name, or a plain name."}
 _SEAT = {"type": "string", "description": "The seat that makes the call. The rig writes it in its log."}
 _SITTING = {"type": "string",
             "description": "The sitting that makes the call. The rig writes it in its log."}
@@ -1309,6 +1385,69 @@ TOOL_SPECS = [
                 "sitting": _SITTING,
             },
             "required": ["repo", "branch"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "enroll",
+        "function": enroll,
+        "description": (
+            "Puts one repository on the rig. Give the clone URL. The rig writes the entry "
+            "in repos.json under the data directory, and it makes the bare clone one time. "
+            "An enroll for a name the rig holds replaces the entry and keeps the clone: "
+            "the answer gives cloned false. A clone that fails is a refusal clone_failed, "
+            "and the rig writes no entry. The engine calls this tool; put it in no powers "
+            "entry."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO_NAME,
+                "clone_url": {"type": "string",
+                              "description": "The URL that git clones: https or ssh."},
+                "default_branch": {"type": "string",
+                                   "description": "The default branch. The default is main."},
+                "deny": {"type": "array", "items": {"type": "string"},
+                         "description": "The globs that the rig never serves. The default is "
+                                        "*.pem, *.key, .env* and **/secrets/**."},
+                "land": {"type": "object",
+                         "description": "The landing block, as bench.json spells it: target, "
+                                        "rebase, stages, env and pull_request."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "clone_url"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "repos",
+        "function": repos,
+        "description": (
+            "Gives every repository on the rig, by name. Each one gives its entry, "
+            "bare_exists for the clone on the disk, and source: file for a repository from "
+            "enroll, config for a repository from bench.json. The engine calls this tool; "
+            "put it in no powers entry."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {"seat": _SEAT, "sitting": _SITTING},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "unenroll",
+        "function": unenroll,
+        "description": (
+            "Takes one repository off the rig. The rig removes the entry from repos.json, "
+            "and it keeps the clone and the worktrees on the disk. A repository from "
+            "bench.json is a refusal config_repo: remove it from bench.json. The engine "
+            "calls this tool; put it in no powers entry."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {"repo": _REPO_NAME, "seat": _SEAT, "sitting": _SITTING},
+            "required": ["repo"],
             "additionalProperties": False,
         },
     },

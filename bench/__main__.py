@@ -36,7 +36,7 @@ def parse_args(argv):
 def parse_call_args(argv):
     parser = argparse.ArgumentParser(prog="bench call", description="Call one tool of a running rig.")
     parser.add_argument("tool", help="The tool name: prepare, status, find, read, edit, pull, "
-                                     "submit, feedback or discard.")
+                                     "submit, feedback, discard, enroll, repos or unenroll.")
     parser.add_argument("pairs", nargs="*", metavar="key=value", help="The arguments of the tool.")
     parser.add_argument("--url", default=settings.load().url,
                         help="The address of the rig. The default is http://127.0.0.1:8101/mcp/. "

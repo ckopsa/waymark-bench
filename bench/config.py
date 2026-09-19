@@ -1,6 +1,11 @@
 """The configuration file of the bench.
 
 The file is JSON. It gives a data directory and a map of repositories.
+The file can give the data directory only: the engine then puts each
+repository on the rig with the tool enroll, and the rig holds the
+entries in <data_dir>/repos.json. An entry of that file wins over an
+entry of bench.json with the same name.
+
 The git credential is never in the file. Git reads the credential from
 the environment variable BENCH_GIT_TOKEN, or from the SSH agent.
 """
@@ -10,6 +15,7 @@ import os
 import re
 
 
+REPOS_FILE = "repos.json"
 DEFAULT_DENY = ["*.pem", "*.key", ".env*", "**/secrets/**"]
 DEFAULT_STEP_TIMEOUT = 1800
 CEILING_STEP_TIMEOUT = 7200
@@ -58,8 +64,10 @@ class LandConfig:
 class RepoConfig:
     """One repository on the bench."""
 
-    def __init__(self, name, clone_url, default_branch="main", deny=None, land=None):
+    def __init__(self, name, clone_url, default_branch="main", deny=None, land=None,
+                 source="config"):
         self.name = name
+        self.source = source
         self.clone_url = clone_url
         self.default_branch = default_branch or "main"
         self.deny = list(deny) if deny is not None else list(DEFAULT_DENY)
@@ -76,11 +84,60 @@ class RepoConfig:
 
 
 class Config:
-    """The full configuration."""
+    """The full configuration: bench.json, then repos.json."""
 
-    def __init__(self, data_dir, repos):
+    def __init__(self, data_dir, repos, file_repos=None):
         self.data_dir = data_dir
-        self.repos = repos
+        self.config_repos = dict(repos)
+        self.file_repos = dict(file_repos or {})
+        self.repos = {}
+        self.merge()
+
+    def merge(self):
+        """Puts the two sources together. The file wins over bench.json."""
+        self.repos = dict(self.config_repos)
+        self.repos.update(self.file_repos)
+
+    def repos_path(self):
+        """Gives the path of the file that holds the enrolled repositories."""
+        return os.path.join(self.data_dir, REPOS_FILE)
+
+    def read_repos(self):
+        """Reads repos.json. A missing file is no error."""
+        path = self.repos_path()
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except OSError:
+            return self.repos
+        except ValueError as exc:
+            raise ConfigError("cannot parse %s: %s" % (path, exc))
+        if not isinstance(data, dict):
+            raise ConfigError("%s must be a JSON object" % path)
+        self.file_repos = repos_from_dict(data.get("repos") or {}, source="file")
+        self.merge()
+        return self.repos
+
+    def write_repos(self):
+        """Writes repos.json: one temporary file, then one replace."""
+        path = self.repos_path()
+        os.makedirs(self.data_dir, exist_ok=True)
+        data = {"repos": {name: repo.to_dict() for name, repo in self.file_repos.items()}}
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=1, sort_keys=True)
+        os.replace(tmp, path)
+
+    def add_repo(self, repo):
+        """Puts one repository in the file source. It replaces the entry."""
+        repo.source = "file"
+        self.file_repos[repo.name] = repo
+        self.merge()
+
+    def drop_repo(self, name):
+        """Takes one repository out of the file source."""
+        self.file_repos.pop(name, None)
+        self.merge()
 
     def repo(self, name):
         """Gives the repository, or raises ConfigError."""
@@ -103,11 +160,15 @@ def from_dict(data, base_dir=None):
     data_dir = os.path.expanduser(str(data_dir))
     if base_dir and not os.path.isabs(data_dir):
         data_dir = os.path.join(base_dir, data_dir)
-    repos_in = data.get("repos") or {}
-    if not isinstance(repos_in, dict):
+    return Config(os.path.abspath(data_dir), repos_from_dict(data.get("repos") or {}))
+
+
+def repos_from_dict(data, source="config"):
+    """Makes the repositories from a map of name to entry."""
+    if not isinstance(data, dict):
         raise ConfigError("repos must be a JSON object")
     repos = {}
-    for name, spec in repos_in.items():
+    for name, spec in data.items():
         if not isinstance(spec, dict):
             raise ConfigError("repo %s must be a JSON object" % name)
         clone_url = spec.get("clone_url")
@@ -120,8 +181,9 @@ def from_dict(data, base_dir=None):
             default_branch=default_branch,
             deny=spec.get("deny"),
             land=land_from_dict(name, spec.get("land"), default_branch),
+            source=source,
         )
-    return Config(os.path.abspath(data_dir), repos)
+    return repos
 
 
 def load(path):

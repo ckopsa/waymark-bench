@@ -1,11 +1,12 @@
 """One test for each tool, and one test for each refusal."""
 
+import json
 import os
 import shutil
 import tempfile
 import unittest
 
-from bench import tools
+from bench import config as config_module, tools
 from bench.tools import Bench
 
 from . import util
@@ -424,6 +425,112 @@ class TestInput(BenchCase):
         answer, refused = tools.call(self.bench, "explode", {})
         self.assertTrue(refused)
         self.assertEqual(answer["refused"], "unknown_tool")
+
+
+class TestEnroll(BenchCase):
+    """The engine puts a repository on the rig, and takes it off again."""
+
+    def repos_file(self):
+        return os.path.join(self.config.data_dir, "repos.json")
+
+    def file_entries(self):
+        """Gives the entries of repos.json."""
+        with open(self.repos_file(), "r", encoding="utf-8") as handle:
+            return json.load(handle)["repos"]
+
+    def fresh(self):
+        """Gives a second bench over the same data directory."""
+        return Bench(util.make_config(self.root, self.clone_url))
+
+    def test_enroll_clones_and_a_new_bench_serves_the_repository(self):
+        answer = self.ok("enroll", repo="acme/second", clone_url=self.clone_url)
+        self.assertTrue(answer["cloned"])
+        self.assertEqual(answer["name"], "acme/second")
+        self.assertEqual(answer["default_branch"], "main")
+        self.assertEqual(answer["deny"], config_module.DEFAULT_DENY)
+        self.assertIsNone(answer["land"])
+        self.assertTrue(os.path.isdir(os.path.join(answer["bare"], "objects")))
+        self.assertIn("acme/second", self.file_entries())
+        bench = self.fresh()
+        made, refused = tools.call(bench, "prepare", {"repo": "acme/second", "branch": "work"})
+        self.assertFalse(refused, made)
+        self.assertTrue(made["created"])
+        state, refused = tools.call(bench, "status", {"repo": "acme/second", "branch": "work"})
+        self.assertFalse(refused, state)
+        self.assertEqual(state["dirty"], 0)
+
+    def test_enroll_again_replaces_the_entry_and_keeps_the_clone(self):
+        self.ok("enroll", repo="second", clone_url=self.clone_url)
+        again = self.ok("enroll", repo="second", clone_url=self.clone_url,
+                        default_branch="trunk", deny=["*.txt"])
+        self.assertFalse(again["cloned"])
+        self.assertEqual(again["default_branch"], "trunk")
+        self.assertEqual(again["deny"], ["*.txt"])
+        entry = self.bench.config.repo("second")
+        self.assertEqual(entry.default_branch, "trunk")
+        self.assertEqual(self.file_entries()["second"]["deny"], ["*.txt"])
+
+    def test_a_clone_that_fails_writes_no_entry(self):
+        answer = self.refused("enroll", repo="ghost", clone_url="file:///nonexistent/x.git",
+                              seat="clerk-1", sitting="42")
+        self.assertEqual(answer["refused"], "clone_failed")
+        self.assertEqual(answer["repo"], "ghost")
+        self.assertTrue(answer["reason"])
+        self.assertEqual(answer["seat"], "clerk-1")
+        self.assertEqual(answer["sitting"], "42")
+        self.assertNotIn("ghost", self.bench.config.repos)
+        self.assertFalse(os.path.exists(self.repos_file()))
+
+    def test_repos_gives_the_source_of_each_entry(self):
+        self.ok("enroll", repo="second", clone_url=self.clone_url)
+        answer = self.ok("repos")
+        self.assertEqual([item["name"] for item in answer["repos"]], ["demo", "second"])
+        items = {item["name"]: item for item in answer["repos"]}
+        self.assertEqual(items["second"]["source"], "file")
+        self.assertTrue(items["second"]["bare_exists"])
+        self.assertEqual(items["second"]["clone_url"], self.clone_url)
+        self.assertEqual(items["demo"]["source"], "config")
+        self.assertFalse(items["demo"]["bare_exists"])
+        self.prepared()
+        items = {item["name"]: item for item in self.ok("repos")["repos"]}
+        self.assertTrue(items["demo"]["bare_exists"])
+
+    def test_unenroll_keeps_the_clone_and_refuses_a_repository_of_bench_json(self):
+        first = self.ok("enroll", repo="second", clone_url=self.clone_url)
+        answer = self.ok("unenroll", repo="second")
+        self.assertEqual(answer["repo"], "second")
+        self.assertEqual(answer["kept"], first["bare"])
+        self.assertTrue(os.path.isdir(os.path.join(answer["kept"], "objects")))
+        self.assertNotIn("second", self.bench.config.repos)
+        self.assertEqual(self.file_entries(), {})
+        again = self.ok("enroll", repo="second", clone_url=self.clone_url)
+        self.assertFalse(again["cloned"])
+        refusal = self.refused("unenroll", repo="demo")
+        self.assertEqual(refusal["refused"], "config_repo")
+        self.assertIn("demo", self.bench.config.repos)
+
+    def test_an_entry_of_the_file_wins_over_bench_json(self):
+        self.ok("enroll", repo="demo", clone_url=self.clone_url, deny=["*.md"])
+        bench = self.fresh()
+        entry = bench.config.repo("demo")
+        self.assertEqual(entry.deny, ["*.md"])
+        self.assertEqual(entry.source, "file")
+        made, refused = tools.call(bench, "prepare", {"repo": "demo", "branch": "work"})
+        self.assertFalse(refused, made)
+        answer, refused = tools.call(bench, "read",
+                                     {"repo": "demo", "branch": "work", "path": "README.md"})
+        self.assertTrue(refused, answer)
+        self.assertEqual(answer["refused"], "denied")
+        self.assertEqual(answer["pattern"], "*.md")
+
+    def test_bench_json_can_hold_the_data_directory_only(self):
+        spec = {"data_dir": os.path.join(self.root, "data")}
+        bench = Bench(config_module.from_dict(spec))
+        self.assertEqual(bench.config.names(), [])
+        answer, refused = tools.call(bench, "enroll",
+                                     {"repo": "only", "clone_url": self.clone_url})
+        self.assertFalse(refused, answer)
+        self.assertEqual(Bench(config_module.from_dict(spec)).config.names(), ["only"])
 
 
 if __name__ == "__main__":

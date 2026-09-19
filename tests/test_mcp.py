@@ -57,23 +57,32 @@ class TestHttp(TransportCase):
         self.assertEqual(status, 202)
         self.assertIsNone(body)
 
-    def test_tools_list_gives_the_nine_tools_with_schemas(self):
+    def test_tools_list_gives_the_twelve_tools_with_schemas(self):
         status, answer = self.post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual(status, 200)
         tools = answer["result"]["tools"]
-        self.assertEqual(len(tools), 9)
+        self.assertEqual(len(tools), 12)
         names = [tool["name"] for tool in tools]
         self.assertEqual(sorted(names), sorted([
-            "prepare", "status", "find", "read", "edit", "pull", "submit", "feedback", "discard"]))
+            "prepare", "status", "find", "read", "edit", "pull", "submit", "feedback", "discard",
+            "enroll", "repos", "unenroll"]))
         for tool in tools:
             self.assertTrue(tool["description"])
             schema = tool["inputSchema"]
             self.assertEqual(schema["type"], "object")
-            self.assertIn("repo", schema["properties"])
-            self.assertIn("branch", schema["properties"])
-            self.assertIn("repo", schema["required"])
             self.assertIn("seat", schema["properties"])
             self.assertIn("sitting", schema["properties"])
+            if tool["name"] == "repos":
+                # The tool takes the marks only.
+                self.assertNotIn("repo", schema["properties"])
+                continue
+            self.assertIn("repo", schema["properties"])
+            self.assertIn("repo", schema["required"])
+            if tool["name"] in ("enroll", "unenroll"):
+                # The enrollment names a repository, and no branch.
+                self.assertNotIn("branch", schema["properties"])
+                continue
+            self.assertIn("branch", schema["properties"])
             if tool["name"] in ("find", "read", "edit"):
                 self.assertIn("allow", schema["properties"])
 
@@ -127,7 +136,7 @@ class TestStdio(unittest.TestCase):
         mcp.serve_stdio(self.bench, io.StringIO("\n".join(lines) + "\n"), output)
         answers = [json.loads(row) for row in output.getvalue().splitlines()]
         self.assertEqual([answer["id"] for answer in answers], [1, 2, 3])
-        self.assertEqual(len(answers[1]["result"]["tools"]), 9)
+        self.assertEqual(len(answers[1]["result"]["tools"]), 12)
         self.assertTrue(answers[2]["result"]["structuredContent"]["result"]["created"])
 
 
