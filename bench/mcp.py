@@ -56,7 +56,8 @@ class Server:
                     "serverInfo": {"name": SERVER_NAME, "version": __version__},
                     "instructions": (
                         "The bench holds a worktree for each branch. Call prepare first. "
-                        "Then use find, read and edit. Use pull for a conflict. Use submit "
+                        "Then use find, read and edit. Use pull from head to bring a worktree up "
+                        "to date, or pull from base to merge the base in. Use submit "
                         "to commit and push, or to land (rebase, steps, push, pull request) "
                         "when the repository has a land block. Use feedback to read what "
                         "the change caused. Use discard to remove your changes."

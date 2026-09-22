@@ -348,6 +348,37 @@ def head_of(worktree):
     return text.strip()
 
 
+def lag_of(bare, worktree, branch, base_head):
+    """Gives (behind, behind_remote): the commits the worktree lacks.
+
+    behind counts against the base head, as status does. behind_remote
+    counts against the remote branch, and is None when the branch is
+    not on the remote. prepare fetches but does not move a worktree, so
+    these two are how a caller learns that it reads old code.
+    """
+    counts = git.line(["rev-list", "--left-right", "--count", "%s...HEAD" % base_head],
+                      cwd=worktree)
+    behind = int((counts.split() + ["0"])[0])
+    remote = "refs/remotes/origin/" + branch
+    if not git.ref_exists(remote, cwd=bare):
+        return behind, None
+    behind_remote = int(git.line(["rev-list", "--count", "HEAD.." + remote], cwd=worktree))
+    return behind, behind_remote
+
+
+def lag_note(branch, base, behind, behind_remote):
+    """Names the pull that brings a lagging worktree forward, or gives ""."""
+    def commits(count):
+        return "%d commit%s" % (count, "" if count == 1 else "s")
+    if behind_remote:
+        return "the worktree is %s behind origin/%s: use pull from head" % (
+            commits(behind_remote), branch)
+    if behind:
+        return "the worktree is %s behind the base %s: pull from base merges it in" % (
+            commits(behind), base)
+    return ""
+
+
 def base_ref_of(bare, base):
     """Gives the ref that holds the base head."""
     if git.ref_exists("refs/remotes/origin/" + base, cwd=bare):
@@ -388,6 +419,7 @@ def prepare(bench, args):
         else:
             base = bench.base_of(repo, branch)
         base_head = git.rev_parse(base_ref_of(bare, base), cwd=bare)
+        behind, behind_remote = lag_of(bare, path, branch, base_head)
         return {
             "repo": repo.name,
             "branch": branch,
@@ -397,6 +429,9 @@ def prepare(bench, args):
             "dirty": len(status_paths(path)),
             "created": created,
             "default_branch": repo.default_branch,
+            "behind": behind,
+            "behind_remote": behind_remote,
+            "note": lag_note(branch, base, behind, behind_remote),
         }
 
 
@@ -1158,7 +1193,9 @@ TOOL_SPECS = [
         "function": prepare,
         "description": (
             "Makes the clone and the worktree for one branch. Fetches first. "
-            "Call prepare one time before the other tools. It is safe to call it again."
+            "Call prepare one time before the other tools. It is safe to call it again. "
+            "It does not move a worktree that exists: behind and behind_remote give the "
+            "commits the worktree lacks, and note names the pull that brings it forward."
         ),
         "schema": {
             "type": "object",
@@ -1234,7 +1271,8 @@ TOOL_SPECS = [
         "function": read,
         "description": (
             "Gives the lines of one file with their numbers. Use offset and limit for a "
-            "range. Use ref to read the file at a git ref, for example base. Give if_hash "
+            "range. Use ref to read the file at a git ref, for example base. A ref is read "
+            "as the last fetch left it; prepare and pull fetch. Give if_hash "
             "with the hash of your last read: if the file did not change, the answer is "
             "unchanged and the hash, and not the bytes. With allow, a path that no glob of "
             "the list matches is refused."

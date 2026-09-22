@@ -39,6 +39,20 @@ engine: it calls `enroll` for each one. The rig holds those entries in
 bench.json first, and it reads `repos.json` after it. An entry of
 `repos.json` wins over an entry of bench.json with the same name.
 
+## A worktree that is old
+
+`prepare` fetches, but it does not move a worktree that exists. Its
+answer tells you how old the worktree is. `behind` counts the commits of
+the base that the worktree does not have, as `status` does.
+`behind_remote` counts the commits of `origin/<branch>` that the
+worktree does not have. It is `null` when the branch is not on the
+remote. When one of the two is more than zero, `note` names the pull to
+use: `pull` from `head` moves the worktree to the remote branch, and
+`pull` from `base` merges the base in.
+
+`read` with a `ref` reads the ref as the last fetch left it. `prepare`
+and `pull` fetch.
+
 ## The enrollment
 
 The rig holds a mirror of the engine's rows. It is not a second ledger.

@@ -59,10 +59,50 @@ class TestPrepare(BenchCase):
         self.assertEqual(first["base"], "main")
         self.assertEqual(first["dirty"], 0)
         self.assertEqual(first["head"], first["base_head"])
+        self.assertEqual(first["behind"], 0)
+        self.assertIsNone(first["behind_remote"])
+        self.assertEqual(first["note"], "")
         self.assertTrue(os.path.isfile(os.path.join(self.worktree(), "README.md")))
         second = self.ok("prepare", branch="work")
         self.assertFalse(second["created"])
         self.assertEqual(second["head"], first["head"])
+
+    def test_prepare_says_a_worktree_on_its_base_is_old(self):
+        # The case that read old code: a worktree of the base branch itself,
+        # prepared once, and the remote moved on.
+        self.prepared("main")
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/new.txt", "from the other person\n")
+        again = self.ok("prepare", branch="main")
+        self.assertFalse(again["created"])
+        self.assertNotEqual(again["head"], again["base_head"])
+        self.assertEqual(again["behind"], 1)
+        self.assertEqual(again["behind_remote"], 1)
+        self.assertIn("use pull from head", again["note"])
+        self.ok("pull", branch="main", **{"from": "head"})
+        current = self.ok("prepare", branch="main")
+        self.assertEqual(current["behind_remote"], 0)
+        self.assertEqual(current["note"], "")
+
+    def test_prepare_says_a_worktree_is_behind_its_remote_branch(self):
+        self.prepared()
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "work", "docs/head.txt", "from the remote branch\n")
+        again = self.ok("prepare", branch="work")
+        self.assertEqual(again["behind"], 0)
+        self.assertEqual(again["behind_remote"], 1)
+        self.assertEqual(again["note"],
+                         "the worktree is 1 commit behind origin/work: use pull from head")
+
+    def test_prepare_says_a_worktree_is_behind_its_base(self):
+        self.prepared()
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/new.txt", "from the other person\n")
+        again = self.ok("prepare", branch="work")
+        self.assertEqual(again["behind"], 1)
+        self.assertIsNone(again["behind_remote"])
+        self.assertEqual(again["note"],
+                         "the worktree is 1 commit behind the base main: pull from base merges it in")
 
     def test_prepare_refuses_a_bad_branch_name(self):
         answer = self.refused("prepare", branch="../escape")
