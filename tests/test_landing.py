@@ -70,6 +70,10 @@ class LandingCase(unittest.TestCase):
         return 404, "{}"
 
     def call(self, name, **args):
+        # a submit answers at once by default; these tests read the
+        # finished landing, so they ask for the wait the old default gave
+        if name == "submit":
+            args.setdefault("wait", 600)
         args.setdefault("repo", "demo")
         return tools.call(self.bench, name, args)
 
@@ -252,6 +256,20 @@ class TestLandingRebase(LandingCase):
 
 
 class TestLandingGuards(LandingCase):
+
+    def test_submit_answers_at_once_unless_it_is_asked_to_wait(self):
+        # a waymark engine gives up on a call after 30 seconds and marks the
+        # server dark, so a bare submit must not hold the call for the suite
+        self.make({"stages": [{"name": "slow", "command": "sleep 2"}]})
+        path = self.prepared()
+        self.change(path)
+        answer, refused = tools.call(self.bench, "submit",
+                                     {"repo": "demo", "branch": "work", "message": "slow"})
+        self.assertFalse(refused, answer)
+        self.assertEqual(answer["landing"]["state"], "running")
+        self.assertTrue(answer["landing"]["running"])
+        self.bench.landings.get(self.bench.repo("demo"), "work").wait(30)
+        self.assertEqual(self.ok("status", branch="work")["landing"]["state"], "landed")
 
     def test_a_running_landing_refuses_edit_and_is_followed_by_status(self):
         self.make({"stages": [{"name": "slow", "command": "sleep 2"}]})

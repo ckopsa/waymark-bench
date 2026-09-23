@@ -23,7 +23,12 @@ DEFAULT_LIMIT = 200
 CEILING_LIMIT = 2000
 DEFAULT_DEPTH = 2
 CEILING_DEPTH = 12
-DEFAULT_WAIT = 600
+# submit starts the landing and answers at once unless it is asked to
+# wait. A landing runs a repo's whole test suite, and the engine that
+# brokers a seat's calls gives up on any call after 30 seconds and marks
+# the server dark - so a default that waited cut every seat off the
+# rig. The way to follow a landing is status or feedback.
+DEFAULT_WAIT = 0
 CEILING_WAIT = 3600
 PROTECTED_PREFIXES = (".github/", ".claude/")
 BRANCH_CHARS = re.compile(r"^[A-Za-z0-9._/-]+$")
@@ -1308,9 +1313,11 @@ TOOL_SPECS = [
             "for a repository without a land block, it pushes the branch. For a repository "
             "with a land block, it lands: it rebases onto the target, runs the configured "
             "steps (setup, format, test...), pushes, and opens the pull request. The landing "
-            "runs in the background; submit waits up to wait seconds and gives landing.steps "
-            "with the output of each step. A failed step is a refusal landing_failed with the "
-            "output: fix the worktree and submit again. A clean worktree is refused, unless a "
+            "runs in the background, and submit answers at once with the landing running: "
+            "follow it with status or feedback until landing.running is false. Give wait to "
+            "have submit wait up to that many seconds instead. landing.steps gives the output "
+            "of each step, and a failed step is a refusal landing_failed with the output: fix "
+            "the worktree and submit again. A clean worktree is refused, unless a "
             "landing is still owed. The default branch is refused. While a landing runs, edit, "
             "pull and discard are refused; use status or feedback to follow it. Without "
             "trailers, the rig writes the seat and the sitting as the trailers Waymark-Seat "
@@ -1327,7 +1334,7 @@ TOOL_SPECS = [
                 "max_lines": {"type": "integer",
                               "description": "The ceiling on the added lines plus the removed lines."},
                 "wait": {"type": "integer",
-                         "description": "The seconds to wait for the landing. The default is 600. "
+                         "description": "The seconds to wait for the landing. The default is 0: it answers at once, and status gives the landing's state. "
                                         "The ceiling is 3600. Zero gives the answer at once."},
                 "pull_request": {"type": "boolean",
                                  "description": "False to land without opening the pull request. "
