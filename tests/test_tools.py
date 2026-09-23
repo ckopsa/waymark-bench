@@ -116,6 +116,32 @@ class TestFind(BenchCase):
         self.assertEqual(len(answer["lines"]), 5)
         self.assertGreater(answer["dropped"], 0)
 
+    def test_find_grep_reads_alternation_and_inline_flags(self):
+        # a basic regex answered both of these with nothing, and a seat
+        # took the silence for "the field is not in this repository"
+        path = self.prepared()
+        util.write(os.path.join(path, "funds.py"),
+                   "allvue_fund_identifier = Column()\nFA_CODE = 1\n")
+        answer = self.ok("find", branch="work", mode="grep",
+                         pattern="(?i)allvue|fa_code")
+        self.assertEqual(answer["files"], [{"path": "funds.py", "count": 2}])
+        answer = self.ok("find", branch="work", mode="grep", pattern="nothing|allvue_")
+        self.assertEqual(len(answer["lines"]), 1)
+
+    def test_find_grep_ignore_case(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "funds.py"), "ALLVUE_ID = 1\n")
+        self.assertEqual(self.ok("find", branch="work", mode="grep",
+                                 pattern="allvue_id")["lines"], [])
+        answer = self.ok("find", branch="work", mode="grep", pattern="allvue_id",
+                         ignore_case=True)
+        self.assertEqual(len(answer["lines"]), 1)
+
+    def test_find_grep_refuses_a_pattern_it_cannot_read(self):
+        self.prepared()
+        answer = self.refused("find", branch="work", mode="grep", pattern="(unclosed")
+        self.assertEqual(answer["refused"], "grep")
+
     def test_find_diff_gives_the_change_against_base(self):
         path = self.prepared()
         util.write(os.path.join(path, "docs/a.txt"), "alpha\ndelta\ncharlie\n")

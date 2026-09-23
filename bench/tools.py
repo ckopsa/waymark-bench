@@ -490,7 +490,13 @@ def _find_grep(bench, repo, worktree, args, max_bytes, allow=None):
     if args.get("path"):
         _, rel = bench.resolve(repo, worktree, args.get("path"), allow=allow)
         scope = ["--", rel]
-    count_args = ["grep", "-I", "--untracked", "--no-color", "-c", "-e", pattern] + scope
+    # Perl syntax, because it is the syntax a caller writes. Without -P
+    # git grep reads a basic regex, where `a|b` looks for a literal bar
+    # and `(?i)` for a literal paren, and both answer no matches rather
+    # than an error. A triage seat read that silence as "pcore has no
+    # Allvue fields" and routed a ticket to the wrong desk.
+    syntax = ["-P"] + (["-i"] if args.get("ignore_case") else [])
+    count_args = ["grep", "-I", "--untracked", "--no-color", "-c"] + syntax + ["-e", pattern] + scope
     code, text, err = git.run(count_args, cwd=worktree, check=False)
     if code not in (0, 1):
         raise Refusal("grep", pattern=pattern, reason=(err or text).strip()[:400])
@@ -507,7 +513,7 @@ def _find_grep(bench, repo, worktree, args, max_bytes, allow=None):
             files.append({"path": name, "count": int(count)})
         except ValueError:
             continue
-    line_args = ["grep", "-n", "-I", "--untracked", "--no-color"]
+    line_args = ["grep", "-n", "-I", "--untracked", "--no-color"] + syntax
     if context:
         line_args += ["-C", str(context)]
     line_args += ["-e", pattern] + scope
@@ -1203,7 +1209,12 @@ TOOL_SPECS = [
                 "depth": {"type": "integer",
                           "description": "The depth for mode tree. The default is 2."},
                 "pattern": {"type": "string",
-                            "description": "The glob for mode glob, or the pattern for mode grep."},
+                            "description": (
+                                "The glob for mode glob, or the pattern for mode grep. A grep "
+                                "pattern is a Perl regular expression: a|b, (?i), \\b and .? "
+                                "all work. A pattern git cannot read is refused, not empty.")},
+                "ignore_case": {"type": "boolean",
+                                "description": "For mode grep: match without regard to case."},
                 "context": {"type": "integer",
                             "description": "The count of lines around each match for mode grep."},
                 "max_matches": {"type": "integer",
