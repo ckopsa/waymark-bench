@@ -251,14 +251,21 @@ class Landing:
                                 % land.target)
                     return
                 before = git.rev_parse("HEAD", cwd=worktree)
-                code, text, err = git.run(["rebase", onto], cwd=worktree, check=False, timeout=600)
+                # A branch with a merge on it (a seat merged the target in to
+                # resolve conflicts) takes the target by a merge: a rebase
+                # would drop that merge and replay the conflicts it resolved.
+                if git.out(["rev-list", "--merges", onto + "..HEAD"], cwd=worktree).strip():
+                    verb, argv = "merge of", ["merge", "--no-edit", onto]
+                else:
+                    verb, argv = "rebase onto", ["rebase", onto]
+                code, text, err = git.run(argv, cwd=worktree, check=False, timeout=600)
                 if code != 0:
                     conflicts = [name for name in git.out(
                         ["diff", "--name-only", "--diff-filter=U"], cwd=worktree).splitlines() if name]
-                    git.run(["rebase", "--abort"], cwd=worktree, check=False)
+                    git.run([argv[0], "--abort"], cwd=worktree, check=False)
                     self.finish(item, False, exit_code=code, output=(err or text),
-                                reason="the rebase onto %s has conflicts in: %s"
-                                % (land.target, ", ".join(conflicts) or "unknown files"))
+                                reason="the %s %s has conflicts in: %s"
+                                % (verb, land.target, ", ".join(conflicts) or "unknown files"))
                     return
                 after = git.rev_parse("HEAD", cwd=worktree)
             with self.lock:
