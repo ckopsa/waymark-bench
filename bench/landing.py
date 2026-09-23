@@ -88,6 +88,10 @@ class Landing:
             "auto_merge": None,
             "failed_step": None,
             "reason": None,
+            "attempt": None,
+            "seat": None,
+            "sitting": None,
+            "for": None,
             "steps": [],
         }
 
@@ -101,15 +105,32 @@ class Landing:
         return os.path.join(self.bench.repo_dir(self.repo.name), "landings",
                             *self.branch.split("/")) + ".json"
 
+    def attempt_path(self):
+        """Where this attempt is kept for good, or None before it starts.
+
+        The branch's own file is overwritten by the next submit. The
+        engine mirrors landings to wake the next seat on an outcome, and
+        a record that changes after it finished would read as a second
+        outcome - so each attempt also lands in a file of its own, named
+        by when it started, that nothing writes once the attempt ends.
+        """
+        attempt = self.state.get("attempt")
+        if not attempt:
+            return None
+        return os.path.join(self.bench.repo_dir(self.repo.name), "attempts",
+                            *self.branch.split("/")) + os.sep + attempt + ".json"
+
     def save(self):
-        path = self.path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
         with self.lock:
             data = json.dumps(self.state, indent=1, sort_keys=True)
-        with open(tmp, "w", encoding="utf-8") as handle:
-            handle.write(data)
-        os.replace(tmp, path)
+        for path in (self.path(), self.attempt_path()):
+            if path is None:
+                continue
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(data)
+            os.replace(tmp, path)
 
     def step(self, name):
         for item in self.state["steps"]:
@@ -192,9 +213,20 @@ class Landing:
 
     # ------------------------------------------------------------ running
 
-    def start(self, commit, want_pr, title, description, trailers):
+    def start(self, commit, want_pr, title, description, trailers, marks=None, answers=None):
+        # Who landed it and what it answers ride the record, because a
+        # landing outlives the session that submitted it: the engine
+        # mirrors these files and wakes the next seat on the outcome,
+        # and that seat has only this record to find its work from.
+        marks = marks or {}
         with self.lock:
             self.state.update({
+                # finer than `started`: two submits inside one second are
+                # two attempts, and each needs a name of its own
+                "attempt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"),
+                "seat": marks.get("seat"),
+                "sitting": marks.get("sitting"),
+                "for": answers,
                 "state": "running",
                 "started": now(),
                 "finished": None,
@@ -438,5 +470,10 @@ class Landings:
                     item["state"] = "failed"
                     item.pop("started_at", None)
                     state["failed_step"] = item["name"]
+            item = Landing(self.bench, repo, branch, state=state)
+            # written back, so the attempt's own file ends too rather
+            # than reading "running" to the engine forever
+            item.save()
+            return item
         item = Landing(self.bench, repo, branch, state=state)
         return item

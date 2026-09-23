@@ -876,7 +876,8 @@ def submit(bench, args):
                 "lines_removed": removed,
             }
         item = bench.landings.get(repo, branch, create=True)
-        item.start(commit, bool(want_pr), title, description, clean_trailers)
+        item.start(commit, bool(want_pr), title, description, clean_trailers,
+                   marks=marks_of(args), answers=_text(args, "for", default=None))
     item.wait(wait)
     view = item.view(max_bytes)
     answer = {
@@ -1354,6 +1355,11 @@ TOOL_SPECS = [
                           "description": "The title of the pull request. The default is the first "
                                          "line of the message."},
                 "description": {"type": "string", "description": "The body of the pull request."},
+                "for": {"type": "string",
+                        "description": "The id of the row this landing answers, for example the "
+                                       "routing verdict you walked. The landing record keeps it "
+                                       "with the seat, so the seat woken by its outcome can find "
+                                       "the work."},
                 "max_bytes": _MAX_BYTES,
                 "seat": _SEAT,
                 "sitting": _SITTING,

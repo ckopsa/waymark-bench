@@ -123,6 +123,20 @@ class TestLandingSteps(LandingCase):
         self.assertEqual(landing["head"], answer["commit"])
         self.assertFalse(landing["running"])
 
+    def test_the_record_keeps_who_landed_it_and_what_it_answers(self):
+        # the engine mirrors the record and wakes the next seat on its
+        # outcome; that seat finds its work from these three fields
+        self.make({"stages": STAGES})
+        path = self.prepared()
+        self.change(path)
+        answer = self.ok("submit", branch="work", message="change one line",
+                         seat="migration-engineer", sitting="s-1", **{"for": "verdict-9"})
+        with open(self.bench.landings.get(self.bench.repo("demo"), "work").path()) as handle:
+            record = json.load(handle)
+        self.assertEqual(answer["landing"]["seat"], "migration-engineer")
+        self.assertEqual((record["seat"], record["sitting"], record["for"]),
+                         ("migration-engineer", "s-1", "verdict-9"))
+
     def test_a_step_with_commit_commits_what_it_changed(self):
         self.make({"stages": [
             {"name": "format", "command": "printf 'formatted\\n' >> docs/a.txt", "commit": "auto-format"},
@@ -332,6 +346,25 @@ class TestLandingGuards(LandingCase):
         self.assertEqual(retried["landing"]["state"], "landed")
         again = self.refused("submit", branch="work", message="again")
         self.assertEqual(again["refused"], "nothing_to_commit")
+
+    def test_each_attempt_keeps_a_file_the_next_submit_does_not_touch(self):
+        # the branch's file is overwritten by the retry; the engine reads
+        # the attempts, so a finished one must never change again
+        marker = os.path.join(self.root, "pass")
+        self.make({"stages": [{"name": "test", "command": "test -f %s" % marker}]})
+        path = self.prepared()
+        self.change(path)
+        self.refused("submit", branch="work", message="one")
+        attempts = os.path.join(self.bench.repo_dir("demo"), "attempts", "work")
+        [first] = os.listdir(attempts)
+        with open(os.path.join(attempts, first)) as handle:
+            failed = handle.read()
+        util.write(marker, "now it passes\n")
+        self.ok("submit", branch="work", message="retry")
+        self.assertEqual(len(os.listdir(attempts)), 2)
+        with open(os.path.join(attempts, first)) as handle:
+            self.assertEqual(handle.read(), failed)
+        self.assertEqual(json.loads(failed)["state"], "failed")
 
     def test_the_target_branch_is_refused(self):
         self.make({"target": "release", "stages": []})
