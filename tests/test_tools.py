@@ -26,6 +26,10 @@ class BenchCase(unittest.TestCase):
 
     def call(self, name, **args):
         """Calls one tool. Gives (answer, refused)."""
+        # a submit answers at once by default; these tests read the
+        # finished landing, so they ask for the wait the old default gave
+        if name == "submit":
+            args.setdefault("wait", 600)
         args.setdefault("repo", "demo")
         return tools.call(self.bench, name, args)
 

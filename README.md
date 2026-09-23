@@ -107,10 +107,15 @@ merge method of the repository. It defaults to false, and only GitHub
 does it. A forge that refuses auto-merge gives a finding `auto_merge` in
 `feedback`; the landing keeps the pull request.
 
-The landing runs in the background. `submit` waits up to `wait` seconds
-(the default is 600) and gives `landing.steps`: one entry for each step,
-with its state, seconds, exit code and the tail of its output. A failed
-step is a refusal `landing_failed` that carries the same. While a landing
+The landing runs in the background, and `submit` answers at once with
+the landing running: follow it with `status` or `feedback`. Give `wait`
+to have `submit` wait up to that many seconds instead (the ceiling is
+3600). The default is 0 because a landing runs a repo's whole test suite,
+and a client that brokers the call - a waymark engine gives up on any
+call after 30 seconds and marks the server dark - must not be held that
+long. `landing.steps` has one entry for each step, with its state,
+seconds, exit code and the tail of its output. A failed step is a
+refusal `landing_failed` that carries the same. While a landing
 runs, `edit`, `pull`, `discard` and `submit` are refused with
 `landing_running`; `status` and `feedback` give its state. The state is
 on disk under `<data_dir>/<repo>/landings/`, so it outlives a restart.
