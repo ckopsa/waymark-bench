@@ -96,7 +96,10 @@ worktree. A step with `commit` commits what it changed (a formatter).
 }
 ```
 
-`target` defaults to the default branch. `rebase` defaults to true. The
+`target` defaults to the default branch. `rebase` defaults to true. A
+branch that carries a merge commit (a seat merged the target in to
+resolve conflicts) takes the target by a merge instead, so the
+resolution is kept. The
 names `rebase`, `push` and `pull_request` are the rig's own steps. `env`
 is added to the environment of every step; a `~` is expanded. The
 `pull_request` block names the forge (`bitbucket` or `github`); with

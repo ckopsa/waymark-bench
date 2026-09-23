@@ -228,6 +228,32 @@ class TestLandingRebase(LandingCase):
         with open(os.path.join(path, "docs/a.txt")) as handle:
             self.assertEqual(handle.read(), "mine\n")
 
+    def test_a_branch_with_a_merge_keeps_it_and_merges_the_moved_target(self):
+        self.make({"stages": []})
+        path = self.prepared()
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/a.txt", "theirs\n", message="main moved")
+        self.change(path, text="mine\n")
+        util.git(["commit", "-am", "mine"], cwd=path)
+        util.git(["fetch", "origin"], cwd=self.bench.bare_dir("demo"))
+        # The seat merges the target in and resolves the conflict itself.
+        with self.assertRaises(Exception):
+            util.git(["merge", "origin/main"], cwd=path)
+        util.write(os.path.join(path, "docs/a.txt"), "mine\ntheirs\n")
+        util.git(["commit", "-am", "resolve"], cwd=path)
+        resolved = util.git(["rev-parse", "HEAD"], cwd=path).strip()
+        util.push_change(other, "main", "docs/b.txt", "bravo\n", message="main moved again")
+        self.change(path, name="docs/c.txt", text="charlie\n")
+        answer = self.ok("submit", branch="work", message="more")
+        landing = answer["landing"]
+        self.assertEqual(landing["state"], "landed", landing)
+        self.assertEqual(self.remote_head("work"), landing["head"])
+        util.git(["merge-base", "--is-ancestor", resolved, "HEAD"], cwd=path)
+        util.git(["merge-base", "--is-ancestor", "origin/main", "HEAD"], cwd=path)
+        with open(os.path.join(path, "docs/a.txt")) as handle:
+            self.assertEqual(handle.read(), "mine\ntheirs\n")
+        self.assertTrue(os.path.isfile(os.path.join(path, "docs/b.txt")))
+
     def test_a_second_landing_pushes_with_a_lease(self):
         self.make({"stages": []})
         path = self.prepared()
