@@ -1,4 +1,4 @@
-"""The fourteen tools of the bench.
+"""The fifteen tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -208,6 +208,15 @@ class Bench:
         # bench.json first, then the repositories that the engine enrolled.
         config.read_repos()
         self.landings = landing_module.Landings(self)
+        # The last credential check of each repository, by name.
+        self.credentials = {}
+
+    def check_credentials(self):
+        """Checks the forge credential of every repository. The rig runs it
+        at start."""
+        for name in self.config.names():
+            check_credential(self, self.config.repos[name])
+        return dict(self.credentials)
 
     def no_landing(self, repo, branch):
         """Refuses while a landing of the branch runs."""
@@ -888,11 +897,14 @@ def submit(bench, args):
             git.run(["add", "-A", "--", "."], cwd=worktree)
             against = _against_of(bench, repo, worktree, target, fetch=max_lines is not None)
             stat = git.out(["diff", "--cached", "--numstat", against], cwd=worktree)
+            workflows = []
             for row in stat.splitlines():
                 cells = row.split("\t")
                 if len(cells) < 3:
                     continue
                 files += 1
+                if ".github/workflows/" in cells[2]:
+                    workflows.append(cells[2])
                 if cells[0].isdigit():
                     added += int(cells[0])
                 if cells[1].isdigit():
@@ -907,6 +919,16 @@ def submit(bench, args):
                     raise Refusal("over_ceiling", lines=added + removed, max_lines=ceiling,
                                   files=files, against=against, target=target,
                                   remedy="make the change smaller, or raise the ceiling")
+            credential = bench.credentials.get(repo.name) or {}
+            if workflows and "workflows" in (credential.get("missing") or []):
+                # GitHub rejects the push of a workflow file without it.
+                git.run(["reset", "-q", "--", "."], cwd=worktree, check=False)
+                raise Refusal("missing_workflow_permission", repo=repo.name,
+                              permission="workflows", classic_scope="workflow", paths=workflows,
+                              reason="the rig's GitHub token lacks the workflows permission, "
+                                     "so GitHub would reject the push",
+                              remedy="give the token Workflows: read and write (classic: the "
+                                     "workflow scope), or leave .github/workflows/ out of the change")
             commit_args = ["commit", "-m", message]
             for item in clean_trailers:
                 commit_args += ["--trailer", item]
@@ -1060,10 +1082,21 @@ def feedback(bench, args):
     chosen = pipelines_of_head(pipelines, head)
     answer["pipelines"] = pipelines[:5] + [p for p in chosen if p not in pipelines[:5]]
     read = []  # (pipeline, step, log) of each failed step; log is None when none came
+    dead = []  # (pipeline, step, None) of each job of an interrupted pipeline
     for pipeline in chosen:
-        if pipeline.get("result") in ("failed", "error", "failure", "stopped", "cancelled"):
+        if pipeline.get("result") in ("failed", "error", "failure", "stopped", "cancelled",
+                                      "timed_out"):
             steps = attempt("steps", lambda: client.steps(pipeline["id"]), [])
             pipeline["steps"] = steps
+            stopped = interrupted_of(steps)
+            if stopped:
+                dead.extend((pipeline, step, None) for step in stopped)
+                findings.append({
+                    "source": "pipeline", "severity": "interrupted",
+                    "message": INTERRUPTED % ", ".join(step.get("name") or "job" for step in stopped),
+                    "jobs": [step.get("name") for step in stopped], "url": pipeline.get("url"),
+                })
+                continue
             for step in steps:
                 if step.get("result") not in ("failed", "error", "failure"):
                     continue
@@ -1098,6 +1131,11 @@ def feedback(bench, args):
                     "message": status.get("description") or "%s failed" % status.get("name"),
                     "url": status.get("url"),
                 }
+                if step_of_status(status, dead):
+                    finding["severity"] = "interrupted"
+                    finding["message"] = INTERRUPTED % status.get("name")
+                    findings.append(finding)
+                    continue
                 found = step_of_status(status, read)
                 if found and found[2] is not None:
                     pipeline, step, _ = found
@@ -1128,6 +1166,19 @@ def feedback(bench, args):
 # The lines of a test report that must survive the cut of a log: clojure.test
 # and the like name the failure, the two values and the count.
 LOG_MARKERS = re.compile(r"FAIL in|ERROR in|expected:|actual:|Ran \d+ tests|\d+ failures?, \d+ errors?")
+
+
+# A job that was cancelled, timed out or stopped in setup ran no test: its
+# red is the runner's, and rerun starts it again.
+INTERRUPTED = "ci: interrupted: %s stopped before a test ran; call rerun to start it again"
+
+
+def interrupted_of(steps):
+    """Gives the interrupted jobs of a pipeline, or [] when a job is red."""
+    if any(step.get("result") in ("failed", "error", "failure") and not step.get("interrupted")
+           for step in steps):
+        return []
+    return [step for step in steps if step.get("interrupted")]
 
 
 def pipelines_of_head(pipelines, head):
@@ -1310,6 +1361,56 @@ def update_branch(bench, args):
     return dict(answer, repo=repo.name, number=number)
 
 
+def rerun(bench, args):
+    """Starts the interrupted CI of the branch's pushed head again, one time per head."""
+    repo = bench.repo(args.get("repo"))
+    branch = check_branch(_text(args, "branch", required=True))
+    remote = "refs/remotes/origin/" + branch
+    with bench.lock(repo.name):
+        worktree = bench.worktree(repo, branch)
+        bench.fetch(repo)
+        if not git.ref_exists(remote, cwd=worktree):
+            raise Refusal("not_pushed", repo=repo.name, branch=branch,
+                          reason="the branch is not on the remote: submit pushes it")
+        head = git.rev_parse(remote, cwd=worktree)
+    if (bench.meta_read(repo.name).get(branch) or {}).get("rerun_head") == head:
+        raise Refusal("already_rerun", repo=repo.name, branch=branch, head=head,
+                      reason="the CI of this head was started again once already")
+    try:
+        client = forge.client(repo)
+        runs = pipelines_of_head([p for p in client.pipelines(branch)
+                                  if p.get("commit") == head], head)
+        stopped = []
+        for run in runs:
+            if run.get("state") != "completed":
+                continue
+            steps = client.steps(run["id"])
+            red = [s.get("name") for s in steps
+                   if s.get("result") == "failure" and not s.get("interrupted")]
+            if red:
+                raise Refusal("red", repo=repo.name, branch=branch, head=head, jobs=red,
+                              url=run.get("url"),
+                              reason="the run has a red test step: read feedback, fix it and submit")
+            jobs = [s.get("name") for s in steps if s.get("interrupted")]
+            if jobs:
+                stopped.append({"id": run["id"], "kind": run.get("kind"),
+                                "url": run.get("url"), "jobs": jobs})
+        if not stopped:
+            raise Refusal("nothing_interrupted", repo=repo.name, branch=branch, head=head,
+                          reason="no finished run on the head has a cancelled, timed out or "
+                                 "stopped-in-setup job")
+        for run in stopped:
+            client.rerun_failed_jobs(run["id"])
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=git.scrub(str(exc)))
+    with bench.lock(repo.name):
+        meta = bench.meta_read(repo.name)
+        meta.setdefault(branch, {})["rerun_head"] = head
+        bench.meta_write(repo.name, meta)
+    return {"repo": repo.name, "branch": branch, "head": head,
+            "run_id": stopped[0]["id"], "runs": stopped}
+
+
 def _repo_name(args):
     """Gives the repository name of an enrollment call, or refuses."""
     name = _text(args, "repo", required=True)
@@ -1346,17 +1447,38 @@ def enroll(bench, args):
     answer = entry.to_dict()
     answer["bare"] = bare
     answer["cloned"] = cloned
+    answer["credential"] = check_credential(bench, entry)
     return answer
 
 
+def check_credential(bench, repo):
+    """Checks the token against what the rig does with the repository's
+    forge (docs/credential.md), and keeps the answer on the bench. Only a
+    GitHub forge is checked."""
+    try:
+        client = forge.client(repo)
+    except forge.ForgeError as exc:
+        found = {"checked": False, "ok": None, "missing": [], "reason": git.scrub(str(exc))}
+    else:
+        if client.provider == "github":
+            found = dict(client.check_credential(repo.default_branch), checked=True)
+        else:
+            found = {"checked": False, "ok": None, "missing": [],
+                     "reason": "the rig checks a github credential only"}
+    bench.credentials[repo.name] = found
+    return found
+
+
 def repos(bench, args):
-    """Gives every repository on the rig, and where its entry comes from."""
+    """Gives every repository on the rig, where its entry comes from, and
+    the check of its credential."""
     items = []
     for name in bench.config.names():
         entry = bench.config.repos[name]
         item = entry.to_dict()
         item["bare_exists"] = bench.bare_exists(name)
         item["source"] = entry.source
+        item["credential"] = bench.credentials.get(name) or check_credential(bench, entry)
         items.append(item)
     return {"repos": items}
 
@@ -1639,8 +1761,10 @@ TOOL_SPECS = [
             "commit statuses (a quality gate is one), and the review comments. Every item also "
             "comes as one finding in findings, with a source (landing, pipeline, status, review, "
             "pull_request), a severity, a message, and the path:line locations it names. Read "
-            "findings, fix the worktree, submit again. Sources the rig cannot reach are named in "
-            "unavailable."
+            "findings, fix the worktree, submit again. A run whose jobs were cancelled, timed "
+            "out or stopped in setup, with no red test step, is severity interrupted, not "
+            "error, and its message starts ci: interrupted: call rerun for it. Sources the "
+            "rig cannot reach are named in unavailable."
         ),
         "schema": {
             "type": "object",
@@ -1763,6 +1887,26 @@ TOOL_SPECS = [
         },
     },
     {
+        "name": "rerun",
+        "function": rerun,
+        "description": (
+            "Starts the interrupted CI of the branch's pushed head again. The rig reads the "
+            "newest finished run of each workflow on that head: a job that was cancelled, "
+            "timed out, or failed with no step past setup (checkout, set up, containers, "
+            "network, services) is interrupted, and the rig asks GitHub to re-run the "
+            "failed jobs of its run, e.g. {\"run_id\": 11, \"runs\": [...]}. Use it when "
+            "feedback gives a finding whose message starts ci: interrupted. One time per "
+            "head. The refusals are not_pushed, red (a job failed in a test step: fix it), "
+            "nothing_interrupted, already_rerun (this head was re-run once) and forge."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {"repo": _REPO, "branch": _BRANCH, "seat": _SEAT, "sitting": _SITTING},
+            "required": ["repo", "branch"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "enroll",
         "function": enroll,
         "description": (
@@ -1800,7 +1944,9 @@ TOOL_SPECS = [
         "description": (
             "Gives every repository on the rig, by name. Each one gives its entry, "
             "bare_exists for the clone on the disk, and source: file for a repository from "
-            "enroll, config for a repository from bench.json. The engine calls this tool; "
+            "enroll, config for a repository from bench.json, and credential: the check of "
+            "the GitHub token against what the rig needs ({ok, missing, ...}; "
+            "docs/credential.md). The engine calls this tool; "
             "put it in no powers entry."
         ),
         "schema": {

@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import urllib.request
 
 from . import config as config_module
@@ -91,6 +92,9 @@ def main(argv=None):
         return 2
     os.makedirs(config.data_dir, exist_ok=True)
     bench = Bench(config)
+    # The credential check reads the forge; the rig serves while it runs.
+    threading.Thread(target=bench.check_credentials, name="credential-check",
+                     daemon=True).start()
     if args.stdio:
         mcp.serve_stdio(bench)
         return 0

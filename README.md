@@ -1,9 +1,10 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives fourteen
+for each repository and a git worktree for each branch. It gives fifteen
 tools: `prepare`, `status`, `find`, `read`, `edit`, `pull`, `submit`,
-`feedback`, `discard`, `merge`, `update_branch`, `enroll`, `repos` and `unenroll`. It needs Python
+`feedback`, `discard`, `merge`, `update_branch`, `rerun`, `enroll`, `repos` and `unenroll`. It
+needs Python
 3.11, git, and one library: pydantic-settings, for the settings.
 
 ```
@@ -146,6 +147,16 @@ head will move and the checks run again) or `current` (already up to
 date), and refuses a conflict (`not_mergeable`), any other GitHub
 refusal (`update_refused`) and a forge that is not GitHub
 (`unsupported`).
+
+CI can die with the code sound: a runner freezes, a job is cancelled or
+times out, or it fails in checkout or container set-up before any test
+runs. `feedback` gives such a run one finding of severity `interrupted`
+(not `error`) whose message starts `ci: interrupted`. `rerun` (give
+`repo` and `branch`) then asks GitHub to re-run the failed jobs of each
+such run on the branch's pushed head, and answers the `run_id`. It does
+so one time per head (`already_rerun` after), and refuses `not_pushed`,
+`red` (a job failed in a test step: fix the code) and
+`nothing_interrupted`.
 
 The landing runs in the background, and `submit` answers at once with
 the landing running: follow it with `status` or `feedback`. Give `wait`

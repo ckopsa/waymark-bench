@@ -64,6 +64,8 @@ class LandingCase(unittest.TestCase):
             if path.startswith(key) and (isinstance(answer, tuple) and answer[0] == method
                                          or not isinstance(answer, tuple)):
                 payload = answer[1] if isinstance(answer, tuple) else answer
+                if isinstance(payload, int):  # a refusal: the forge answers this status
+                    return payload, '{"message":"refused"}'
                 if isinstance(payload, str):
                     return 200, payload
                 return 200, json.dumps(payload)
@@ -583,6 +585,34 @@ class TestHouseMerge(LandingCase):
         self.assertEqual(answer["refused"], "no_required_checks")
         self.assertEqual(self.calls, [])
 
+    def refused_checks(self, conclusion, status="completed"):
+        """A private repository: check-runs answers 403, and the gate job
+        is read through the Actions API."""
+        self.forge_with(runs=check_runs())
+        self.answers.update({
+            "/commits/abc123/check-runs": ("GET", 403),
+            "/actions/runs?": ("GET", {"workflow_runs": [{"id": 51, "head_sha": "abc123"}]}),
+            "/actions/runs/51/jobs": ("GET", {"jobs": [
+                {"id": 61, "name": "gate", "status": status, "conclusion": conclusion}]}),
+        })
+
+    def test_refused_check_runs_are_read_through_actions(self):
+        client = forge.GitHub("o", "r")
+        self.refused_checks("success")
+        self.assertEqual(client.check_states("abc123"), {"gate": "success"})
+        self.refused_checks("failure")
+        self.assertEqual(client.check_states("abc123"), {"gate": "failure"})
+        self.refused_checks(None, status="in_progress")
+        self.assertEqual(client.check_states("abc123"), {"gate": "pending"})
+        asked = [path for _, path, _ in self.calls]
+        self.assertIn("/actions/runs?head_sha=abc123&per_page=100", asked)
+
+    def test_a_gate_green_only_through_actions_merges(self):
+        self.refused_checks("success")
+        answer = self.green(required_checks=["gate"])
+        self.assertEqual(answer["state"], "merged")
+        self.assertEqual(self.merges(), [{"sha": "abc123", "merge_method": "merge"}])
+
     def test_merge_by_house_opens_the_pull_request_without_auto_merge(self):
         path = self.prepared()
         self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR)}
@@ -861,6 +891,114 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual([f["name"] for f in status], ["test-factory", "gate"])
         self.assertNotIn("log_in", status[0])
 
+    def test_feedback_on_a_private_repository_reads_the_jobs_through_actions(self):
+        # check-runs refuses the fine-grained token; the Actions jobs stand in.
+        feedback = self.two_workflows({
+            "/actions/jobs/31/logs": "FAIL in (factory-test) (factory_test.clj:12)\n",
+            "/commits/abc123/check-runs": ("GET", 403),
+            "/actions/runs/423/jobs": {"jobs": [
+                {"id": 30, "name": "image", "status": "completed", "conclusion": "success",
+                 "html_url": "https://github.com/o/r/actions/runs/423/job/30"}]},
+        })
+        self.assertEqual(feedback["unavailable"], [])
+        self.assertEqual([s["name"] for s in feedback["statuses"]], ["image", "test-factory"])
+        status = [f for f in feedback["findings"] if f["source"] == "status"]
+        self.assertEqual([f["name"] for f in status], ["test-factory"])
+        self.assertEqual(status[0]["log_in"]["step"], "test-factory")
+        pipeline = [f for f in feedback["findings"] if f["source"] == "pipeline"]
+        self.assertIn("FAIL in (factory-test)", pipeline[0]["message"])
+
+    def submitted(self):
+        """Submits one change on a GitHub repository. Gives the pushed head."""
+        self.github()
+        path = self.prepared()
+        self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR)}
+        self.change(path)
+        return self.ok("submit", branch="work", message="change one line")["commit"]
+
+    def one_run(self, head, jobs):
+        """Answers one failed run of workflow tests on head, with these jobs."""
+        self.answers = {
+            "/pulls?": ("GET", [GITHUB_PR]),
+            "/actions/runs/11/rerun-failed-jobs": ("POST", {}),
+            "/actions/runs/11/jobs": ("GET", {"jobs": jobs}),
+            "/actions/runs?": ("GET", {"workflow_runs": [
+                {"id": 11, "run_number": 3, "status": "completed", "conclusion": "failure",
+                 "head_sha": head, "html_url": "https://github.com/o/r/actions/runs/11",
+                 "name": "tests"}]}),
+            "/commits/%s/check-runs" % head: ("GET", {"check_runs": [
+                {"name": job["name"], "status": "completed", "conclusion": job["conclusion"],
+                 "html_url": "https://github.com/o/r/actions/runs/11/job/%s" % job["id"]}
+                for job in jobs]}),
+            "/issues/7/comments": ("GET", []),
+            "/pulls/7/comments": ("GET", []),
+        }
+        self.calls = []
+
+    def reruns(self):
+        return [path for method, path, _ in self.calls if method == "POST"]
+
+    DEAD_JOBS = [
+        {"id": 21, "name": "unit", "status": "completed", "conclusion": "failure",
+         "steps": [{"name": "Set up job", "conclusion": "success"},
+                   {"name": "Run actions/checkout@v4", "conclusion": "failure"},
+                   {"name": "Run tests", "conclusion": "skipped"}]},
+        {"id": 22, "name": "lint", "status": "completed", "conclusion": "cancelled",
+         "steps": [{"name": "Set up job", "conclusion": "success"},
+                   {"name": "Run ruff", "conclusion": "cancelled"}]}]
+    RED_JOBS = [
+        {"id": 21, "name": "unit", "status": "completed", "conclusion": "failure",
+         "steps": [{"name": "Set up job", "conclusion": "success"},
+                   {"name": "Run tests", "conclusion": "failure"}]},
+        {"id": 22, "name": "lint", "status": "completed", "conclusion": "cancelled",
+         "steps": []}]
+
+    def test_rerun_starts_an_interrupted_run_once_per_head(self):
+        head = self.submitted()
+        self.one_run(head, self.DEAD_JOBS)
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["run_id"], 11)
+        self.assertEqual(answer["head"], head)
+        self.assertEqual(answer["runs"][0]["jobs"], ["unit", "lint"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+        again = self.refused("rerun", branch="work")
+        self.assertEqual(again["refused"], "already_rerun")
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_rerun_refuses_a_run_with_a_red_test_step(self):
+        head = self.submitted()
+        self.one_run(head, self.RED_JOBS)
+        answer = self.refused("rerun", branch="work")
+        self.assertEqual(answer["refused"], "red")
+        self.assertEqual(answer["jobs"], ["unit"])
+        self.assertEqual(self.reruns(), [])
+
+    def test_rerun_refuses_a_head_that_is_not_pushed_or_not_interrupted(self):
+        self.github()
+        self.prepared()
+        self.assertEqual(self.refused("rerun", branch="work")["refused"], "not_pushed")
+        head = self.submitted()
+        self.one_run(head, [{"id": 21, "name": "unit", "status": "completed",
+                             "conclusion": "success", "steps": []}])
+        self.assertEqual(self.refused("rerun", branch="work")["refused"], "nothing_interrupted")
+        self.assertEqual(self.reruns(), [])
+
+    def test_feedback_marks_an_interrupted_run_and_a_red_one_as_red(self):
+        self.submitted()
+        self.one_run("abc123", self.DEAD_JOBS)
+        feedback = self.ok("feedback", branch="work")
+        sources = [(f["source"], f["severity"]) for f in feedback["findings"]]
+        # the cancelled lint job is no failed status; the unit job's is
+        self.assertEqual(sources, [("pipeline", "interrupted"), ("status", "interrupted")])
+        self.assertTrue(feedback["findings"][0]["message"].startswith("ci: interrupted"))
+        self.assertEqual(feedback["findings"][0]["jobs"], ["unit", "lint"])
+        self.assertFalse(any("/logs" in path for _, path, _ in self.calls))
+        self.one_run("abc123", self.RED_JOBS)
+        feedback = self.ok("feedback", branch="work")
+        severities = [f["severity"] for f in feedback["findings"]]
+        self.assertIn("error", severities)
+        self.assertNotIn("interrupted", severities)
+
     def test_the_log_tail_keeps_the_test_report(self):
         head = "FAIL in (factory-test) (factory_test.clj:12)\nexpected: 1\n  actual: 2\n"
         noise = "".join("compiling namespace %d of the build\n" % i for i in range(400))
@@ -873,6 +1011,64 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual(tools.log_tail("short\n", 1024), "short\n")
         plain = "x\n" * 2000
         self.assertEqual(tools.log_tail(plain, 256), tools.landing_module.tail(plain, 256))
+
+
+class TestCredential(LandingCase):
+    """The rig checks its GitHub token against what it does with GitHub."""
+
+    def setUp(self):
+        super().setUp()
+        self.scopes = ["repo"]
+        self.original_scopes = forge.token_scopes
+        forge.token_scopes = lambda url, headers: self.scopes
+        self.addCleanup(setattr, forge, "token_scopes", self.original_scopes)
+        self.make({"stages": [], "pull_request": {"provider": "github", "owner": "o", "repo": "r"}})
+        self.answers = {"": ("GET", {"full_name": "o/r"})}
+
+    def test_a_token_without_workflow_is_reported_missing_for_each_repo(self):
+        checked = self.bench.check_credentials()
+        self.assertEqual(checked["demo"]["missing"], ["workflows"])
+        self.assertFalse(checked["demo"]["ok"])
+        self.assertEqual(checked["demo"]["token"], "classic")
+        answer, refused = tools.call(self.bench, "repos", {})
+        self.assertFalse(refused, answer)
+        credential = answer["repos"][0]["credential"]
+        self.assertEqual((credential["ok"], credential["missing"]), (False, ["workflows"]))
+
+    def test_a_complete_token_reports_ok(self):
+        self.scopes = ["repo", "workflow"]
+        credential = self.bench.check_credentials()["demo"]
+        self.assertTrue(credential["ok"])
+        self.assertEqual(credential["missing"], [])
+        self.assertTrue(credential["checked"])
+
+    def test_a_fine_grained_token_is_probed_and_leaves_the_writes_unverified(self):
+        self.scopes = None
+        credential = self.bench.check_credentials()["demo"]
+        self.assertTrue(credential["ok"])
+        self.assertEqual(credential["token"], "fine_grained")
+        self.assertIn("workflows", credential["unverified"])
+        paths = [path for _, path, _ in self.calls]
+        self.assertTrue(any("/check-runs" in path for path in paths), paths)
+        self.assertTrue(any(path.startswith("/commits/main/status") for path in paths), paths)
+
+    def test_a_submit_touching_workflows_without_the_permission_is_refused_before_commit(self):
+        self.bench.check_credentials()
+        path = self.prepared()
+        before = util.git(["rev-parse", "HEAD"], cwd=path).strip()
+        self.change(path, name=".github/workflows/ci.yml", text="name: changed\n")
+        answer = self.refused("submit", branch="work", message="change the workflow")
+        self.assertEqual(answer["refused"], "missing_workflow_permission")
+        self.assertEqual(answer["permission"], "workflows")
+        self.assertEqual(answer["paths"], [".github/workflows/ci.yml"])
+        self.assertEqual(util.git(["rev-parse", "HEAD"], cwd=path).strip(), before)
+        self.assertEqual(util.git(["diff", "--cached", "--name-only"], cwd=path).strip(), "")
+        # With the permission, the same change commits.
+        self.scopes = ["repo", "workflow"]
+        self.bench.check_credentials()
+        self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR)}
+        answer = self.ok("submit", branch="work", message="change the workflow")
+        self.assertTrue(answer["committed"])
 
 
 class TestCallForm(unittest.TestCase):

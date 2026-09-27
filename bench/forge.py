@@ -4,7 +4,8 @@ Two forges are known: Bitbucket Cloud and GitHub. The forge is read from
 the clone URL, or named in the land block of bench.json. The credential
 comes from the settings (settings.py): BENCH_BITBUCKET_USER and
 BENCH_BITBUCKET_TOKEN for Bitbucket (an app password), BENCH_GITHUB_TOKEN
-or BENCH_GIT_TOKEN for GitHub. On macOS, Bitbucket also reads the keychain
+or BENCH_GIT_TOKEN for GitHub (docs/credential.md names what that token
+needs, and check_credential checks it). On macOS, Bitbucket also reads the keychain
 item for bitbucket.org when the settings have nothing. The rig never
 writes a credential to disk, and it removes the credentials from every
 message that it gives.
@@ -31,7 +32,12 @@ GITHUB = re.compile(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?$")
 
 
 class ForgeError(Exception):
-    """The forge did not answer, or refused."""
+    """The forge did not answer, or refused. `status` is the HTTP status of a
+    refusal, or None when nothing answered."""
+
+    def __init__(self, message, status=None):
+        Exception.__init__(self, message)
+        self.status = status
 
 
 def scrub(text):
@@ -50,6 +56,23 @@ def detect(clone_url):
     return None
 
 
+class _KeepCredentialOnHost(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect, but sends the credential only to the host it was
+    meant for. GitHub answers the log of a job with a 302 to a signed URL
+    on a blob store; that store refuses a request that carries both its
+    signature and our Authorization, and the token must never leave the
+    forge's own host (api.github.com, api.bitbucket.org) in any case."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and (urllib.parse.urlsplit(newurl).netloc.lower()
+                                != urllib.parse.urlsplit(req.full_url).netloc.lower()):
+            for name in list(new.headers):
+                if name.lower() in ("authorization", "cookie"):
+                    del new.headers[name]
+        return new
+
+
 # The one HTTP call. The tests replace it.
 def http(method, url, headers, body=None):
     """Gives (status, text). Raises ForgeError when nothing answers."""
@@ -58,13 +81,45 @@ def http(method, url, headers, body=None):
         data = json.dumps(body).encode("utf-8")
         headers = dict(headers, **{"Content-Type": "application/json"})
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
+    opener = urllib.request.build_opener(_KeepCredentialOnHost)
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:
+        with opener.open(request, timeout=TIMEOUT) as answer:
             return answer.status, answer.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
     except (urllib.error.URLError, OSError) as exc:
         raise ForgeError("no answer from %s: %s" % (urllib.parse.urlsplit(url).netloc, exc))
+
+
+# The scopes of a classic token ride a header of any answer. The tests replace it.
+def token_scopes(url, headers):
+    """Gives the scopes that X-OAuth-Scopes names, as a list, or None when
+    the answer has no such header: a fine-grained token names none. Raises
+    ForgeError when nothing answers."""
+    request = urllib.request.Request(url, method="GET", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:
+            found = answer.headers.get("X-OAuth-Scopes")
+    except urllib.error.HTTPError as exc:
+        found = exc.headers.get("X-OAuth-Scopes") if exc.headers else None
+    except (urllib.error.URLError, OSError) as exc:
+        raise ForgeError("no answer from %s: %s" % (urllib.parse.urlsplit(url).netloc, exc))
+    if found is None:
+        return None
+    return [scope.strip() for scope in found.split(",") if scope.strip()]
+
+
+# What the rig does with GitHub needs these repository permissions, by their
+# fine-grained names. docs/credential.md names the tool behind each one.
+PERMISSIONS = ("metadata", "contents", "pull_requests", "workflows", "actions",
+               "checks", "statuses")
+# The permissions each classic scope gives.
+CLASSIC_SCOPES = {
+    "repo": ("metadata", "contents", "pull_requests", "actions", "checks", "statuses"),
+    "workflow": ("workflows",),
+}
+# A fine-grained token is probed by reads; a write alone proves these.
+WRITE_ONLY = ("contents", "pull_requests", "workflows")
 
 
 def _keychain_bitbucket():
@@ -105,11 +160,12 @@ class Client:
     def judge(self, status, text, url, accept_text=False):
         """Gives the answer of a scrubbed response, or raises ForgeError."""
         if status == 401 or status == 403:
-            raise ForgeError("%s refused the credential (%s)" % (self.provider, status))
+            raise ForgeError("%s refused the credential (%s)" % (self.provider, status), status)
         if status == 404:
-            raise ForgeError("%s has no %s" % (self.provider, urllib.parse.urlsplit(url).path))
+            raise ForgeError("%s has no %s" % (self.provider, urllib.parse.urlsplit(url).path),
+                             status)
         if status >= 400:
-            raise ForgeError("%s answered %s: %s" % (self.provider, status, text[:300]))
+            raise ForgeError("%s answered %s: %s" % (self.provider, status, text[:300]), status)
         if accept_text:
             return text
         if not text.strip():
@@ -187,6 +243,9 @@ class Bitbucket(Client):
     def update_branch(self, number, head_sha):
         return {"refused": "unsupported",
                 "reason": "the rig updates a pull request's branch only on github"}
+
+    def rerun_failed_jobs(self, run_id):
+        raise ForgeError("the rig re-runs a pipeline only on github")
 
     def _pr(self, data):
         approvals = [p.get("user", {}).get("display_name") for p in data.get("participants") or []
@@ -288,6 +347,26 @@ class Bitbucket(Client):
 # ------------------------------------------------------------------ github
 
 
+# The steps a runner takes before a job's own work. A job that failed with
+# no step past these never ran its tests: the runner died, not the code.
+SETUP_STEP = re.compile(r"(?i)^(set ?up\b|run actions/checkout\b|checkout\b|initiali[sz]e containers?\b"
+                        r"|start(ing)? .*\b(services?|containers?)\b|.*\bnetwork\b|post |complete job\b"
+                        r"|stop containers?\b)")
+
+
+def job_interrupted(job):
+    """Tells if a GitHub job stopped before its own work: cancelled, timed
+    out, or failed with no step past setup."""
+    conclusion = job.get("conclusion")
+    if conclusion in ("cancelled", "timed_out"):
+        return True
+    if conclusion != "failure":
+        return False
+    return not any(step.get("conclusion") not in (None, "skipped")
+                   and not SETUP_STEP.match(step.get("name") or "")
+                   for step in job.get("steps") or [])
+
+
 class GitHub(Client):
     provider = "github"
     api = "https://api.github.com/repos"
@@ -311,6 +390,41 @@ class GitHub(Client):
         if query:
             base += "?" + urllib.parse.urlencode(query)
         return base
+
+    def check_credential(self, branch):
+        """Checks the token against PERMISSIONS on this repository. Gives
+        {ok, token, missing, unverified}. A classic token names its scopes,
+        so each permission is known. A fine-grained token is probed by reads
+        on the branch: a refusal is a missing permission, and what only a
+        write could prove is unverified."""
+        try:
+            scopes = token_scopes(self.url(""), self.headers())
+            self.request("GET", self.url(""))
+        except ForgeError as exc:
+            return {"ok": False, "token": None, "missing": list(PERMISSIONS),
+                    "unverified": [], "reason": scrub(str(exc))}
+        if scopes is not None:
+            held = set()
+            for scope in scopes:
+                held.update(CLASSIC_SCOPES.get(scope, ()))
+            missing = [name for name in PERMISSIONS if name not in held]
+            return {"ok": not missing, "token": "classic", "missing": missing,
+                    "unverified": []}
+        ref = urllib.parse.quote(branch, safe="")
+        probes = {"actions": self.url("/actions/runs", per_page=1),
+                  "checks": self.url("/commits/%s/check-runs" % ref, per_page=1),
+                  "statuses": self.url("/commits/%s/status" % ref)}
+        missing = []
+        for name, url in probes.items():
+            try:
+                status, _ = http("GET", url, self.headers())
+            except ForgeError as exc:
+                return {"ok": False, "token": "fine_grained", "missing": [],
+                        "unverified": list(PERMISSIONS), "reason": scrub(str(exc))}
+            if status in (401, 403):
+                missing.append(name)
+        return {"ok": not missing, "token": "fine_grained", "missing": missing,
+                "unverified": list(WRITE_ONLY)}
 
     def find_pull_request(self, branch, target):
         values = self.request("GET", self.url("/pulls", head="%s:%s" % (self.owner, branch),
@@ -412,8 +526,14 @@ class GitHub(Client):
                 "state": (job.get("status") or "").lower(),
                 "result": (job.get("conclusion") or "").lower(),
                 "seconds": None, "failed_steps": failed,
+                "interrupted": job_interrupted(job),
             })
         return found
+
+    def rerun_failed_jobs(self, run_id):
+        """Starts the failed and cancelled jobs of one workflow run again."""
+        self.request("POST", self.url("/actions/runs/%s/rerun-failed-jobs" % run_id), {})
+        return True
 
     def step_log(self, pipeline_id, step_id):
         # The log of a job comes as a redirect to a zip; the tail is what matters.
@@ -422,10 +542,37 @@ class GitHub(Client):
         except ForgeError as exc:
             return "(no log: %s)" % exc
 
+    def check_runs(self, sha, limit=100):
+        """Gives the check runs on one commit. A fine-grained token cannot hold
+        the Checks permission, so on a private repository check-runs answers
+        401 or 403; then each Actions job on the commit stands in for a check
+        run of the same name (the token reads Actions)."""
+        try:
+            data = self.request("GET", self.url("/commits/%s/check-runs" % sha, per_page=limit))
+        except ForgeError as exc:
+            if exc.status not in (401, 403):
+                raise
+            return self.action_jobs(sha)
+        return data.get("check_runs") or []
+
+    def action_jobs(self, sha):
+        """Gives the jobs of every Actions run on one commit, shaped as check runs."""
+        runs = self.request("GET", self.url("/actions/runs", head_sha=sha, per_page=100))
+        found = []
+        for run in runs.get("workflow_runs") or []:
+            data = self.request("GET", self.url("/actions/runs/%s/jobs" % run.get("id"),
+                                                per_page=100))
+            for job in data.get("jobs") or []:
+                found.append({
+                    "name": job.get("name"), "status": job.get("status"),
+                    "conclusion": job.get("conclusion"), "html_url": job.get("html_url"),
+                    "completed_at": job.get("completed_at"), "output": {},
+                })
+        return found
+
     def statuses(self, sha):
         found = []
-        data = self.request("GET", self.url("/commits/%s/check-runs" % sha, per_page=50))
-        for item in data.get("check_runs") or []:
+        for item in self.check_runs(sha, limit=50):
             state = item.get("conclusion") or item.get("status") or ""
             found.append({
                 "name": item.get("name"), "key": item.get("name"),
@@ -448,8 +595,7 @@ class GitHub(Client):
             if name and rank[state] >= rank.get(states.get(name), -1):
                 states[name] = state
 
-        runs = self.request("GET", self.url("/commits/%s/check-runs" % sha, per_page=100))
-        for item in runs.get("check_runs") or []:
+        for item in self.check_runs(sha):
             if item.get("status") != "completed":
                 put(item.get("name"), "pending")
             else:
