@@ -64,6 +64,8 @@ class LandingCase(unittest.TestCase):
             if path.startswith(key) and (isinstance(answer, tuple) and answer[0] == method
                                          or not isinstance(answer, tuple)):
                 payload = answer[1] if isinstance(answer, tuple) else answer
+                if isinstance(payload, int):  # a refusal: the forge answers this status
+                    return payload, '{"message":"refused"}'
                 if isinstance(payload, str):
                     return 200, payload
                 return 200, json.dumps(payload)
@@ -546,6 +548,34 @@ class TestHouseMerge(LandingCase):
         self.assertEqual(answer["refused"], "no_required_checks")
         self.assertEqual(self.calls, [])
 
+    def refused_checks(self, conclusion, status="completed"):
+        """A private repository: check-runs answers 403, and the gate job
+        is read through the Actions API."""
+        self.forge_with(runs=check_runs())
+        self.answers.update({
+            "/commits/abc123/check-runs": ("GET", 403),
+            "/actions/runs?": ("GET", {"workflow_runs": [{"id": 51, "head_sha": "abc123"}]}),
+            "/actions/runs/51/jobs": ("GET", {"jobs": [
+                {"id": 61, "name": "gate", "status": status, "conclusion": conclusion}]}),
+        })
+
+    def test_refused_check_runs_are_read_through_actions(self):
+        client = forge.GitHub("o", "r")
+        self.refused_checks("success")
+        self.assertEqual(client.check_states("abc123"), {"gate": "success"})
+        self.refused_checks("failure")
+        self.assertEqual(client.check_states("abc123"), {"gate": "failure"})
+        self.refused_checks(None, status="in_progress")
+        self.assertEqual(client.check_states("abc123"), {"gate": "pending"})
+        asked = [path for _, path, _ in self.calls]
+        self.assertIn("/actions/runs?head_sha=abc123&per_page=100", asked)
+
+    def test_a_gate_green_only_through_actions_merges(self):
+        self.refused_checks("success")
+        answer = self.green(required_checks=["gate"])
+        self.assertEqual(answer["state"], "merged")
+        self.assertEqual(self.merges(), [{"sha": "abc123", "merge_method": "merge"}])
+
     def test_merge_by_house_opens_the_pull_request_without_auto_merge(self):
         path = self.prepared()
         self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR)}
@@ -823,6 +853,23 @@ class TestPullRequestAndFeedback(LandingCase):
         status = [f for f in feedback["findings"] if f["source"] == "status"]
         self.assertEqual([f["name"] for f in status], ["test-factory", "gate"])
         self.assertNotIn("log_in", status[0])
+
+    def test_feedback_on_a_private_repository_reads_the_jobs_through_actions(self):
+        # check-runs refuses the fine-grained token; the Actions jobs stand in.
+        feedback = self.two_workflows({
+            "/actions/jobs/31/logs": "FAIL in (factory-test) (factory_test.clj:12)\n",
+            "/commits/abc123/check-runs": ("GET", 403),
+            "/actions/runs/423/jobs": {"jobs": [
+                {"id": 30, "name": "image", "status": "completed", "conclusion": "success",
+                 "html_url": "https://github.com/o/r/actions/runs/423/job/30"}]},
+        })
+        self.assertEqual(feedback["unavailable"], [])
+        self.assertEqual([s["name"] for s in feedback["statuses"]], ["image", "test-factory"])
+        status = [f for f in feedback["findings"] if f["source"] == "status"]
+        self.assertEqual([f["name"] for f in status], ["test-factory"])
+        self.assertEqual(status[0]["log_in"]["step"], "test-factory")
+        pipeline = [f for f in feedback["findings"] if f["source"] == "pipeline"]
+        self.assertIn("FAIL in (factory-test)", pipeline[0]["message"])
 
     def test_the_log_tail_keeps_the_test_report(self):
         head = "FAIL in (factory-test) (factory_test.clj:12)\nexpected: 1\n  actual: 2\n"
