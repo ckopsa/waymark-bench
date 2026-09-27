@@ -360,6 +360,36 @@ class TestSubmit(BenchCase):
         self.assertEqual(answer["refused"], "over_ceiling")
         self.assertEqual(answer["lines"], 40)
         self.assertEqual(answer["max_lines"], 10)
+        base_head = util.git(["rev-parse", "refs/remotes/origin/main"], cwd=path).strip()
+        self.assertEqual(answer["against"], base_head)
+        self.assertEqual(answer["target"], "main")
+
+    def test_submit_ceiling_does_not_count_a_merged_base(self):
+        # A conflict fix merges the base in; the base's own lines are on
+        # both sides of the pull request's diff, so they do not count.
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")
+        self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "big.txt", "line\n" * 40)
+        util.push_change(other, "main", "docs/a.txt", "alpha\ntheirs\ncharlie\n")
+        pulled = self.ok("pull", branch="work", **{"from": "base"})
+        self.assertEqual(pulled["conflicts"], ["docs/a.txt"])
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nboth\ncharlie\n")
+        answer = self.ok("submit", branch="work", message="fix the conflict", max_lines=10)
+        self.assertEqual(answer["lines_added"] + answer["lines_removed"], 2)
+        self.assertEqual(answer["files"], 1)
+        parents = util.git(["log", "-1", "--format=%P", answer["commit"]], cwd=path).split()
+        self.assertEqual(len(parents), 2)
+
+    def test_submit_ceiling_counts_the_whole_change_across_rounds(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "one.txt"), "line\n" * 8)
+        self.ok("submit", branch="work", message="round one", max_lines=10)
+        util.write(os.path.join(path, "two.txt"), "line\n" * 8)
+        answer = self.refused("submit", branch="work", message="round two", max_lines=10)
+        self.assertEqual(answer["refused"], "over_ceiling")
+        self.assertEqual(answer["lines"], 16)
 
     def test_submit_refuses_a_push_that_does_not_land(self):
         path = self.prepared()
