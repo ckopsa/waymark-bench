@@ -637,6 +637,87 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertTrue(any(item.startswith("pipelines:") for item in feedback["unavailable"]))
         self.assertEqual(feedback["findings"], [])
 
+    def two_workflows(self, extra):
+        """Submits, then answers two runs on the head: image (newest, green) and tests (red)."""
+        self.github()
+        path = self.prepared()
+        self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR)}
+        self.change(path)
+        self.ok("submit", branch="work", message="change one line")
+        self.answers = {
+            "/pulls?": ("GET", [GITHUB_PR]),
+            "/actions/runs?": {"workflow_runs": [
+                {"id": 423, "run_number": 5, "status": "completed", "conclusion": "success",
+                 "head_sha": "abc123", "html_url": "https://github.com/o/r/actions/runs/423",
+                 "name": "image"},
+                {"id": 614, "run_number": 9, "status": "completed", "conclusion": "failure",
+                 "head_sha": "abc123", "html_url": "https://github.com/o/r/actions/runs/614",
+                 "name": "tests"}]},
+            "/actions/runs/614/jobs": {"jobs": [
+                {"id": 31, "name": "test-factory", "status": "completed", "conclusion": "failure",
+                 "steps": [{"name": "clojure -M:test", "conclusion": "failure"}]}]},
+            "/issues/7/comments": [],
+            "/pulls/7/comments": [],
+        }
+        self.answers.update(extra)
+        self.calls = []
+        return self.ok("feedback", branch="work")
+
+    def test_feedback_reads_the_red_pipeline_when_a_newer_one_is_green(self):
+        log = ("\nFAIL in (factory-test) (factory_test.clj:12)\nexpected: 1\n  actual: 2\n"
+               "\nRan 40 tests containing 90 assertions.\n1 failures, 0 errors.\n")
+        feedback = self.two_workflows({
+            "/actions/jobs/31/logs": log,
+            "/commits/abc123/check-runs": {"check_runs": [
+                {"name": "image", "status": "completed", "conclusion": "success",
+                 "html_url": "https://github.com/o/r/actions/runs/423/job/30"},
+                {"name": "test-factory", "status": "completed", "conclusion": "failure",
+                 "html_url": "https://github.com/o/r/actions/runs/614/job/31"}]},
+        })
+        self.assertEqual(feedback["unavailable"], [])
+        pipeline = [f for f in feedback["findings"] if f["source"] == "pipeline"]
+        self.assertEqual(len(pipeline), 1)
+        self.assertEqual(pipeline[0]["step"], "test-factory")
+        self.assertEqual(pipeline[0]["url"], "https://github.com/o/r/actions/runs/614")
+        self.assertIn("FAIL in (factory-test)", pipeline[0]["message"])
+        status = [f for f in feedback["findings"] if f["source"] == "status"]
+        self.assertEqual(len(status), 1)
+        self.assertEqual(status[0]["log_in"], {"source": "pipeline", "step": "test-factory",
+                                               "url": "https://github.com/o/r/actions/runs/614"})
+        asked = [path for _, path, _ in self.calls]
+        self.assertNotIn("/actions/runs/423/jobs?per_page=50", asked)
+        self.assertTrue(any(path.startswith("/actions/runs/614/jobs") for path in asked))
+
+    def test_a_failed_status_with_no_fetchable_log_is_unavailable(self):
+        # No answer for /actions/jobs/31/logs: the forge gives 404.
+        feedback = self.two_workflows({
+            "/commits/abc123/check-runs": {"check_runs": [
+                {"name": "test-factory", "status": "completed", "conclusion": "failure",
+                 "html_url": "https://github.com/o/r/actions/runs/614/job/31"},
+                {"name": "gate", "status": "completed", "conclusion": "failure",
+                 "html_url": "https://github.com/o/r/actions/runs/700/job/77"}]},
+        })
+        unavailable = feedback["unavailable"]
+        self.assertTrue(any(item.startswith("log: tests test-factory: github has no") for item in unavailable),
+                        unavailable)
+        self.assertTrue(any(item.startswith("log: gate:") for item in unavailable), unavailable)
+        status = [f for f in feedback["findings"] if f["source"] == "status"]
+        self.assertEqual([f["name"] for f in status], ["test-factory", "gate"])
+        self.assertNotIn("log_in", status[0])
+
+    def test_the_log_tail_keeps_the_test_report(self):
+        head = "FAIL in (factory-test) (factory_test.clj:12)\nexpected: 1\n  actual: 2\n"
+        noise = "".join("compiling namespace %d of the build\n" % i for i in range(400))
+        text = "setup\n" + head + noise + "Ran 40 tests containing 90 assertions.\n1 failures, 0 errors.\n"
+        cut = tools.log_tail(text, 1024)
+        self.assertLessEqual(len(cut.encode("utf-8")), 1024)
+        for marker in ("FAIL in (factory-test)", "expected: 1", "actual: 2", "Ran 40 tests", "1 failures"):
+            self.assertIn(marker, cut)
+        self.assertIn("...", cut)
+        self.assertEqual(tools.log_tail("short\n", 1024), "short\n")
+        plain = "x\n" * 2000
+        self.assertEqual(tools.log_tail(plain, 256), tools.landing_module.tail(plain, 256))
+
 
 class TestCallForm(unittest.TestCase):
 

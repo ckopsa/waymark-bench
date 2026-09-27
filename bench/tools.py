@@ -1036,38 +1036,61 @@ def feedback(bench, args):
                          "message": "auto-merge is not on: %s" % auto["refused"],
                          "url": pr.get("url") if pr else None})
 
+    head = (pr or {}).get("head") or (item.state.get("head") if item else None)
     pipelines = attempt("pipelines", lambda: client.pipelines(branch), [])
-    answer["pipelines"] = pipelines[:5]
-    if pipelines:
-        newest = pipelines[0]
-        if newest.get("result") in ("failed", "error", "failure", "stopped", "cancelled"):
-            steps = attempt("steps", lambda: client.steps(newest["id"]), [])
-            newest["steps"] = steps
+    chosen = pipelines_of_head(pipelines, head)
+    answer["pipelines"] = pipelines[:5] + [p for p in chosen if p not in pipelines[:5]]
+    read = []  # (pipeline, step, log) of each failed step; log is None when none came
+    for pipeline in chosen:
+        if pipeline.get("result") in ("failed", "error", "failure", "stopped", "cancelled"):
+            steps = attempt("steps", lambda: client.steps(pipeline["id"]), [])
+            pipeline["steps"] = steps
             for step in steps:
                 if step.get("result") not in ("failed", "error", "failure"):
                     continue
-                log = attempt("log", lambda: client.step_log(newest["id"], step["id"]), "")
-                log = landing_module.tail(log, log_bytes)
+                try:
+                    log = client.step_log(pipeline["id"], step["id"]) or ""
+                except forge.ForgeError as exc:
+                    log = "(no log: %s)" % exc
+                if not log.strip() or log.startswith("(no log:"):
+                    reason = log[len("(no log: "):-1] if log.strip() else "the forge gave an empty log"
+                    answer["unavailable"].append("log: %s %s: %s" % (
+                        pipeline.get("kind") or "pipeline", step.get("name"), reason))
+                    read.append((pipeline, step, None))
+                else:
+                    read.append((pipeline, step, log))
+                log = log_tail(log, log_bytes)
                 findings.append({
                     "source": "pipeline", "step": step.get("name"), "severity": "error",
                     "message": log, "locations": landing_module.locations(log),
-                    "url": newest.get("url"),
+                    "url": pipeline.get("url"),
                 })
-        elif newest.get("state") in ("in_progress", "pending", "queued", "inprogress"):
+        elif pipeline.get("state") in ("in_progress", "pending", "queued", "inprogress"):
             findings.append({"source": "pipeline", "severity": "info",
-                             "message": "the pipeline is still running", "url": newest.get("url")})
+                             "message": "the pipeline is still running", "url": pipeline.get("url")})
 
-    head = (pr or {}).get("head") or (item.state.get("head") if item else None)
     if head:
         statuses = attempt("statuses", lambda: client.statuses(head), [])
         answer["statuses"] = statuses
         for status in statuses:
             if status.get("state") in ("failed", "failure", "error", "stopped"):
-                findings.append({
+                finding = {
                     "source": "status", "name": status.get("name"), "severity": "error",
                     "message": status.get("description") or "%s failed" % status.get("name"),
                     "url": status.get("url"),
-                })
+                }
+                found = step_of_status(status, read)
+                if found and found[2] is not None:
+                    pipeline, step, _ = found
+                    finding["message"] += ": the log of step %s is in the pipeline finding of %s" % (
+                        step.get("name"), pipeline.get("url"))
+                    finding["log_in"] = {"source": "pipeline", "step": step.get("name"),
+                                         "url": pipeline.get("url")}
+                elif not found and status_of_pipeline(status, pipelines):
+                    answer["unavailable"].append(
+                        "log: %s: the check belongs to a pipeline whose failed step log was not read"
+                        % status.get("name"))
+                findings.append(finding)
 
     if pr and pr.get("number") is not None:
         comments = attempt("comments", lambda: client.comments(pr["number"]), [])
@@ -1081,6 +1104,96 @@ def feedback(bench, args):
             })
     answer["findings"] = findings
     return cap_answer(answer, max_bytes)
+
+
+# The lines of a test report that must survive the cut of a log: clojure.test
+# and the like name the failure, the two values and the count.
+LOG_MARKERS = re.compile(r"FAIL in|ERROR in|expected:|actual:|Ran \d+ tests|\d+ failures?, \d+ errors?")
+
+
+def pipelines_of_head(pipelines, head):
+    """Gives the newest pipeline of each workflow on the head commit.
+
+    A forge runs several workflows on one push, and the newest of them is
+    not always the one that failed. Without a head, or when no pipeline
+    names it, the newest pipeline of each workflow counts.
+    """
+    on_head = [p for p in pipelines if head and p.get("commit") == head]
+    chosen = []
+    kinds = set()
+    for pipeline in on_head or pipelines:
+        kind = pipeline.get("kind")
+        if kind in kinds:
+            continue
+        kinds.add(kind)
+        chosen.append(pipeline)
+    return chosen
+
+
+def step_of_status(status, read):
+    """Gives the (pipeline, step, log) whose job made a failed status, or None."""
+    url = status.get("url") or ""
+    for pipeline, step, log in read:
+        if step.get("name") and step.get("name") == status.get("name"):
+            return pipeline, step, log
+        if step.get("id") is not None and url.endswith("/job/%s" % step["id"]):
+            return pipeline, step, log
+    return None
+
+
+def status_of_pipeline(status, pipelines):
+    """Tells if a status is a job of one of the pipelines."""
+    url = status.get("url") or ""
+    if "/actions/runs/" in url:
+        return True
+    return any(p.get("url") and url.startswith(p["url"] + "/") for p in pipelines)
+
+
+def log_tail(text, size):
+    """Gives the end of a log in size bytes, keeping the lines of the test report.
+
+    Half the room goes to the last lines; the rest to the lines around each
+    marker, the latest first, and then to more of the end. A gap is "...".
+    """
+    if not text or len(text.encode("utf-8", "replace")) <= size:
+        return text or ""
+    lines = text.splitlines()
+    marks = [i for i, line in enumerate(lines) if LOG_MARKERS.search(line)]
+    if not marks:
+        return landing_module.tail(text, size)
+
+    def cost(index):
+        return len(lines[index].encode("utf-8", "replace")) + 5
+
+    keep = set()
+    used = 0
+    index = len(lines) - 1
+    while index >= 0 and used + cost(index) <= size // 2:
+        keep.add(index)
+        used += cost(index)
+        index -= 1
+    for mark in reversed(marks):
+        window = [i for i in range(max(0, mark - 2), min(len(lines), mark + 4)) if i not in keep]
+        extra = sum(cost(i) for i in window)
+        if used + extra > size:
+            continue
+        keep.update(window)
+        used += extra
+    while index >= 0 and used + cost(index) <= size:
+        if index not in keep:
+            keep.add(index)
+            used += cost(index)
+        index -= 1
+    if not keep:
+        return landing_module.tail(text, size)
+    out = []
+    last = -1
+    for i in sorted(keep):
+        if i != last + 1:
+            out.append("...")
+        out.append(lines[i])
+        last = i
+    return "\n".join(out)
 
 
 def cap_answer(answer, max_bytes):
