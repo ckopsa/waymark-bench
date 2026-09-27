@@ -31,7 +31,12 @@ GITHUB = re.compile(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?$")
 
 
 class ForgeError(Exception):
-    """The forge did not answer, or refused."""
+    """The forge did not answer, or refused. `status` is the HTTP status of a
+    refusal, or None when nothing answered."""
+
+    def __init__(self, message, status=None):
+        Exception.__init__(self, message)
+        self.status = status
 
 
 def scrub(text):
@@ -102,11 +107,12 @@ class Client:
         status, text = http(method, url, self.headers(), body)
         text = scrub(text)
         if status == 401 or status == 403:
-            raise ForgeError("%s refused the credential (%s)" % (self.provider, status))
+            raise ForgeError("%s refused the credential (%s)" % (self.provider, status), status)
         if status == 404:
-            raise ForgeError("%s has no %s" % (self.provider, urllib.parse.urlsplit(url).path))
+            raise ForgeError("%s has no %s" % (self.provider, urllib.parse.urlsplit(url).path),
+                             status)
         if status >= 400:
-            raise ForgeError("%s answered %s: %s" % (self.provider, status, text[:300]))
+            raise ForgeError("%s answered %s: %s" % (self.provider, status, text[:300]), status)
         if accept_text:
             return text
         if not text.strip():
@@ -415,10 +421,37 @@ class GitHub(Client):
         except ForgeError as exc:
             return "(no log: %s)" % exc
 
+    def check_runs(self, sha, limit=100):
+        """Gives the check runs on one commit. A fine-grained token cannot hold
+        the Checks permission, so on a private repository check-runs answers
+        401 or 403; then each Actions job on the commit stands in for a check
+        run of the same name (the token reads Actions)."""
+        try:
+            data = self.request("GET", self.url("/commits/%s/check-runs" % sha, per_page=limit))
+        except ForgeError as exc:
+            if exc.status not in (401, 403):
+                raise
+            return self.action_jobs(sha)
+        return data.get("check_runs") or []
+
+    def action_jobs(self, sha):
+        """Gives the jobs of every Actions run on one commit, shaped as check runs."""
+        runs = self.request("GET", self.url("/actions/runs", head_sha=sha, per_page=100))
+        found = []
+        for run in runs.get("workflow_runs") or []:
+            data = self.request("GET", self.url("/actions/runs/%s/jobs" % run.get("id"),
+                                                per_page=100))
+            for job in data.get("jobs") or []:
+                found.append({
+                    "name": job.get("name"), "status": job.get("status"),
+                    "conclusion": job.get("conclusion"), "html_url": job.get("html_url"),
+                    "completed_at": job.get("completed_at"), "output": {},
+                })
+        return found
+
     def statuses(self, sha):
         found = []
-        data = self.request("GET", self.url("/commits/%s/check-runs" % sha, per_page=50))
-        for item in data.get("check_runs") or []:
+        for item in self.check_runs(sha, limit=50):
             state = item.get("conclusion") or item.get("status") or ""
             found.append({
                 "name": item.get("name"), "key": item.get("name"),
@@ -441,8 +474,7 @@ class GitHub(Client):
             if name and rank[state] >= rank.get(states.get(name), -1):
                 states[name] = state
 
-        runs = self.request("GET", self.url("/commits/%s/check-runs" % sha, per_page=100))
-        for item in runs.get("check_runs") or []:
+        for item in self.check_runs(sha):
             if item.get("status") != "completed":
                 put(item.get("name"), "pending")
             else:
