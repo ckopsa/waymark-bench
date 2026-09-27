@@ -18,11 +18,12 @@ needs, so the token can be made whole, and no larger.
 | `feedback`, `merge` | read check runs | Checks: read | `repo` |
 | `feedback`, `merge` | read commit statuses | Commit statuses: read | `repo` |
 | `merge` | merge the pull request | Contents: read and write, Pull requests: read and write | `repo` |
+| `rerun` | re-run the failed jobs of an interrupted workflow run | Actions: read and write | `repo` |
 
 In short: a classic token needs `repo` and `workflow`. A fine-grained token
 needs these repository permissions: Contents (read and write), Pull requests
 (read and write), Workflows (read and write), Commit statuses (read), Checks
-(read), Actions (read) and Metadata (read).
+(read), Actions (read and write) and Metadata (read).
 
 Use a fine-grained token, limited to the enrolled repositories. Add a
 repository to the token when you enroll it.

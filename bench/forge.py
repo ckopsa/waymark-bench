@@ -237,6 +237,9 @@ class Bitbucket(Client):
     def merge_when_green(self, number, head_sha, required_checks, method="merge"):
         raise ForgeError("the rig merges a pull request itself only on github")
 
+    def rerun_failed_jobs(self, run_id):
+        raise ForgeError("the rig re-runs a pipeline only on github")
+
     def _pr(self, data):
         approvals = [p.get("user", {}).get("display_name") for p in data.get("participants") or []
                      if p.get("approved")]
@@ -335,6 +338,26 @@ class Bitbucket(Client):
 
 
 # ------------------------------------------------------------------ github
+
+
+# The steps a runner takes before a job's own work. A job that failed with
+# no step past these never ran its tests: the runner died, not the code.
+SETUP_STEP = re.compile(r"(?i)^(set ?up\b|run actions/checkout\b|checkout\b|initiali[sz]e containers?\b"
+                        r"|start(ing)? .*\b(services?|containers?)\b|.*\bnetwork\b|post |complete job\b"
+                        r"|stop containers?\b)")
+
+
+def job_interrupted(job):
+    """Tells if a GitHub job stopped before its own work: cancelled, timed
+    out, or failed with no step past setup."""
+    conclusion = job.get("conclusion")
+    if conclusion in ("cancelled", "timed_out"):
+        return True
+    if conclusion != "failure":
+        return False
+    return not any(step.get("conclusion") not in (None, "skipped")
+                   and not SETUP_STEP.match(step.get("name") or "")
+                   for step in job.get("steps") or [])
 
 
 class GitHub(Client):
@@ -496,8 +519,14 @@ class GitHub(Client):
                 "state": (job.get("status") or "").lower(),
                 "result": (job.get("conclusion") or "").lower(),
                 "seconds": None, "failed_steps": failed,
+                "interrupted": job_interrupted(job),
             })
         return found
+
+    def rerun_failed_jobs(self, run_id):
+        """Starts the failed and cancelled jobs of one workflow run again."""
+        self.request("POST", self.url("/actions/runs/%s/rerun-failed-jobs" % run_id), {})
+        return True
 
     def step_log(self, pipeline_id, step_id):
         # The log of a job comes as a redirect to a zip; the tail is what matters.

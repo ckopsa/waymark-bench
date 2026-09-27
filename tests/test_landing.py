@@ -871,6 +871,97 @@ class TestPullRequestAndFeedback(LandingCase):
         pipeline = [f for f in feedback["findings"] if f["source"] == "pipeline"]
         self.assertIn("FAIL in (factory-test)", pipeline[0]["message"])
 
+    def submitted(self):
+        """Submits one change on a GitHub repository. Gives the pushed head."""
+        self.github()
+        path = self.prepared()
+        self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR)}
+        self.change(path)
+        return self.ok("submit", branch="work", message="change one line")["commit"]
+
+    def one_run(self, head, jobs):
+        """Answers one failed run of workflow tests on head, with these jobs."""
+        self.answers = {
+            "/pulls?": ("GET", [GITHUB_PR]),
+            "/actions/runs/11/rerun-failed-jobs": ("POST", {}),
+            "/actions/runs/11/jobs": ("GET", {"jobs": jobs}),
+            "/actions/runs?": ("GET", {"workflow_runs": [
+                {"id": 11, "run_number": 3, "status": "completed", "conclusion": "failure",
+                 "head_sha": head, "html_url": "https://github.com/o/r/actions/runs/11",
+                 "name": "tests"}]}),
+            "/commits/%s/check-runs" % head: ("GET", {"check_runs": [
+                {"name": job["name"], "status": "completed", "conclusion": job["conclusion"],
+                 "html_url": "https://github.com/o/r/actions/runs/11/job/%s" % job["id"]}
+                for job in jobs]}),
+            "/issues/7/comments": ("GET", []),
+            "/pulls/7/comments": ("GET", []),
+        }
+        self.calls = []
+
+    def reruns(self):
+        return [path for method, path, _ in self.calls if method == "POST"]
+
+    DEAD_JOBS = [
+        {"id": 21, "name": "unit", "status": "completed", "conclusion": "failure",
+         "steps": [{"name": "Set up job", "conclusion": "success"},
+                   {"name": "Run actions/checkout@v4", "conclusion": "failure"},
+                   {"name": "Run tests", "conclusion": "skipped"}]},
+        {"id": 22, "name": "lint", "status": "completed", "conclusion": "cancelled",
+         "steps": [{"name": "Set up job", "conclusion": "success"},
+                   {"name": "Run ruff", "conclusion": "cancelled"}]}]
+    RED_JOBS = [
+        {"id": 21, "name": "unit", "status": "completed", "conclusion": "failure",
+         "steps": [{"name": "Set up job", "conclusion": "success"},
+                   {"name": "Run tests", "conclusion": "failure"}]},
+        {"id": 22, "name": "lint", "status": "completed", "conclusion": "cancelled",
+         "steps": []}]
+
+    def test_rerun_starts_an_interrupted_run_once_per_head(self):
+        head = self.submitted()
+        self.one_run(head, self.DEAD_JOBS)
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["run_id"], 11)
+        self.assertEqual(answer["head"], head)
+        self.assertEqual(answer["runs"][0]["jobs"], ["unit", "lint"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+        again = self.refused("rerun", branch="work")
+        self.assertEqual(again["refused"], "already_rerun")
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_rerun_refuses_a_run_with_a_red_test_step(self):
+        head = self.submitted()
+        self.one_run(head, self.RED_JOBS)
+        answer = self.refused("rerun", branch="work")
+        self.assertEqual(answer["refused"], "red")
+        self.assertEqual(answer["jobs"], ["unit"])
+        self.assertEqual(self.reruns(), [])
+
+    def test_rerun_refuses_a_head_that_is_not_pushed_or_not_interrupted(self):
+        self.github()
+        self.prepared()
+        self.assertEqual(self.refused("rerun", branch="work")["refused"], "not_pushed")
+        head = self.submitted()
+        self.one_run(head, [{"id": 21, "name": "unit", "status": "completed",
+                             "conclusion": "success", "steps": []}])
+        self.assertEqual(self.refused("rerun", branch="work")["refused"], "nothing_interrupted")
+        self.assertEqual(self.reruns(), [])
+
+    def test_feedback_marks_an_interrupted_run_and_a_red_one_as_red(self):
+        self.submitted()
+        self.one_run("abc123", self.DEAD_JOBS)
+        feedback = self.ok("feedback", branch="work")
+        sources = [(f["source"], f["severity"]) for f in feedback["findings"]]
+        # the cancelled lint job is no failed status; the unit job's is
+        self.assertEqual(sources, [("pipeline", "interrupted"), ("status", "interrupted")])
+        self.assertTrue(feedback["findings"][0]["message"].startswith("ci: interrupted"))
+        self.assertEqual(feedback["findings"][0]["jobs"], ["unit", "lint"])
+        self.assertFalse(any("/logs" in path for _, path, _ in self.calls))
+        self.one_run("abc123", self.RED_JOBS)
+        feedback = self.ok("feedback", branch="work")
+        severities = [f["severity"] for f in feedback["findings"]]
+        self.assertIn("error", severities)
+        self.assertNotIn("interrupted", severities)
+
     def test_the_log_tail_keeps_the_test_report(self):
         head = "FAIL in (factory-test) (factory_test.clj:12)\nexpected: 1\n  actual: 2\n"
         noise = "".join("compiling namespace %d of the build\n" % i for i in range(400))
