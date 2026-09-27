@@ -881,7 +881,10 @@ def submit(bench, args):
             if max_lines is not None:
                 ceiling = _int(args, "max_lines", 0, 0, 1000000)
                 if added + removed > ceiling:
-                    git.run(["reset", "-q"], cwd=worktree, check=False)
+                    # A pathspec unstages without git reset's other work: a
+                    # path-less reset also drops MERGE_HEAD, and a merge from
+                    # pull would then commit with one parent.
+                    git.run(["reset", "-q", "--", "."], cwd=worktree, check=False)
                     raise Refusal("over_ceiling", lines=added + removed, max_lines=ceiling,
                                   files=files, remedy="make the change smaller, or raise the ceiling")
             commit_args = ["commit", "-m", message]

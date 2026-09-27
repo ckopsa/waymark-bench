@@ -361,6 +361,22 @@ class TestSubmit(BenchCase):
         self.assertEqual(answer["lines"], 40)
         self.assertEqual(answer["max_lines"], 10)
 
+    def test_submit_over_the_ceiling_keeps_a_merge_in_progress(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")
+        self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
+        other = util.clone(self.root, self.clone_url)
+        util.write(os.path.join(other, "big.txt"), "line\n" * 40)
+        util.push_change(other, "main", "docs/a.txt", "alpha\ntheirs\ncharlie\n")
+        self.assertFalse(self.ok("pull", branch="work", **{"from": "base"})["merged"])
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nboth\ncharlie\n")
+        answer = self.refused("submit", branch="work", message="the merge", max_lines=10)
+        self.assertEqual(answer["refused"], "over_ceiling")
+        util.git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=path)
+        done = self.ok("submit", branch="work", message="the merge", trailers=["Seat: test"])
+        parents = util.git(["log", "-1", "--format=%P", done["commit"]], cwd=path).split()
+        self.assertEqual(len(parents), 2)
+
     def test_submit_refuses_a_push_that_does_not_land(self):
         path = self.prepared()
         other = util.clone(self.root, self.clone_url)
