@@ -1,9 +1,9 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives thirteen
+for each repository and a git worktree for each branch. It gives fourteen
 tools: `prepare`, `status`, `find`, `read`, `edit`, `pull`, `submit`,
-`feedback`, `discard`, `merge`, `enroll`, `repos` and `unenroll`. It needs Python
+`feedback`, `discard`, `merge`, `update_branch`, `enroll`, `repos` and `unenroll`. It needs Python
 3.11, git, and one library: pydantic-settings, for the settings.
 
 ```
@@ -135,6 +135,17 @@ merges only when every required check is success, and names `head_sha`
 in the merge so GitHub refuses a moved head. It refuses a moved head
 (`head_moved`), a draft, a conflict (`not_mergeable`) and an empty
 `required_checks`: the rig never merges a change nothing has tested.
+When the checks are green but GitHub says the branch is `behind` its
+base, `merge` answers `behind` and does not try the merge.
+
+`update_branch` brings such a branch up to date: give `number` and
+`head_sha` (the head the engine saw). GitHub merges the base into the
+branch - never a rebase, never a force - and the call names `head_sha`,
+so a moved head is refused (`head_moved`). It answers `updated` (the
+head will move and the checks run again) or `current` (already up to
+date), and refuses a conflict (`not_mergeable`), any other GitHub
+refusal (`update_refused`) and a forge that is not GitHub
+(`unsupported`).
 
 The landing runs in the background, and `submit` answers at once with
 the landing running: follow it with `status` or `feedback`. Give `wait`

@@ -540,6 +540,43 @@ class TestHouseMerge(LandingCase):
                         runs=check_runs(("tests", "completed", "success")))
         self.assertEqual(self.refusal()["refused"], "not_mergeable")
 
+    def test_a_green_branch_behind_its_base_is_behind_and_not_merged(self):
+        self.forge_with(pr=dict(OPEN_PR, mergeable_state="behind"),
+                        runs=check_runs(("tests", "completed", "success")))
+        answer = self.green()
+        self.assertEqual(answer["state"], "behind")
+        self.assertEqual(self.merges(), [])
+
+    def update_branch(self, status, message):
+        def answer(method, url, headers, body=None):
+            self.calls.append((method, url.split("/repos/o/r", 1)[-1], body))
+            return status, json.dumps({"message": message})
+        forge.http = answer
+        return self.call("update_branch", number=7, head_sha="abc123")
+
+    def test_update_branch_names_the_head_and_answers_updated(self):
+        answer, refused = self.update_branch(202, "Updating pull request branch.")
+        self.assertFalse(refused, answer)
+        self.assertEqual(answer["state"], "updated")
+        self.assertEqual(self.calls, [("PUT", "/pulls/7/update-branch",
+                                       {"expected_head_sha": "abc123"})])
+
+    def test_update_branch_of_a_moved_head_is_head_moved(self):
+        answer, refused = self.update_branch(
+            422, "expected head sha didn't match current head ref.")
+        self.assertTrue(refused, answer)
+        self.assertEqual(answer["refused"], "head_moved")
+
+    def test_update_branch_with_a_conflict_is_not_mergeable(self):
+        answer, refused = self.update_branch(422, "merge conflict between base and head")
+        self.assertTrue(refused, answer)
+        self.assertEqual(answer["refused"], "not_mergeable")
+
+    def test_update_branch_of_a_current_branch_is_current(self):
+        answer, refused = self.update_branch(422, "There are no new commits on the base branch.")
+        self.assertFalse(refused, answer)
+        self.assertEqual(answer["state"], "current")
+
     def test_empty_required_checks_is_refused_before_the_forge(self):
         self.forge_with(runs=check_runs(("tests", "completed", "success")))
         answer = self.refusal(required_checks=[])

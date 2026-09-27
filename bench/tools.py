@@ -1,4 +1,4 @@
-"""The thirteen tools of the bench.
+"""The fourteen tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -1294,6 +1294,22 @@ def merge(bench, args):
     return dict(answer, repo=repo.name, number=number)
 
 
+def update_branch(bench, args):
+    """Merges the base into one pull request's branch, so it is up to date."""
+    repo = bench.repo(args.get("repo"))
+    number = args.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise Refusal("input", field="number", reason="the pull request number is necessary")
+    head_sha = _text(args, "head_sha", required=True)
+    try:
+        answer = forge.client(repo).update_branch(number, head_sha)
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=git.scrub(str(exc)))
+    if answer.get("refused"):
+        raise Refusal(answer.pop("refused"), **answer)
+    return dict(answer, repo=repo.name, number=number)
+
+
 def _repo_name(args):
     """Gives the repository name of an enrollment call, or refuses."""
     name = _text(args, "repo", required=True)
@@ -1683,7 +1699,9 @@ TOOL_SPECS = [
             "\"the head is b2..., not a1...: something was pushed since\"}. The refusals are "
             "head_moved, draft, not_mergeable (a conflict), no_required_checks (the list is "
             "empty: the rig never merges a change nothing has tested), merge_refused (GitHub "
-            "refused the merge call) and forge (no forge, no credential, or not GitHub)."
+            "refused the merge call) and forge (no forge, no credential, or not GitHub). "
+            "behind - the checks are green but the branch is behind its base and GitHub "
+            "wants it up to date: call update_branch, e.g. {\"state\": \"behind\"}."
         ),
         "schema": {
             "type": "object",
@@ -1710,6 +1728,37 @@ TOOL_SPECS = [
                 "sitting": _SITTING,
             },
             "required": ["repo", "number", "head_sha", "required_checks"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "update_branch",
+        "function": update_branch,
+        "description": (
+            "Brings one pull request's branch up to date with its base, so branch protection "
+            "lets it merge: GitHub merges the base into the branch (never a rebase, never a "
+            "force). The call names head_sha, so GitHub refuses it if the head moved. The "
+            "answers: updated - GitHub is merging the base in; the head will move and the "
+            "checks run again, e.g. {\"state\": \"updated\"}; current - the branch is already "
+            "up to date, e.g. {\"state\": \"current\"}; a refusal - nothing changed. The "
+            "refusals are head_moved, not_mergeable (a conflict), update_refused (GitHub "
+            "refused for another reason), unsupported (not GitHub) and forge (no forge or no "
+            "credential)."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "number": {"type": "integer", "minimum": 1,
+                           "description": "The pull request number, e.g. 7."},
+                "head_sha": {"type": "string",
+                             "description": "The head commit the engine saw. A pull request "
+                                            "whose head is another commit is refused with "
+                                            "head_moved."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "number", "head_sha"],
             "additionalProperties": False,
         },
     },
