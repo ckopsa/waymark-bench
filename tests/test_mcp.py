@@ -57,15 +57,15 @@ class TestHttp(TransportCase):
         self.assertEqual(status, 202)
         self.assertIsNone(body)
 
-    def test_tools_list_gives_the_fourteen_tools_with_schemas(self):
+    def test_tools_list_gives_the_fifteen_tools_with_schemas(self):
         status, answer = self.post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual(status, 200)
         tools = answer["result"]["tools"]
-        self.assertEqual(len(tools), 14)
+        self.assertEqual(len(tools), 15)
         names = [tool["name"] for tool in tools]
         self.assertEqual(sorted(names), sorted([
             "prepare", "status", "find", "read", "edit", "pull", "submit", "feedback", "discard",
-            "merge", "rerun", "enroll", "repos", "unenroll"]))
+            "merge", "update_branch", "rerun", "enroll", "repos", "unenroll"]))
         for tool in tools:
             self.assertTrue(tool["description"])
             schema = tool["inputSchema"]
@@ -81,6 +81,10 @@ class TestHttp(TransportCase):
             if tool["name"] in ("enroll", "unenroll"):
                 # The enrollment names a repository, and no branch.
                 self.assertNotIn("branch", schema["properties"])
+                continue
+            if tool["name"] == "update_branch":
+                # The tool names a pull request by its number, as merge does.
+                self.assertIn("number", schema["required"])
                 continue
             self.assertIn("branch", schema["properties"])
             if tool["name"] in ("find", "read", "edit"):
@@ -136,7 +140,7 @@ class TestStdio(unittest.TestCase):
         mcp.serve_stdio(self.bench, io.StringIO("\n".join(lines) + "\n"), output)
         answers = [json.loads(row) for row in output.getvalue().splitlines()]
         self.assertEqual([answer["id"] for answer in answers], [1, 2, 3])
-        self.assertEqual(len(answers[1]["result"]["tools"]), 14)
+        self.assertEqual(len(answers[1]["result"]["tools"]), 15)
         self.assertTrue(answers[2]["result"]["structuredContent"]["result"]["created"])
 
 

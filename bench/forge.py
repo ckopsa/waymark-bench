@@ -155,7 +155,10 @@ class Client:
 
     def request(self, method, url, body=None, accept_text=False):
         status, text = http(method, url, self.headers(), body)
-        text = scrub(text)
+        return self.judge(status, scrub(text), url, accept_text)
+
+    def judge(self, status, text, url, accept_text=False):
+        """Gives the answer of a scrubbed response, or raises ForgeError."""
         if status == 401 or status == 403:
             raise ForgeError("%s refused the credential (%s)" % (self.provider, status), status)
         if status == 404:
@@ -236,6 +239,10 @@ class Bitbucket(Client):
 
     def merge_when_green(self, number, head_sha, required_checks, method="merge"):
         raise ForgeError("the rig merges a pull request itself only on github")
+
+    def update_branch(self, number, head_sha):
+        return {"refused": "unsupported",
+                "reason": "the rig updates a pull request's branch only on github"}
 
     def rerun_failed_jobs(self, run_id):
         raise ForgeError("the rig re-runs a pipeline only on github")
@@ -631,6 +638,10 @@ class GitHub(Client):
         pending = [name for name in required_checks if states.get(name) != "success"]
         if pending:
             return {"state": "waiting", "pending": pending}
+        if data.get("mergeable_state") == "behind":
+            # Branch protection wants the branch up to date: update_branch first.
+            return {"state": "behind",
+                    "reason": "the branch is behind its base: update the branch first"}
         if data.get("mergeable") is None:
             # GitHub has not yet computed whether it merges cleanly.
             return {"state": "waiting", "pending": [],
@@ -641,6 +652,29 @@ class GitHub(Client):
         except ForgeError as exc:
             return {"refused": "merge_refused", "reason": str(exc)}
         return {"state": "merged", "sha": merged.get("sha")}
+
+    def update_branch(self, number, head_sha):
+        """Merges the base into a pull request's branch; never a rebase, never
+        a force. Gives {state: updated|current} or {refused, reason}. The
+        call names head_sha, so GitHub refuses it when the head moved."""
+        url = self.url("/pulls/%s/update-branch" % number)
+        status, text = http("PUT", url, self.headers(), {"expected_head_sha": head_sha})
+        text = scrub(text)
+        if status != 422:
+            self.judge(status, text, url)
+            return {"state": "updated"}
+        try:
+            message = str(json.loads(text).get("message") or "")
+        except (ValueError, AttributeError):
+            message = text
+        lowered = message.lower()
+        if "head sha" in lowered or "head ref" in lowered:
+            return {"refused": "head_moved", "reason": message or "the head moved"}
+        if "no new commits" in lowered:
+            return {"state": "current"}
+        if "conflict" in lowered:
+            return {"refused": "not_mergeable", "reason": message}
+        return {"refused": "update_refused", "reason": "github answered 422: %s" % message[:300]}
 
 
 # ------------------------------------------------------------------ factory
