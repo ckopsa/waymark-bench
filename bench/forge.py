@@ -55,6 +55,23 @@ def detect(clone_url):
     return None
 
 
+class _KeepCredentialOnHost(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect, but sends the credential only to the host it was
+    meant for. GitHub answers the log of a job with a 302 to a signed URL
+    on a blob store; that store refuses a request that carries both its
+    signature and our Authorization, and the token must never leave the
+    forge's own host (api.github.com, api.bitbucket.org) in any case."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and (urllib.parse.urlsplit(newurl).netloc.lower()
+                                != urllib.parse.urlsplit(req.full_url).netloc.lower()):
+            for name in list(new.headers):
+                if name.lower() in ("authorization", "cookie"):
+                    del new.headers[name]
+        return new
+
+
 # The one HTTP call. The tests replace it.
 def http(method, url, headers, body=None):
     """Gives (status, text). Raises ForgeError when nothing answers."""
@@ -63,8 +80,9 @@ def http(method, url, headers, body=None):
         data = json.dumps(body).encode("utf-8")
         headers = dict(headers, **{"Content-Type": "application/json"})
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
+    opener = urllib.request.build_opener(_KeepCredentialOnHost)
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:
+        with opener.open(request, timeout=TIMEOUT) as answer:
             return answer.status, answer.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", "replace")
