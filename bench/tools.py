@@ -866,9 +866,12 @@ def submit(bench, args):
         paths = status_paths(worktree)
         committed = False
         files = added = removed = 0
+        target = land.target if land else bench.base_of(repo, branch)
+        against = "HEAD"
         if paths:
             git.run(["add", "-A", "--", "."], cwd=worktree)
-            stat = git.out(["diff", "--cached", "--numstat"], cwd=worktree)
+            against = _against_of(bench, repo, worktree, target, fetch=max_lines is not None)
+            stat = git.out(["diff", "--cached", "--numstat", against], cwd=worktree)
             for row in stat.splitlines():
                 cells = row.split("\t")
                 if len(cells) < 3:
@@ -883,7 +886,8 @@ def submit(bench, args):
                 if added + removed > ceiling:
                     git.run(["reset", "-q"], cwd=worktree, check=False)
                     raise Refusal("over_ceiling", lines=added + removed, max_lines=ceiling,
-                                  files=files, remedy="make the change smaller, or raise the ceiling")
+                                  files=files, against=against, target=target,
+                                  remedy="make the change smaller, or raise the ceiling")
             commit_args = ["commit", "-m", message]
             for item in clean_trailers:
                 commit_args += ["--trailer", item]
@@ -909,6 +913,7 @@ def submit(bench, args):
                 "files": files,
                 "lines_added": added,
                 "lines_removed": removed,
+                "against": against,
             }
         item = bench.landings.get(repo, branch, create=True)
         item.start(commit, bool(want_pr), title, description, clean_trailers,
@@ -923,6 +928,7 @@ def submit(bench, args):
         "files": files,
         "lines_added": added,
         "lines_removed": removed,
+        "against": against,
         "pushed": view["pushed"],
         "landing": view,
     }
@@ -930,6 +936,32 @@ def submit(bench, args):
         raise Refusal("landing_failed", step=view["failed_step"], reason=view["reason"],
                       remedy="read landing.steps, fix the worktree, then submit again", **answer)
     return answer
+
+
+def _against_of(bench, repo, worktree, target, fetch=False):
+    """Gives the commit the change's size is counted against.
+
+    It is the merge base of the change with its target: what the pull
+    request's diff shows. A merge of the base that the change carries is
+    on both sides of that diff, so only the change's own lines count.
+    While a merge is in progress, MERGE_HEAD is one side of the change.
+    Without a target ref or a merge base, the count is against HEAD.
+    """
+    bare = bench.bare_dir(repo.name)
+    if fetch:
+        git.run(["fetch", "--prune", "origin"], cwd=bare, check=False, timeout=600)
+    try:
+        target_ref = base_ref_of(bare, target)
+    except Refusal:
+        return "HEAD"
+    heads = ["HEAD"]
+    if git.ref_exists("MERGE_HEAD", cwd=worktree):
+        heads.append("MERGE_HEAD")
+    # merge-base A B C: the base of A and a merge of B and C.
+    code, text, _ = git.run(["merge-base", target_ref] + heads, cwd=worktree, check=False)
+    if code != 0 or not text.strip():
+        return "HEAD"
+    return text.split()[0]
 
 
 def _has_work_to_land(bench, repo, branch, worktree):
@@ -1382,7 +1414,9 @@ TOOL_SPECS = [
                 "trailers": {"type": "array", "items": {"type": "string"},
                              "description": "The git trailers, each one as 'Key: value'."},
                 "max_lines": {"type": "integer",
-                              "description": "The ceiling on the added lines plus the removed lines."},
+                              "description": "The ceiling on the added lines plus the removed lines, "
+                                             "counted against the merge base with the target: "
+                                             "a merge of the base the change carries does not count."},
                 "wait": {"type": "integer",
                          "description": "The seconds to wait for the landing. The default is 0: it answers at once, and status gives the landing's state. "
                                         "The ceiling is 3600. Zero gives the answer at once."},
