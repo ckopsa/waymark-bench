@@ -719,7 +719,22 @@ def edit(bench, args):
     allow = _globs(args, "allow")
     old = args.get("old")
     new = args.get("new")
-    create = bool(args.get("create"))
+    content = args.get("content")
+    create = args.get("create")
+    if create is not None and not isinstance(create, bool):
+        raise Refusal("input", field="create", reason="create is true or false: give the "
+                      "content in new, as new with create: true")
+    if content is not None:
+        # content is a spelling of new for a new file: create true or
+        # absent, and no old. Any other use is refused, naming new.
+        if new is not None or old is not None or create is False:
+            raise Refusal("input", field="content", reason="give the text in new, not content: "
+                          "old with new (replace) or new with create: true (a new file)")
+        if not isinstance(content, str):
+            raise Refusal("input", field="content", reason="a text is necessary")
+        new = content
+        create = True
+    create = bool(create)
     delete = bool(args.get("delete"))
     move_to = args.get("move_to")
     operations = []
@@ -733,7 +748,8 @@ def edit(bench, args):
         operations.append("move")
     if len(operations) != 1:
         raise Refusal("operation", operations=operations,
-                      reason="give exactly one of: old with new, create, delete, move_to")
+                      reason="give exactly one of: old with new (replace), new with create: true "
+                             "(a new file), delete: true, or move_to")
     operation = operations[0]
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
@@ -756,7 +772,7 @@ def edit(bench, args):
                 handle.write(content)
         elif operation == "create":
             if new is None or not isinstance(new, str):
-                raise Refusal("input", field="new", reason="give the content in new")
+                raise Refusal("input", field="new", reason="give the content in new, as new with create: true")
             if os.path.exists(full):
                 raise Refusal("exists", path=rel, remedy="use old and new to change the file")
             os.makedirs(os.path.dirname(full) or worktree, exist_ok=True)
@@ -1479,9 +1495,13 @@ TOOL_SPECS = [
         "name": "edit",
         "function": edit,
         "description": (
-            "Changes one path. Give old and new to replace a text: old must be in the file "
-            "one time. Give create true with new for a new file. Give delete true to remove "
-            "a file. Give move_to to move a file. A write under .github/ or .claude/ is "
+            "Changes one path with exactly one operation. Replace: old with new, and old "
+            "must be in the file one time, e.g. {\"path\": \"a.py\", \"old\": \"x = 1\", "
+            "\"new\": \"x = 2\"}. Create: new with create: true, e.g. {\"path\": \"b.py\", "
+            "\"new\": \"print(1)\\n\", \"create\": true}; content is taken as a spelling of "
+            "new for a new file. Delete: delete: true, e.g. {\"path\": \"c.py\", "
+            "\"delete\": true}. Move: move_to, e.g. {\"path\": \"c.py\", \"move_to\": "
+            "\"d.py\"}. A write under .github/ or .claude/ is "
             "refused when the scope does not name the path. With allow, a path that no glob "
             "of the list matches is refused."
         ),
@@ -1494,9 +1514,17 @@ TOOL_SPECS = [
                 "old": {"type": "string",
                         "description": "The text to replace. It must be in the file one time."},
                 "new": {"type": "string",
-                        "description": "The new text, or the content of a new file."},
-                "create": {"type": "boolean", "description": "True to make a new file from new."},
-                "delete": {"type": "boolean", "description": "True to remove the file."},
+                        "description": "The new text with old, or the content of a new file "
+                                       "with create: true."},
+                "content": {"type": "string",
+                            "description": "A spelling of new for a new file: create true or "
+                                           "absent, and no old."},
+                "create": {"type": "boolean",
+                           "description": "True to make a new file. The file's content goes in "
+                                          "new, not here: new with create: true."},
+                "delete": {"type": "boolean",
+                           "description": "True to remove the file: delete: true, with no other "
+                                          "operation."},
                 "move_to": {"type": "string", "description": "The new path of the file."},
                 "allow_protected": {"type": "boolean",
                                     "description": "True to permit a write under .github/ or .claude/."},

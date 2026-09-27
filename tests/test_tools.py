@@ -290,6 +290,40 @@ class TestEdit(BenchCase):
         answer = self.refused("edit", branch="work", path="docs/a.txt",
                               delete=True, move_to="docs/z.txt")
         self.assertEqual(answer["refused"], "operation")
+        self.assertIn("new with create: true", answer["reason"])
+
+    def test_edit_takes_content_as_new_for_a_new_file(self):
+        path = self.prepared()
+        self.ok("edit", branch="work", path="docs/d.txt", content="delta\n")
+        with open(os.path.join(path, "docs/d.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "delta\n")
+        self.ok("edit", branch="work", path="docs/e.txt", content="echo\n", create=True)
+        self.assertTrue(os.path.isfile(os.path.join(path, "docs/e.txt")))
+
+    def test_edit_refuses_content_beside_old_naming_new(self):
+        self.prepared()
+        answer = self.refused("edit", branch="work", path="src/app.py",
+                              old="MARKER_ONE = 'one'", content="MARKER_ONE = 'two'")
+        self.assertEqual(answer["field"], "content")
+        self.assertIn("new", answer["reason"])
+
+    def test_edit_refuses_content_in_create_naming_the_shape(self):
+        self.prepared()
+        answer = self.refused("edit", branch="work", path="docs/f.txt", create="foxtrot\n")
+        self.assertEqual(answer["field"], "create")
+        self.assertIn("new with create: true", answer["reason"])
+
+    def test_edit_creates_from_new_with_create_true(self):
+        path = self.prepared()
+        self.ok("edit", branch="work", path="docs/g.txt", new="golf\n", create=True)
+        self.assertTrue(os.path.isfile(os.path.join(path, "docs/g.txt")))
+
+    def test_edit_schema_types_create_and_delete_as_booleans(self):
+        properties = tools.TOOLS["edit"]["schema"]["properties"]
+        self.assertEqual(properties["create"]["type"], "boolean")
+        self.assertEqual(properties["delete"]["type"], "boolean")
+        self.assertIn("new with create: true", properties["create"]["description"])
+        self.assertIn("new with create: true", tools.TOOLS["edit"]["description"])
 
 
 class TestPull(BenchCase):
