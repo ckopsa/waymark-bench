@@ -437,6 +437,125 @@ GRAPHQL = "https://api.github.com/graphql"
 AUTO_MERGE_ON = {"data": {"enablePullRequestAutoMerge": {"pullRequest": {"number": 7}}}}
 
 
+OPEN_PR = dict(GITHUB_PR, mergeable=True, draft=False, merged=False)
+
+
+def check_runs(*runs):
+    return {"check_runs": [{"name": name, "status": status, "conclusion": conclusion}
+                           for name, status, conclusion in runs]}
+
+
+class TestHouseMerge(LandingCase):
+
+    def setUp(self):
+        LandingCase.setUp(self)
+        self.make({"stages": [], "pull_request": {
+            "provider": "github", "owner": "o", "repo": "r", "auto_merge": True,
+            "merge_by": "house"}})
+
+    def forge_with(self, pr=OPEN_PR, runs=None, statuses=None):
+        self.answers = {
+            "/pulls/7/merge": ("PUT", {"sha": "merge999", "merged": True}),
+            "/pulls/7": ("GET", pr),
+            "/commits/abc123/check-runs": ("GET", runs or check_runs()),
+            "/commits/abc123/status": ("GET", {"statuses": statuses or []}),
+        }
+
+    def merge(self, **args):
+        args.setdefault("number", 7)
+        args.setdefault("head_sha", "abc123")
+        args.setdefault("required_checks", ["tests"])
+        return self.call("merge", **args)
+
+    def green(self, **args):
+        answer, refused = self.merge(**args)
+        self.assertFalse(refused, answer)
+        return answer
+
+    def refusal(self, **args):
+        answer, refused = self.merge(**args)
+        self.assertTrue(refused, answer)
+        self.assertEqual(self.merges(), [])
+        return answer
+
+    def merges(self):
+        return [body for method, path, body in self.calls if method == "PUT"]
+
+    def test_a_running_check_is_waiting(self):
+        self.forge_with(runs=check_runs(("tests", "in_progress", None)))
+        answer = self.green()
+        self.assertEqual(answer["state"], "waiting")
+        self.assertEqual(answer["pending"], ["tests"])
+        self.assertEqual(self.merges(), [])
+
+    def test_a_missing_check_is_waiting(self):
+        self.forge_with(runs=check_runs(("lint", "completed", "success")))
+        answer = self.green()
+        self.assertEqual(answer["state"], "waiting")
+        self.assertEqual(answer["pending"], ["tests"])
+        self.assertEqual(self.merges(), [])
+
+    def test_a_failed_check_run_is_red(self):
+        self.forge_with(runs=check_runs(("tests", "completed", "failure")))
+        answer = self.green()
+        self.assertEqual(answer["state"], "red")
+        self.assertEqual(answer["failed"], ["tests"])
+        self.assertEqual(self.merges(), [])
+
+    def test_a_failed_commit_status_is_red(self):
+        self.forge_with(runs=check_runs(("tests", "completed", "success")),
+                        statuses=[{"context": "gate", "state": "failure"}])
+        answer = self.green(required_checks=["tests", "gate"])
+        self.assertEqual(answer["state"], "red")
+        self.assertEqual(answer["failed"], ["gate"])
+        self.assertEqual(self.merges(), [])
+
+    def test_all_green_merges_with_the_head_sha(self):
+        self.forge_with(runs=check_runs(("tests", "completed", "success")),
+                        statuses=[{"context": "gate", "state": "success"}])
+        answer = self.green(required_checks=["tests", "gate"], method="squash")
+        self.assertEqual(answer["state"], "merged")
+        self.assertEqual(answer["sha"], "merge999")
+        self.assertEqual(self.merges(), [{"sha": "abc123", "merge_method": "squash"}])
+
+    def test_a_merged_or_closed_pull_request_says_so(self):
+        self.forge_with(pr=dict(OPEN_PR, merged=True, merge_commit_sha="m1", state="closed"))
+        self.assertEqual(self.green()["state"], "merged")
+        self.forge_with(pr=dict(OPEN_PR, state="closed"))
+        self.assertEqual(self.green()["state"], "closed")
+        self.assertEqual(self.merges(), [])
+
+    def test_a_moved_head_is_refused(self):
+        self.forge_with(pr=dict(OPEN_PR, head={"ref": "work", "sha": "def456"}),
+                        runs=check_runs(("tests", "completed", "success")))
+        self.assertEqual(self.refusal()["refused"], "head_moved")
+
+    def test_a_draft_is_refused(self):
+        self.forge_with(pr=dict(OPEN_PR, draft=True),
+                        runs=check_runs(("tests", "completed", "success")))
+        self.assertEqual(self.refusal()["refused"], "draft")
+
+    def test_a_conflict_is_refused(self):
+        self.forge_with(pr=dict(OPEN_PR, mergeable=False),
+                        runs=check_runs(("tests", "completed", "success")))
+        self.assertEqual(self.refusal()["refused"], "not_mergeable")
+
+    def test_empty_required_checks_is_refused_before_the_forge(self):
+        self.forge_with(runs=check_runs(("tests", "completed", "success")))
+        answer = self.refusal(required_checks=[])
+        self.assertEqual(answer["refused"], "no_required_checks")
+        self.assertEqual(self.calls, [])
+
+    def test_merge_by_house_opens_the_pull_request_without_auto_merge(self):
+        path = self.prepared()
+        self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR)}
+        self.change(path)
+        answer = self.ok("submit", branch="work", message="change one line")
+        self.assertEqual(answer["landing"]["pull_request"]["number"], 7)
+        self.assertIsNone(answer["landing"]["auto_merge"])
+        self.assertEqual([body for method, path, body in self.calls if path == GRAPHQL], [])
+
+
 class TestPullRequestAndFeedback(LandingCase):
 
     def github(self):

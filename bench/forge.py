@@ -178,6 +178,9 @@ class Bitbucket(Client):
     def enable_auto_merge(self, pr):
         raise ForgeError("bitbucket does not enable auto-merge on a pull request")
 
+    def merge_when_green(self, number, head_sha, required_checks, method="merge"):
+        raise ForgeError("the rig merges a pull request itself only on github")
+
     def _pr(self, data):
         approvals = [p.get("user", {}).get("display_name") for p in data.get("participants") or []
                      if p.get("approved")]
@@ -425,6 +428,73 @@ class GitHub(Client):
                 "url": item.get("html_url"), "updated": item.get("completed_at"),
             })
         return found
+
+    def check_states(self, sha):
+        """Gives {name: success | failure | pending} for the check runs AND the
+        commit statuses on one commit. A check run that has not completed is
+        pending; one that completed with anything but success is a failure. A
+        name that is both a check run and a status takes the worse of the two."""
+        rank = {"success": 0, "pending": 1, "failure": 2}
+        states = {}
+
+        def put(name, state):
+            if name and rank[state] >= rank.get(states.get(name), -1):
+                states[name] = state
+
+        runs = self.request("GET", self.url("/commits/%s/check-runs" % sha, per_page=100))
+        for item in runs.get("check_runs") or []:
+            if item.get("status") != "completed":
+                put(item.get("name"), "pending")
+            else:
+                put(item.get("name"),
+                    "success" if item.get("conclusion") == "success" else "failure")
+        combined = self.request("GET", self.url("/commits/%s/status" % sha, per_page=100))
+        for item in combined.get("statuses") or []:
+            state = item.get("state")
+            put(item.get("context"), {"success": "success", "pending": "pending"}.get(
+                state, "failure"))
+        return states
+
+    def merge_when_green(self, number, head_sha, required_checks, method="merge"):
+        """Merges one pull request when every required check is green on its
+        head. Gives one answer: {state: merged|closed|waiting|red, ...} or
+        {refused, reason}. The merge names head_sha, so GitHub refuses it when
+        the head moved in between."""
+        if not required_checks:
+            return {"refused": "no_required_checks",
+                    "reason": "the rig never merges a change nothing has tested"}
+        data = self.request("GET", self.url("/pulls/%s" % number))
+        if data.get("merged") or data.get("merged_at"):
+            return {"state": "merged", "sha": data.get("merge_commit_sha")}
+        if data.get("state") == "closed":
+            return {"state": "closed"}
+        head = (data.get("head") or {}).get("sha")
+        if head != head_sha:
+            return {"refused": "head_moved", "head": head,
+                    "reason": "the head is %s, not %s: something was pushed since" % (
+                        head, head_sha)}
+        if data.get("draft"):
+            return {"refused": "draft", "reason": "the pull request is a draft"}
+        if data.get("mergeable") is False:
+            return {"refused": "not_mergeable",
+                    "reason": "github says the pull request is not mergeable (a conflict)"}
+        states = self.check_states(head_sha)
+        failed = [name for name in required_checks if states.get(name) == "failure"]
+        if failed:
+            return {"state": "red", "failed": failed}
+        pending = [name for name in required_checks if states.get(name) != "success"]
+        if pending:
+            return {"state": "waiting", "pending": pending}
+        if data.get("mergeable") is None:
+            # GitHub has not yet computed whether it merges cleanly.
+            return {"state": "waiting", "pending": [],
+                    "reason": "github has not yet computed whether the pull request merges"}
+        try:
+            merged = self.request("PUT", self.url("/pulls/%s/merge" % number),
+                                  {"sha": head_sha, "merge_method": method})
+        except ForgeError as exc:
+            return {"refused": "merge_refused", "reason": str(exc)}
+        return {"state": "merged", "sha": merged.get("sha")}
 
 
 # ------------------------------------------------------------------ factory
