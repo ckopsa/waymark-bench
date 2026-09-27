@@ -838,6 +838,64 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual(tools.log_tail(plain, 256), tools.landing_module.tail(plain, 256))
 
 
+class TestCredential(LandingCase):
+    """The rig checks its GitHub token against what it does with GitHub."""
+
+    def setUp(self):
+        super().setUp()
+        self.scopes = ["repo"]
+        self.original_scopes = forge.token_scopes
+        forge.token_scopes = lambda url, headers: self.scopes
+        self.addCleanup(setattr, forge, "token_scopes", self.original_scopes)
+        self.make({"stages": [], "pull_request": {"provider": "github", "owner": "o", "repo": "r"}})
+        self.answers = {"": ("GET", {"full_name": "o/r"})}
+
+    def test_a_token_without_workflow_is_reported_missing_for_each_repo(self):
+        checked = self.bench.check_credentials()
+        self.assertEqual(checked["demo"]["missing"], ["workflows"])
+        self.assertFalse(checked["demo"]["ok"])
+        self.assertEqual(checked["demo"]["token"], "classic")
+        answer, refused = tools.call(self.bench, "repos", {})
+        self.assertFalse(refused, answer)
+        credential = answer["repos"][0]["credential"]
+        self.assertEqual((credential["ok"], credential["missing"]), (False, ["workflows"]))
+
+    def test_a_complete_token_reports_ok(self):
+        self.scopes = ["repo", "workflow"]
+        credential = self.bench.check_credentials()["demo"]
+        self.assertTrue(credential["ok"])
+        self.assertEqual(credential["missing"], [])
+        self.assertTrue(credential["checked"])
+
+    def test_a_fine_grained_token_is_probed_and_leaves_the_writes_unverified(self):
+        self.scopes = None
+        credential = self.bench.check_credentials()["demo"]
+        self.assertTrue(credential["ok"])
+        self.assertEqual(credential["token"], "fine_grained")
+        self.assertIn("workflows", credential["unverified"])
+        paths = [path for _, path, _ in self.calls]
+        self.assertTrue(any("/check-runs" in path for path in paths), paths)
+        self.assertTrue(any(path.startswith("/commits/main/status") for path in paths), paths)
+
+    def test_a_submit_touching_workflows_without_the_permission_is_refused_before_commit(self):
+        self.bench.check_credentials()
+        path = self.prepared()
+        before = util.git(["rev-parse", "HEAD"], cwd=path).strip()
+        self.change(path, name=".github/workflows/ci.yml", text="name: changed\n")
+        answer = self.refused("submit", branch="work", message="change the workflow")
+        self.assertEqual(answer["refused"], "missing_workflow_permission")
+        self.assertEqual(answer["permission"], "workflows")
+        self.assertEqual(answer["paths"], [".github/workflows/ci.yml"])
+        self.assertEqual(util.git(["rev-parse", "HEAD"], cwd=path).strip(), before)
+        self.assertEqual(util.git(["diff", "--cached", "--name-only"], cwd=path).strip(), "")
+        # With the permission, the same change commits.
+        self.scopes = ["repo", "workflow"]
+        self.bench.check_credentials()
+        self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR)}
+        answer = self.ok("submit", branch="work", message="change the workflow")
+        self.assertTrue(answer["committed"])
+
+
 class TestCallForm(unittest.TestCase):
 
     def setUp(self):
