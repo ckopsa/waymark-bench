@@ -208,6 +208,15 @@ class Bench:
         # bench.json first, then the repositories that the engine enrolled.
         config.read_repos()
         self.landings = landing_module.Landings(self)
+        # The last credential check of each repository, by name.
+        self.credentials = {}
+
+    def check_credentials(self):
+        """Checks the forge credential of every repository. The rig runs it
+        at start."""
+        for name in self.config.names():
+            check_credential(self, self.config.repos[name])
+        return dict(self.credentials)
 
     def no_landing(self, repo, branch):
         """Refuses while a landing of the branch runs."""
@@ -888,11 +897,14 @@ def submit(bench, args):
             git.run(["add", "-A", "--", "."], cwd=worktree)
             against = _against_of(bench, repo, worktree, target, fetch=max_lines is not None)
             stat = git.out(["diff", "--cached", "--numstat", against], cwd=worktree)
+            workflows = []
             for row in stat.splitlines():
                 cells = row.split("\t")
                 if len(cells) < 3:
                     continue
                 files += 1
+                if ".github/workflows/" in cells[2]:
+                    workflows.append(cells[2])
                 if cells[0].isdigit():
                     added += int(cells[0])
                 if cells[1].isdigit():
@@ -907,6 +919,16 @@ def submit(bench, args):
                     raise Refusal("over_ceiling", lines=added + removed, max_lines=ceiling,
                                   files=files, against=against, target=target,
                                   remedy="make the change smaller, or raise the ceiling")
+            credential = bench.credentials.get(repo.name) or {}
+            if workflows and "workflows" in (credential.get("missing") or []):
+                # GitHub rejects the push of a workflow file without it.
+                git.run(["reset", "-q", "--", "."], cwd=worktree, check=False)
+                raise Refusal("missing_workflow_permission", repo=repo.name,
+                              permission="workflows", classic_scope="workflow", paths=workflows,
+                              reason="the rig's GitHub token lacks the workflows permission, "
+                                     "so GitHub would reject the push",
+                              remedy="give the token Workflows: read and write (classic: the "
+                                     "workflow scope), or leave .github/workflows/ out of the change")
             commit_args = ["commit", "-m", message]
             for item in clean_trailers:
                 commit_args += ["--trailer", item]
@@ -1330,17 +1352,38 @@ def enroll(bench, args):
     answer = entry.to_dict()
     answer["bare"] = bare
     answer["cloned"] = cloned
+    answer["credential"] = check_credential(bench, entry)
     return answer
 
 
+def check_credential(bench, repo):
+    """Checks the token against what the rig does with the repository's
+    forge (docs/credential.md), and keeps the answer on the bench. Only a
+    GitHub forge is checked."""
+    try:
+        client = forge.client(repo)
+    except forge.ForgeError as exc:
+        found = {"checked": False, "ok": None, "missing": [], "reason": git.scrub(str(exc))}
+    else:
+        if client.provider == "github":
+            found = dict(client.check_credential(repo.default_branch), checked=True)
+        else:
+            found = {"checked": False, "ok": None, "missing": [],
+                     "reason": "the rig checks a github credential only"}
+    bench.credentials[repo.name] = found
+    return found
+
+
 def repos(bench, args):
-    """Gives every repository on the rig, and where its entry comes from."""
+    """Gives every repository on the rig, where its entry comes from, and
+    the check of its credential."""
     items = []
     for name in bench.config.names():
         entry = bench.config.repos[name]
         item = entry.to_dict()
         item["bare_exists"] = bench.bare_exists(name)
         item["source"] = entry.source
+        item["credential"] = bench.credentials.get(name) or check_credential(bench, entry)
         items.append(item)
     return {"repos": items}
 
@@ -1751,7 +1794,9 @@ TOOL_SPECS = [
         "description": (
             "Gives every repository on the rig, by name. Each one gives its entry, "
             "bare_exists for the clone on the disk, and source: file for a repository from "
-            "enroll, config for a repository from bench.json. The engine calls this tool; "
+            "enroll, config for a repository from bench.json, and credential: the check of "
+            "the GitHub token against what the rig needs ({ok, missing, ...}; "
+            "docs/credential.md). The engine calls this tool; "
             "put it in no powers entry."
         ),
         "schema": {

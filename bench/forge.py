@@ -4,7 +4,8 @@ Two forges are known: Bitbucket Cloud and GitHub. The forge is read from
 the clone URL, or named in the land block of bench.json. The credential
 comes from the settings (settings.py): BENCH_BITBUCKET_USER and
 BENCH_BITBUCKET_TOKEN for Bitbucket (an app password), BENCH_GITHUB_TOKEN
-or BENCH_GIT_TOKEN for GitHub. On macOS, Bitbucket also reads the keychain
+or BENCH_GIT_TOKEN for GitHub (docs/credential.md names what that token
+needs, and check_credential checks it). On macOS, Bitbucket also reads the keychain
 item for bitbucket.org when the settings have nothing. The rig never
 writes a credential to disk, and it removes the credentials from every
 message that it gives.
@@ -65,6 +66,37 @@ def http(method, url, headers, body=None):
         return exc.code, exc.read().decode("utf-8", "replace")
     except (urllib.error.URLError, OSError) as exc:
         raise ForgeError("no answer from %s: %s" % (urllib.parse.urlsplit(url).netloc, exc))
+
+
+# The scopes of a classic token ride a header of any answer. The tests replace it.
+def token_scopes(url, headers):
+    """Gives the scopes that X-OAuth-Scopes names, as a list, or None when
+    the answer has no such header: a fine-grained token names none. Raises
+    ForgeError when nothing answers."""
+    request = urllib.request.Request(url, method="GET", headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:
+            found = answer.headers.get("X-OAuth-Scopes")
+    except urllib.error.HTTPError as exc:
+        found = exc.headers.get("X-OAuth-Scopes") if exc.headers else None
+    except (urllib.error.URLError, OSError) as exc:
+        raise ForgeError("no answer from %s: %s" % (urllib.parse.urlsplit(url).netloc, exc))
+    if found is None:
+        return None
+    return [scope.strip() for scope in found.split(",") if scope.strip()]
+
+
+# What the rig does with GitHub needs these repository permissions, by their
+# fine-grained names. docs/credential.md names the tool behind each one.
+PERMISSIONS = ("metadata", "contents", "pull_requests", "workflows", "actions",
+               "checks", "statuses")
+# The permissions each classic scope gives.
+CLASSIC_SCOPES = {
+    "repo": ("metadata", "contents", "pull_requests", "actions", "checks", "statuses"),
+    "workflow": ("workflows",),
+}
+# A fine-grained token is probed by reads; a write alone proves these.
+WRITE_ONLY = ("contents", "pull_requests", "workflows")
 
 
 def _keychain_bitbucket():
@@ -304,6 +336,41 @@ class GitHub(Client):
         if query:
             base += "?" + urllib.parse.urlencode(query)
         return base
+
+    def check_credential(self, branch):
+        """Checks the token against PERMISSIONS on this repository. Gives
+        {ok, token, missing, unverified}. A classic token names its scopes,
+        so each permission is known. A fine-grained token is probed by reads
+        on the branch: a refusal is a missing permission, and what only a
+        write could prove is unverified."""
+        try:
+            scopes = token_scopes(self.url(""), self.headers())
+            self.request("GET", self.url(""))
+        except ForgeError as exc:
+            return {"ok": False, "token": None, "missing": list(PERMISSIONS),
+                    "unverified": [], "reason": scrub(str(exc))}
+        if scopes is not None:
+            held = set()
+            for scope in scopes:
+                held.update(CLASSIC_SCOPES.get(scope, ()))
+            missing = [name for name in PERMISSIONS if name not in held]
+            return {"ok": not missing, "token": "classic", "missing": missing,
+                    "unverified": []}
+        ref = urllib.parse.quote(branch, safe="")
+        probes = {"actions": self.url("/actions/runs", per_page=1),
+                  "checks": self.url("/commits/%s/check-runs" % ref, per_page=1),
+                  "statuses": self.url("/commits/%s/status" % ref)}
+        missing = []
+        for name, url in probes.items():
+            try:
+                status, _ = http("GET", url, self.headers())
+            except ForgeError as exc:
+                return {"ok": False, "token": "fine_grained", "missing": [],
+                        "unverified": list(PERMISSIONS), "reason": scrub(str(exc))}
+            if status in (401, 403):
+                missing.append(name)
+        return {"ok": not missing, "token": "fine_grained", "missing": missing,
+                "unverified": list(WRITE_ONLY)}
 
     def find_pull_request(self, branch, target):
         values = self.request("GET", self.url("/pulls", head="%s:%s" % (self.owner, branch),
