@@ -1,9 +1,9 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives twelve
+for each repository and a git worktree for each branch. It gives thirteen
 tools: `prepare`, `status`, `find`, `read`, `edit`, `pull`, `submit`,
-`feedback`, `discard`, `enroll`, `repos` and `unenroll`. It needs Python
+`feedback`, `discard`, `merge`, `enroll`, `repos` and `unenroll`. It needs Python
 3.11, git, and one library: pydantic-settings, for the settings.
 
 ```
@@ -123,6 +123,18 @@ pull request: the forge merges it when the checks are green, with the
 merge method of the repository. It defaults to false, and only GitHub
 does it. A forge that refuses auto-merge gives a finding `auto_merge` in
 `feedback`; the landing keeps the pull request.
+
+GitHub's auto-merge needs a public repository or a paid plan. With
+`"merge_by": "house"` in the `pull_request` block the rig does not ask
+the forge for auto-merge; the house merges with the `merge` tool
+instead. Give `number`, `head_sha` and `required_checks` (and `method`:
+`merge`, `squash` or `rebase`). The rig reads the check runs and the
+commit statuses on `head_sha` and answers `waiting` (a required check is
+missing or running), `red` (one failed), `closed`, or `merged` - it
+merges only when every required check is success, and names `head_sha`
+in the merge so GitHub refuses a moved head. It refuses a moved head
+(`head_moved`), a draft, a conflict (`not_mergeable`) and an empty
+`required_checks`: the rig never merges a change nothing has tested.
 
 The landing runs in the background, and `submit` answers at once with
 the landing running: follow it with `status` or `feedback`. Give `wait`

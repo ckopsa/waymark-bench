@@ -1,4 +1,4 @@
-"""The twelve tools of the bench.
+"""The thirteen tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -1100,6 +1100,36 @@ def discard(bench, args):
                 "dropped": False}
 
 
+MERGE_METHODS = ("merge", "squash", "rebase")
+
+
+def merge(bench, args):
+    """Merges one pull request when its required checks are green on its head."""
+    repo = bench.repo(args.get("repo"))
+    number = args.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise Refusal("input", field="number", reason="the pull request number is necessary")
+    head_sha = _text(args, "head_sha", required=True)
+    required = args.get("required_checks")
+    if not isinstance(required, list) or not all(
+            isinstance(name, str) and name for name in required):
+        raise Refusal("input", field="required_checks",
+                      reason="a list of check names is necessary")
+    if not required:
+        raise Refusal("no_required_checks",
+                      reason="the rig never merges a change nothing has tested")
+    method = _text(args, "method", default="merge")
+    if method not in MERGE_METHODS:
+        raise Refusal("input", field="method", reason="use merge, squash or rebase")
+    try:
+        answer = forge.client(repo).merge_when_green(number, head_sha, required, method)
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=git.scrub(str(exc)))
+    if answer.get("refused"):
+        raise Refusal(answer.pop("refused"), **answer)
+    return dict(answer, repo=repo.name, number=number)
+
+
 def _repo_name(args):
     """Gives the repository name of an enrollment call, or refuses."""
     name = _text(args, "repo", required=True)
@@ -1452,6 +1482,56 @@ TOOL_SPECS = [
                 "sitting": _SITTING,
             },
             "required": ["repo", "branch"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "merge",
+        "function": merge,
+        "description": (
+            "Merges one pull request when every required check is green on its head. For a "
+            "GitHub repository where the forge's auto-merge cannot run (a private repository "
+            "on a free plan). The rig reads the pull request, then the check runs AND the "
+            "commit statuses on head_sha, and merges only when each name in required_checks "
+            "is success; the merge names head_sha, so GitHub refuses it if the head moved. "
+            "Call it again until the state is merged, red or closed. The answers: "
+            "merged - the pull request is merged, now or before, e.g. "
+            "{\"state\": \"merged\", \"sha\": \"9f1c...\"}; "
+            "closed - it was closed without a merge, e.g. {\"state\": \"closed\"}; "
+            "waiting - a required check is missing or still running (or GitHub has not yet "
+            "computed mergeability), e.g. {\"state\": \"waiting\", \"pending\": [\"tests\"]}; "
+            "red - a required check failed, e.g. {\"state\": \"red\", \"failed\": [\"tests\"]}; "
+            "a refusal - nothing was merged, e.g. {\"refused\": \"head_moved\", \"reason\": "
+            "\"the head is b2..., not a1...: something was pushed since\"}. The refusals are "
+            "head_moved, draft, not_mergeable (a conflict), no_required_checks (the list is "
+            "empty: the rig never merges a change nothing has tested), merge_refused (GitHub "
+            "refused the merge call) and forge (no forge, no credential, or not GitHub)."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "branch": {"type": "string",
+                           "description": "The work branch of the pull request. Optional: "
+                                          "the rig writes it in its log."},
+                "number": {"type": "integer", "minimum": 1,
+                           "description": "The pull request number, e.g. 7."},
+                "head_sha": {"type": "string",
+                             "description": "The head commit the checks were judged on. A "
+                                            "pull request whose head is another commit is "
+                                            "refused with head_moved."},
+                "required_checks": {"type": "array", "items": {"type": "string"},
+                                    "minItems": 1,
+                                    "description": "The names of the check runs or commit "
+                                                   "status contexts that must be success, "
+                                                   "e.g. [\"tests\"]. An empty list is "
+                                                   "refused."},
+                "method": {"type": "string", "enum": list(MERGE_METHODS),
+                           "description": "The merge method. The default is merge."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "number", "head_sha", "required_checks"],
             "additionalProperties": False,
         },
     },

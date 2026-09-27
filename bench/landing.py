@@ -372,7 +372,11 @@ class Landing:
                 return
             with self.lock:
                 self.state["pull_request"] = result
-            if land.pull_request.get("auto_merge"):
+            # merge_by house: the rig merges with the merge tool, so it does
+            # not ask the forge for auto-merge (a free private repository on
+            # GitHub refuses it, and that would be a finding in feedback).
+            if (land.pull_request.get("auto_merge")
+                    and land.pull_request.get("merge_by") != "house"):
                 # The forge merges the pull request when the checks are green.
                 # A forge that refuses is a finding in feedback, not a failure:
                 # the change is pushed and the pull request is open.
