@@ -70,7 +70,9 @@ class TestTheTestTool(LandingCase):
         """Answers run 31 of workflow tests on the scratch ref; it shows once dispatched."""
         run = {"id": 31, "run_number": 4, "status": status, "conclusion": conclusion,
                "head_sha": head, "head_branch": "bench-test/work",
+               "created_at": "2999-01-01T00:00:00Z", "updated_at": "2999-01-01T00:03:00Z",
                "html_url": "https://github.com/o/r/actions/runs/31", "name": "tests"}
+        self.run = run
         self.answers = {
             WORKFLOW + "/dispatches": ("POST", {}),
             WORKFLOW + "/runs": ("GET", {"workflow_runs": []}),
@@ -89,39 +91,65 @@ class TestTheTestTool(LandingCase):
         return [body if isinstance(body, dict) else json.loads(body)
                 for method, path, body in self.calls if method == "POST"]
 
-    def test_dispatch_sends_the_select_input_on_the_scratch_ref(self):
+    def test_dispatch_answers_pending_with_the_run_at_once(self):
         head = self.make_test()
         self.serve(head, "completed", "success")
         answer = self.ok("test", branch="work", select="waymark.core-test")
         self.assertEqual(self.dispatches(),
                          [{"ref": "bench-test/work", "inputs": {"only": "waymark.core-test"}}])
         self.assertEqual(answer["run_id"], 31)
-        self.assertEqual(answer["conclusion"], "success")
-        self.assertEqual(answer["failed"], [])
-        self.assertTrue(answer["scratch_deleted"])
+        self.assertEqual(answer["run_url"], "https://github.com/o/r/actions/runs/31")
+        self.assertEqual(answer["conclusion"], "pending")
+        self.assertEqual(self.slept, [])
+        result = self.ok("test_result", run_id=31)
+        self.assertEqual(result["conclusion"], "success")
+        self.assertEqual(result["duration_s"], 180)
+        self.assertNotIn("failures", result)
+        self.assertTrue(result["scratch_deleted"])
         self.assertEqual(self.scratch(), "")
 
-    def test_a_finished_red_run_answers_the_failed_step_with_its_log_tail(self):
+    def test_a_red_run_answers_the_failing_tests_with_their_lines(self):
         head = self.make_test()
         self.serve(head, "completed", "failure", RED_JOBS)
-        answer = self.ok("test", branch="work", select="waymark.core-test")
+        self.ok("test", branch="work", select="waymark.core-test")
+        answer = self.ok("test_result", run_id=31)
         self.assertEqual(answer["conclusion"], "failure")
-        self.assertEqual([(f["job"], f["step"]) for f in answer["failed"]], [("unit", "Run tests")])
-        self.assertIn("FAIL in (factory-test)", answer["failed"][0]["log_tail"])
+        self.assertEqual(answer["failures"], [{"test": "factory-test", "job": "unit",
+                                               "lines": ["FAIL in (factory-test)", "expected: 1"]}])
 
-    def test_a_timeout_answers_running_and_run_id_asks_again(self):
+    def test_a_run_still_going_answers_pending_and_a_second_call_answers_the_result(self):
         head = self.make_test()
         self.serve(head, "in_progress")
-        answer = self.ok("test", branch="work", select="waymark.core-test", wait=60)
-        self.assertEqual(answer["conclusion"], "running")
+        self.ok("test", branch="work", select="waymark.core-test")
+        self.calls = []
+        answer = self.ok("test_result", run_id=31)
+        self.assertEqual(answer["conclusion"], "pending")
         self.assertEqual(answer["run_id"], 31)
-        self.assertEqual(self.slept, [20, 20, 20])
+        self.assertEqual(self.slept, [5] * 8)
+        self.slept = []
+        self.ok("test_result", run_id=31, wait_seconds=45)
+        self.assertEqual(self.slept, [5] * 9)
         self.assertNotEqual(self.scratch(), "")
         self.serve(head, "completed", "success")
-        again = self.ok("test", run_id=31)
+        again = self.ok("test_result", run_id=31)
         self.assertEqual(again["conclusion"], "success")
         self.assertEqual(self.dispatches(), [])
         self.assertEqual(self.scratch(), "")
+
+    def test_a_run_not_seen_at_dispatch_is_found_by_test_result(self):
+        head = self.make_test()
+        self.serve(head, "completed", "success")
+        self.after_dispatch = {}
+        answer = self.ok("test", branch="work", select="waymark.core-test")
+        self.assertIsNone(answer["run_id"])
+        self.assertEqual(answer["conclusion"], "pending")
+        self.assertLessEqual(sum(self.slept), 15)
+        self.answers[WORKFLOW + "/runs"] = ("GET", {"workflow_runs": [self.run]})
+        again = self.ok("test_result", branch="work", head=answer["head"],
+                        dispatched_at=answer["dispatched_at"])
+        self.assertEqual(again["run_id"], 31)
+        self.assertEqual(again["conclusion"], "success")
+        self.assertEqual(len(self.dispatches()), 1)
 
     def test_a_repository_with_no_test_block_refuses(self):
         self.make_test(test=None)

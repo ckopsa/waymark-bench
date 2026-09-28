@@ -1,10 +1,11 @@
-"""The twenty-two tools of the bench.
+"""The twenty-three tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
 exception with a name and its data. No tool gives a stack trace.
 """
 
+import calendar
 import difflib
 import fnmatch
 import json
@@ -35,14 +36,21 @@ CEILING_DEPTH = 12
 # rig. The way to follow a landing is status or feedback.
 DEFAULT_WAIT = 0
 CEILING_WAIT = 3600
-# test waits for its run the same bounded way: a short default the engine
-# stands, up to fifteen minutes for a caller that can hold the line; past
-# the wait it answers running, and test {run_id} asks again.
-DEFAULT_TEST_WAIT = 15
-CEILING_TEST_WAIT = 900
-TEST_POLL_SECONDS = 20
-TEST_FIND_TRIES = 5
+# test answers at once with the run it dispatched, and test_result reads that
+# run for a bounded wait. A seat's call crosses its own timeout, the connector,
+# the engine's proxy and Traefik, so no call holds the line past 45 seconds.
+DEFAULT_TEST_WAIT = 40
+CEILING_TEST_WAIT = 45
+TEST_POLL_SECONDS = 5
+# test looks for the run it started about fifteen seconds: 8 reads, 2 s apart.
+TEST_FIND_TRIES = 8
 TEST_FIND_SECONDS = 2
+# a dispatch's time is stamped this early, for the forge's clock
+TEST_SKEW_SECONDS = 10
+# the failing tests of a red run, in this many bytes at most
+TEST_FAILURE_BYTES = 4096
+TEST_LINE_CHARS = 300
+FAILED_TEST = re.compile(r"(?:FAIL|ERROR) in \(([^)]+)\)")
 TEST_PREFIX = "bench-test/"
 _sleep = time.sleep
 _clock = time.monotonic
@@ -2032,37 +2040,28 @@ def rerun(bench, args):
 
 
 def test(bench, args):
-    """Runs one test selection of a branch on the repository's own CI and answers the result."""
+    """Dispatches one test selection of a branch on the repository's own CI and
+    answers at once with the run it started; test_result reads that run."""
     repo = bench.repo(args.get("repo"))
-    spec = repo.test
-    if not spec:
-        raise Refusal("no_test_workflow", repo=repo.name,
-                      reason="bench.json gives this repository no test block {workflow, input}")
-    wait = _int(args, "wait", DEFAULT_TEST_WAIT, 0, CEILING_TEST_WAIT)
-    log_bytes = _int(args, "log_bytes", 4096, 256, 32768)
+    spec = _test_spec(repo)
     try:
-        client = forge.client(repo)
-        if args.get("run_id") is not None:
-            run_id = _int(args, "run_id", 0, 1, 2 ** 63)
-        else:
-            run_id = _dispatch_test(bench, repo, spec, client, args)
-        run = _wait_for_run(client, run_id, wait)
-        answer = {"repo": repo.name, "run_id": run["id"], "url": run.get("url"),
-                  "branch": run.get("branch"), "head": run.get("commit")}
-        if run.get("state") != "completed":
-            answer["conclusion"] = "running"
-            return answer
-        answer["conclusion"] = run.get("result") or "unknown"
-        answer["failed"] = _failed_jobs(client, run["id"], log_bytes)
+        return _dispatch_test(bench, repo, spec, forge.client(repo), args)
     except forge.ForgeError as exc:
         raise Refusal("forge", reason=git.scrub(str(exc)))
-    answer["scratch_deleted"] = _drop_scratch(bench, repo, run.get("branch"), run.get("commit"))
-    return answer
+
+
+def _test_spec(repo):
+    """Gives the repository's test block, or refuses no_test_workflow."""
+    if not repo.test:
+        raise Refusal("no_test_workflow", repo=repo.name,
+                      reason="bench.json gives this repository no test block {workflow, input}")
+    return repo.test
 
 
 def _dispatch_test(bench, repo, spec, client, args):
     """Pushes the worktree head to the scratch ref and dispatches the test
-    workflow on it. Gives the id of the run that dispatch started."""
+    workflow on it. Answers pending with the run that dispatch started, or with
+    run_id null when no run showed within about fifteen seconds."""
     branch = check_branch(_text(args, "branch", required=True))
     select = _text(args, "select", required=True)
     scratch = TEST_PREFIX + branch
@@ -2073,17 +2072,137 @@ def _dispatch_test(bench, repo, spec, client, args):
         # the scratch ref, never the pull request's branch
         git.run(["push", "--force", "origin", "HEAD:refs/heads/" + scratch],
                 cwd=worktree, timeout=600)
+    dispatched_at = _utc_stamp(time.time() - TEST_SKEW_SECONDS)
     client.dispatch_workflow(spec["workflow"], scratch, {spec["input"]: select})
+    answer = {"repo": repo.name, "branch": branch, "head": head, "conclusion": "pending",
+              "run_id": None, "run_url": None, "dispatched_at": dispatched_at}
     for attempt in range(TEST_FIND_TRIES):
         runs = [run for run in client.workflow_runs(spec["workflow"], scratch)
                 if run["id"] not in before and run.get("commit") == head]
         if runs:
-            return runs[0]["id"]
+            answer.update(run_id=runs[0]["id"], run_url=runs[0].get("url"))
+            return answer
         if attempt + 1 < TEST_FIND_TRIES:
             _sleep(TEST_FIND_SECONDS)
-    _drop_scratch(bench, repo, scratch, head)
-    raise Refusal("run_not_found", repo=repo.name, branch=branch, head=head,
-                  reason="the workflow was dispatched but no run of it showed on the scratch ref")
+    return answer
+
+
+def test_result(bench, args):
+    """Reads one test run for up to wait_seconds and answers its result. It never
+    dispatches, so asking again for the same run is always safe."""
+    repo = bench.repo(args.get("repo"))
+    spec = _test_spec(repo)
+    wait = _int(args, "wait_seconds", DEFAULT_TEST_WAIT, 0, CEILING_TEST_WAIT)
+    deadline = _clock() + wait
+    try:
+        client = forge.client(repo)
+        if args.get("run_id") is not None:
+            run_id = _int(args, "run_id", 0, 1, 2 ** 63)
+        else:
+            run_id = _find_test_run(bench, repo, spec, client, args, deadline)
+            if run_id is None:
+                since = _stamp_seconds(args.get("dispatched_at"))
+                return {"repo": repo.name, "conclusion": "pending", "run_id": None,
+                        "run_url": None, "elapsed_s": _age(since)}
+        run = _wait_for_run(client, run_id, max(0, deadline - _clock()))
+        answer = {"repo": repo.name, "run_id": run["id"], "run_url": run.get("url"),
+                  "branch": run.get("branch"), "head": run.get("commit")}
+        start = _stamp_seconds(run.get("created"))
+        if run.get("state") != "completed":
+            answer.update(conclusion="pending", elapsed_s=_age(start))
+            return answer
+        end = _stamp_seconds(run.get("completed"))
+        answer["conclusion"] = run.get("result") or "unknown"
+        answer["duration_s"] = None if None in (start, end) else max(0, end - start)
+        if answer["conclusion"] not in ("success", "cancelled", "skipped", "neutral"):
+            answer["failures"] = _failures(bench, repo, client, run["id"])
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=git.scrub(str(exc)))
+    answer["scratch_deleted"] = _drop_scratch(bench, repo, run.get("branch"), run.get("commit"))
+    return answer
+
+
+def _find_test_run(bench, repo, spec, client, args, deadline):
+    """Finds the run a test dispatch started, by its workflow, the scratch ref, the
+    head and a created time at or after the dispatch. Gives None past the deadline."""
+    branch = check_branch(_text(args, "branch", required=True))
+    since = _text(args, "dispatched_at", required=True)
+    head = args.get("head") if isinstance(args.get("head"), str) else None
+    if not head:
+        with bench.lock(repo.name):
+            head = head_of(bench.worktree(repo, branch))
+    while True:
+        runs = [run for run in client.workflow_runs(spec["workflow"], TEST_PREFIX + branch)
+                if run.get("commit") == head and (run.get("created") or "") >= since]
+        if runs:
+            # newest first: the earliest run after the dispatch is the one it started
+            return runs[-1]["id"]
+        left = deadline - _clock()
+        if left <= 0:
+            return None
+        _sleep(min(TEST_POLL_SECONDS, left))
+
+
+def _utc_stamp(seconds):
+    """Gives epoch seconds as the forge spells a time, 2026-09-28T12:00:00Z."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+
+
+def _stamp_seconds(stamp):
+    """Gives a forge time such as 2026-09-28T12:00:00Z as epoch seconds, or None."""
+    try:
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _age(since):
+    """Gives the whole seconds since epoch seconds since, or None."""
+    return None if since is None else max(0, int(time.time() - since))
+
+
+def _failures(bench, repo, client, run_id):
+    """Gives each failing test of a run's red jobs with its assertion lines, in
+    TEST_FAILURE_BYTES at most. The rig keeps each log for bench__log to page."""
+    failures = []
+    used = 0
+    for job in client.steps(run_id):
+        if job.get("result") not in ("failed", "error", "failure"):
+            continue
+        text = client.step_log(run_id, job["id"]) or ""
+        lines = remember_log(bench, repo, run_id, job["id"], text)
+        for failure in _failing_tests(job.get("name"), lines):
+            size = sum(len(line) + 1 for line in failure["lines"]) + len(failure["test"] or "")
+            if used + size > TEST_FAILURE_BYTES:
+                failures.append({"test": None, "job": job.get("name"),
+                                 "lines": [(LOG_HINT % job["id"]).strip()]})
+                return failures
+            failures.append(failure)
+            used += size
+    return failures
+
+
+def _failing_tests(job, lines):
+    """Gives each test a job's clean log names as failed, with its lines up to the
+    next failure or a blank line. A log that names none gives its marked lines,
+    or its last lines, under test null."""
+    found = []
+    for index, line in enumerate(lines):
+        match = FAILED_TEST.search(line)
+        if not match:
+            continue
+        block = [line]
+        for after in lines[index + 1:index + 1 + LOG_AFTER_MARK]:
+            if not after.strip() or FAILED_TEST.search(after):
+                break
+            block.append(after)
+        found.append({"test": match.group(1), "job": job,
+                      "lines": [text[:TEST_LINE_CHARS] for text in block]})
+    if not found:
+        marked = [line for line in lines if LOG_MARKERS.search(line)]
+        found.append({"test": None, "job": job,
+                      "lines": [text[:TEST_LINE_CHARS] for text in (marked or lines)[-LOG_AFTER_MARK:]]})
+    return found
 
 
 def _wait_for_run(client, run_id, wait):
@@ -2828,13 +2947,13 @@ TOOL_SPECS = [
         "name": "test",
         "function": test,
         "description": (
-            "Runs one test selection of the branch on the repository's own CI. The rig pushes "
-            "the worktree's head to the scratch ref bench-test/<branch> (never the pull "
-            "request's branch), dispatches the test workflow bench.json names with select as "
-            "its input, waits up to wait seconds, and answers {run_id, url, conclusion, "
-            "failed: [{job, step, log_tail}]}. It deletes the scratch ref when the run is "
-            "done. Past the wait it answers conclusion running: ask again with {run_id}. "
-            "The refusals are no_test_workflow, run_not_found, git and forge."
+            "Dispatches one test selection of the branch on the repository's own CI and "
+            "answers at once. The rig pushes the worktree's head to the scratch ref "
+            "bench-test/<branch> (never the pull request's branch), dispatches the test "
+            "workflow bench.json names with select as its input, and answers {run_id, run_url, "
+            "conclusion: pending, head, dispatched_at}. When no run shows within about 15 s, "
+            "run_id is null: give test_result the branch, head and dispatched_at instead. "
+            "Read the result with test_result. The refusals are no_test_workflow, git and forge."
         ),
         "schema": {
             "type": "object",
@@ -2843,11 +2962,35 @@ TOOL_SPECS = [
                 "branch": _BRANCH,
                 "select": {"type": "string",
                            "description": "The test selection: a namespace or a test id."},
-                "run_id": {"type": "integer",
-                           "description": "A run an earlier test answered running: read it again."},
-                "wait": {"type": "integer", "minimum": 0, "maximum": CEILING_TEST_WAIT,
-                         "description": "Seconds to wait for the run. Default 15."},
-                "log_bytes": {"type": "integer", "minimum": 256, "maximum": 32768},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
+            "required": ["repo"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "test_result",
+        "function": test_result,
+        "description": (
+            "Reads one run that test started, every 5 s for up to wait_seconds (default 40, "
+            "at most 45), and answers {conclusion: success or cancelled, run_url, duration_s}, "
+            "{conclusion: failure, run_url, duration_s, failures: [{test, job, lines}]} or "
+            "{conclusion: pending, run_url, elapsed_s}. It never dispatches: ask again while "
+            "it answers pending. It deletes the scratch ref when the run is done. The "
+            "refusals are no_test_workflow and forge."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "run_id": {"type": "integer", "description": "The run test answered."},
+                "wait_seconds": {"type": "integer", "minimum": 0, "maximum": CEILING_TEST_WAIT,
+                                 "description": "Seconds to wait for the run. Default 40."},
+                "branch": _BRANCH,
+                "head": {"type": "string",
+                         "description": "With no run_id: the head test answered."},
+                "dispatched_at": {"type": "string",
+                                  "description": "With no run_id: the dispatched_at test answered."},
                 "seat": _SEAT, "sitting": _SITTING,
             },
             "required": ["repo"],
