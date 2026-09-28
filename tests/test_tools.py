@@ -193,6 +193,116 @@ class TestFind(BenchCase):
         self.assertEqual(answer["files"], 2)
 
 
+CLOJURE_FIXTURE = r'''(ns demo.core
+  (:require [clojure.string :as str]))
+
+(defn greet
+  "Says hi (to someone)."
+  [name]
+  (str "hi) " name))
+
+(defn- secret [] \) )
+
+(g/defguard can-read?
+  [x]
+  x)
+
+(defmulti area :shape)
+
+(defmethod area :square [s]
+  (* (:side s) (:side s)))
+
+(defmethod area :circle [c]
+  ;; a comment with ( paren
+  (* 3 (:r c)))
+
+(def ^:private limit 10)
+'''
+
+PYTHON_FIXTURE = '''import os
+
+
+@decorator
+def top(a):
+    """Doc with ) paren."""
+    return a
+
+
+class Thing:
+    def method(self):
+        return ")"
+
+    async def later(self):
+        return 1
+
+
+async def fetch():
+    return None
+'''
+
+
+class TestSymbols(BenchCase):
+
+    def with_fixtures(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "lib/core.clj"), CLOJURE_FIXTURE)
+        util.write(os.path.join(path, "lib/things.py"), PYTHON_FIXTURE)
+        return path
+
+    def test_find_symbols_gives_clojure_definitions_with_their_lines(self):
+        self.with_fixtures()
+        answer = self.ok("find", branch="work", mode="symbols", path="lib/core.clj")
+        self.assertEqual(
+            [(item["name"], item["kind"], item["line"], item["end_line"])
+             for item in answer["symbols"]],
+            [("greet", "defn", 4, 7), ("secret", "defn-", 9, 9),
+             ("can-read?", "g/defguard", 11, 13), ("area", "defmulti", 15, 15),
+             ("area", "defmethod", 17, 18), ("area", "defmethod", 20, 22),
+             ("limit", "def", 24, 24)])
+        self.assertEqual({item["path"] for item in answer["symbols"]}, {"lib/core.clj"})
+
+    def test_find_symbols_gives_python_definitions_and_methods(self):
+        self.with_fixtures()
+        answer = self.ok("find", branch="work", mode="symbols", path="lib/things.py")
+        self.assertEqual(
+            [(item["name"], item["kind"], item["line"], item["end_line"])
+             for item in answer["symbols"]],
+            [("top", "def", 4, 7), ("Thing", "class", 10, 15),
+             ("Thing.method", "method", 11, 12), ("Thing.later", "method", 14, 15),
+             ("fetch", "async def", 18, 19)])
+
+    def test_find_symbols_over_a_directory_with_a_pattern(self):
+        self.with_fixtures()
+        answer = self.ok("find", branch="work", mode="symbols", path="lib", pattern="^(area|top)$")
+        self.assertEqual([(item["path"], item["name"]) for item in answer["symbols"]],
+                         [("lib/core.clj", "area")] * 3 + [("lib/things.py", "top")])
+
+    def test_read_by_symbol_gives_exactly_the_form(self):
+        self.with_fixtures()
+        answer = self.ok("read", branch="work", path="lib/core.clj", symbol="greet")
+        self.assertEqual(answer["matches"], 1)
+        definition = answer["definitions"][0]
+        self.assertEqual((definition["line"], definition["end_line"]), (4, 7))
+        self.assertEqual([line["line"] for line in definition["lines"]], [4, 5, 6, 7])
+        self.assertEqual(definition["lines"][-1]["text"], '  (str "hi) " name))')
+        method = self.ok("read", branch="work", path="lib/things.py", symbol="Thing.method")
+        self.assertEqual([line["text"] for line in method["definitions"][0]["lines"]],
+                         ["    def method(self):", '        return ")"'])
+
+    def test_read_by_symbol_gives_each_defmethod(self):
+        self.with_fixtures()
+        answer = self.ok("read", branch="work", path="lib/core.clj", symbol="area")
+        self.assertEqual([(item["kind"], item["line"], item["end_line"])
+                          for item in answer["definitions"]],
+                         [("defmulti", 15, 15), ("defmethod", 17, 18), ("defmethod", 20, 22)])
+
+    def test_read_by_an_unknown_symbol_names_close_matches(self):
+        self.with_fixtures()
+        answer = self.refused("read", branch="work", path="lib/core.clj", symbol="greeet")
+        self.assertEqual(answer["refused"], "not_found")
+        self.assertIn("greet", answer["close"])
+
+
 class TestRead(BenchCase):
 
     def test_read_gives_lines_with_numbers(self):

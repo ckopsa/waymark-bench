@@ -5,6 +5,7 @@ input, applies the caps, and gives a dictionary. A refusal is a Refusal
 exception with a name and its data. No tool gives a stack trace.
 """
 
+import difflib
 import fnmatch
 import json
 import os
@@ -13,7 +14,7 @@ import shutil
 import sys
 import threading
 
-from . import config as config_module, forge, git, landing as landing_module
+from . import config as config_module, forge, git, landing as landing_module, symbols
 
 
 DEFAULT_MAX_BYTES = 16384
@@ -642,8 +643,49 @@ def _find_diff(bench, repo, worktree, args, max_bytes, allow=None):
             "files": files, "lines_added": added, "lines_removed": removed}
 
 
+def _find_symbols(bench, repo, worktree, args, max_bytes, allow=None):
+    start_rel = clean_path(_text(args, "path", default=".") or ".")
+    start, rel = bench.resolve(repo, worktree, start_rel, allow=allow)
+    pattern = _text(args, "pattern")
+    max_matches = _int(args, "max_matches", DEFAULT_MAX_MATCHES, 1, 2000)
+    try:
+        wanted = re.compile(pattern) if pattern else None
+    except re.error as exc:
+        raise Refusal("input", field="pattern", reason=str(exc))
+    if os.path.isfile(start):
+        names = [rel]
+    elif os.path.isdir(start):
+        text = git.out(["ls-files", "--cached", "--others", "--exclude-standard", "--", rel],
+                       cwd=worktree)
+        names = [name for name in text.splitlines()
+                 if name and not deny_pattern(name, repo.deny)
+                 and (allow is None or allow_pattern(name, allow))]
+    else:
+        raise Refusal("not_found", path=rel)
+    found = []
+    for name in sorted(set(names)):
+        if not symbols.language_of(name):
+            continue
+        try:
+            with open(os.path.join(worktree, name), "r", encoding="utf-8", errors="replace") as handle:
+                content = handle.read()
+        except OSError:
+            continue
+        for item in symbols.definitions(name, content):
+            if wanted is None or wanted.search(item["name"]):
+                found.append(dict(item, path=name))
+
+    def size_of(item):
+        return len(item["name"]) + len(item["path"]) + len(item["kind"]) + 48
+
+    dropped = sum(size_of(item) for item in found[max_matches:])
+    kept, dropped_bytes = cap_items(found[:max_matches], max_bytes, size_of)
+    return {"mode": "symbols", "path": rel, "pattern": pattern, "symbols": kept,
+            "dropped": dropped + dropped_bytes}
+
+
 def find(bench, args):
-    """Looks in a worktree: a tree, a glob, a grep or a diff."""
+    """Looks in a worktree: a tree, a glob, a grep, a diff or the definitions."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     mode = _text(args, "mode", default="tree")
@@ -659,10 +701,45 @@ def find(bench, args):
             answer = _find_grep(bench, repo, worktree, args, max_bytes, allow)
         elif mode == "diff":
             answer = _find_diff(bench, repo, worktree, args, max_bytes, allow)
+        elif mode == "symbols":
+            answer = _find_symbols(bench, repo, worktree, args, max_bytes, allow)
         else:
-            raise Refusal("input", field="mode", reason="use tree, glob, grep or diff")
+            raise Refusal("input", field="mode", reason="use tree, glob, grep, diff or symbols")
         answer.update({"repo": repo.name, "branch": branch, "max_bytes": max_bytes})
         return answer
+
+
+MAX_SYMBOL_MATCHES = 20
+
+
+def _read_symbol(answer, content, symbol, max_bytes):
+    """Gives the lines of each definition of symbol in one file."""
+    rel = answer["path"]
+    if not symbols.language_of(rel):
+        raise Refusal("input", field="symbol",
+                      reason="symbol reads a Clojure, ClojureScript, edn or Python file")
+    found = symbols.definitions(rel, content)
+    matches = [item for item in found
+               if symbol in (item["name"], item["name"].rpartition(".")[2])]
+    if not matches:
+        names = sorted({item["name"] for item in found})
+        close = difflib.get_close_matches(symbol, names, 5, 0.5)
+        close += [name for name in names if symbol.lower() in name.lower() and name not in close]
+        raise Refusal("not_found", path=rel, symbol=symbol, close=close[:10])
+    all_lines = content.splitlines()
+    budget = max_bytes
+    dropped = 0
+    definitions = []
+    for item in matches[:MAX_SYMBOL_MATCHES]:
+        window = [{"line": number, "text": all_lines[number - 1]}
+                  for number in range(item["line"], min(item["end_line"], len(all_lines)) + 1)]
+        kept, lost = cap_items(window, budget, lambda line: len(line["text"]) + 12)
+        budget -= sum(len(line["text"]) + 12 for line in kept)
+        dropped += lost
+        definitions.append(dict(item, lines=kept))
+    answer.update({"symbol": symbol, "matches": len(matches), "definitions": definitions,
+                   "total_lines": len(all_lines), "dropped": dropped})
+    return answer
 
 
 def read(bench, args):
@@ -674,6 +751,7 @@ def read(bench, args):
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
     ref = _text(args, "ref")
     if_hash = _text(args, "if_hash")
+    symbol = _text(args, "symbol")
     allow = _globs(args, "allow")
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
@@ -700,6 +778,9 @@ def read(bench, args):
         if if_hash and if_hash == file_hash:
             return {"repo": repo.name, "branch": branch, "path": rel,
                     "unchanged": True, "hash": file_hash}
+        if symbol:
+            return _read_symbol({"repo": repo.name, "branch": branch, "path": rel, "ref": ref,
+                                 "hash": file_hash}, content, symbol, max_bytes)
         all_lines = content.splitlines()
         total = len(all_lines)
         window = all_lines[offset - 1: offset - 1 + limit]
@@ -1565,7 +1646,9 @@ TOOL_SPECS = [
             "Looks in the worktree. Mode tree gives the files under a path to a depth "
             "with their sizes. Mode glob gives the paths that match a pattern. Mode grep "
             "gives the count of matches for each file first, then the lines. Mode diff "
-            "gives the change of the worktree against the base. Every answer has a cap. "
+            "gives the change of the worktree against the base. Mode symbols gives the "
+            "top-level definitions of the Clojure and Python files under path, each with "
+            "its name, kind, path, line and end_line. Every answer has a cap. "
             "With allow, the answer holds only the paths that a glob of the list matches."
         ),
         "schema": {
@@ -1573,7 +1656,7 @@ TOOL_SPECS = [
             "properties": {
                 "repo": _REPO,
                 "branch": _BRANCH,
-                "mode": {"type": "string", "enum": ["tree", "glob", "grep", "diff"],
+                "mode": {"type": "string", "enum": ["tree", "glob", "grep", "diff", "symbols"],
                          "description": "The kind of look. The default is tree."},
                 "path": {"type": "string", "description": "The path to look in."},
                 "depth": {"type": "integer",
@@ -1582,13 +1665,15 @@ TOOL_SPECS = [
                             "description": (
                                 "The glob for mode glob, or the pattern for mode grep. A grep "
                                 "pattern is a Perl regular expression: a|b, (?i), \\b and .? "
-                                "all work. A pattern git cannot read is refused, not empty.")},
+                                "all work. A pattern git cannot read is refused, not empty. For mode "
+                                "symbols, a Python regular expression over the names.")},
                 "ignore_case": {"type": "boolean",
                                 "description": "For mode grep: match without regard to case."},
                 "context": {"type": "integer",
                             "description": "The count of lines around each match for mode grep."},
                 "max_matches": {"type": "integer",
-                                "description": "The cap on the lines for mode grep. The default is 200."},
+                                "description": "The cap on the lines for mode grep, or on the "
+                                               "definitions for mode symbols. The default is 200."},
                 "max_bytes": _MAX_BYTES,
                 "allow": _ALLOW,
                 "seat": _SEAT,
@@ -1606,7 +1691,10 @@ TOOL_SPECS = [
             "range. Use ref to read the file at a git ref, for example base. A ref is read "
             "as the last fetch left it; prepare and pull fetch. Give if_hash "
             "with the hash of your last read: if the file did not change, the answer is "
-            "unchanged and the hash, and not the bytes. With allow, a path that no glob of "
+            "unchanged and the hash, and not the bytes. Give symbol in place of offset and "
+            "limit to read one definition of a Clojure or Python file by its name: each "
+            "match comes with its lines and its range, and a name the file does not "
+            "define is refused with the close names. With allow, a path that no glob of "
             "the list matches is refused."
         ),
         "schema": {
@@ -1615,6 +1703,9 @@ TOOL_SPECS = [
                 "repo": _REPO,
                 "branch": _BRANCH,
                 "path": {"type": "string", "description": "The path in the repository."},
+                "symbol": {"type": "string",
+                           "description": "The name of a definition to read, e.g. greet, "
+                                          "Thing.method or a defmethod's multi."},
                 "offset": {"type": "integer",
                            "description": "The first line. The lines start at 1."},
                 "limit": {"type": "integer",

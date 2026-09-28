@@ -54,6 +54,23 @@ use: `pull` from `head` moves the worktree to the remote branch, and
 `read` with a `ref` reads the ref as the last fetch left it. `prepare`
 and `pull` fetch.
 
+## Definitions by name
+
+| Tool | Input | Answer |
+| --- | --- | --- |
+| `find` mode `symbols` | `path` (a file or a directory), `pattern` (a regex over the names), `max_matches` | `symbols`: each `{name, kind, path, line, end_line}` |
+| `read` with `symbol` | `path`, `symbol` in place of `offset` and `limit` | `definitions`: each match with its range and its numbered `lines` |
+
+A Clojure, ClojureScript or edn definition is a top-level form whose
+head starts with `def`, with or without an alias: `defn-`, `defmethod`,
+`g/defguard`. Its `end_line` is the line where its parens balance; the
+reader skips strings, comments and character literals. A Python
+definition is a `def`, an `async def` or a `class` at column 0, and a
+method one level in, named `Class.method`. A `read` of several matches
+(the `defmethod`s of one multi) gives each, up to 20, under `max_bytes`.
+A name the file does not define is refused `not_found` with `close`,
+the names that look like it.
+
 ## The enrollment
 
 The rig holds a mirror of the engine's rows. It is not a second ledger.
