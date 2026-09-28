@@ -251,7 +251,7 @@ class TestSymbols(BenchCase):
 
     def test_find_symbols_gives_clojure_definitions_with_their_lines(self):
         self.with_fixtures()
-        answer = self.ok("find", branch="work", mode="symbols", path="lib/core.clj")
+        answer = self.ok("symbols", branch="work", path="lib/core.clj")
         self.assertEqual(
             [(item["name"], item["kind"], item["line"], item["end_line"])
              for item in answer["symbols"]],
@@ -263,7 +263,7 @@ class TestSymbols(BenchCase):
 
     def test_find_symbols_gives_python_definitions_and_methods(self):
         self.with_fixtures()
-        answer = self.ok("find", branch="work", mode="symbols", path="lib/things.py")
+        answer = self.ok("symbols", branch="work", path="lib/things.py")
         self.assertEqual(
             [(item["name"], item["kind"], item["line"], item["end_line"])
              for item in answer["symbols"]],
@@ -273,34 +273,46 @@ class TestSymbols(BenchCase):
 
     def test_find_symbols_over_a_directory_with_a_pattern(self):
         self.with_fixtures()
-        answer = self.ok("find", branch="work", mode="symbols", path="lib", pattern="^(area|top)$")
+        answer = self.ok("symbols", branch="work", path="lib", pattern="^(area|top)$")
         self.assertEqual([(item["path"], item["name"]) for item in answer["symbols"]],
                          [("lib/core.clj", "area")] * 3 + [("lib/things.py", "top")])
 
     def test_read_by_symbol_gives_exactly_the_form(self):
         self.with_fixtures()
-        answer = self.ok("read", branch="work", path="lib/core.clj", symbol="greet")
+        answer = self.ok("read_symbol", branch="work", path="lib/core.clj", symbol="greet")
         self.assertEqual(answer["matches"], 1)
         definition = answer["definitions"][0]
         self.assertEqual((definition["line"], definition["end_line"]), (4, 7))
         self.assertEqual([line["line"] for line in definition["lines"]], [4, 5, 6, 7])
         self.assertEqual(definition["lines"][-1]["text"], '  (str "hi) " name))')
-        method = self.ok("read", branch="work", path="lib/things.py", symbol="Thing.method")
+        method = self.ok("read_symbol", branch="work", path="lib/things.py", symbol="Thing.method")
         self.assertEqual([line["text"] for line in method["definitions"][0]["lines"]],
                          ["    def method(self):", '        return ")"'])
 
     def test_read_by_symbol_gives_each_defmethod(self):
         self.with_fixtures()
-        answer = self.ok("read", branch="work", path="lib/core.clj", symbol="area")
+        answer = self.ok("read_symbol", branch="work", path="lib/core.clj", symbol="area")
         self.assertEqual([(item["kind"], item["line"], item["end_line"])
                           for item in answer["definitions"]],
                          [("defmulti", 15, 15), ("defmethod", 17, 18), ("defmethod", 20, 22)])
 
     def test_read_by_an_unknown_symbol_names_close_matches(self):
         self.with_fixtures()
-        answer = self.refused("read", branch="work", path="lib/core.clj", symbol="greeet")
+        answer = self.refused("read_symbol", branch="work", path="lib/core.clj", symbol="greeet")
         self.assertEqual(answer["refused"], "not_found")
         self.assertIn("greet", answer["close"])
+
+    def test_find_refuses_mode_symbols(self):
+        self.with_fixtures()
+        answer = self.refused("find", branch="work", mode="symbols", path="lib")
+        self.assertEqual(answer["field"], "mode")
+        self.assertIn("symbols tool", answer["reason"])
+
+    def test_read_refuses_symbol(self):
+        self.with_fixtures()
+        answer = self.refused("read", branch="work", path="lib/core.clj", symbol="greet")
+        self.assertEqual(answer["field"], "symbol")
+        self.assertIn("read_symbol", answer["reason"])
 
 
 class TestRead(BenchCase):
@@ -425,7 +437,7 @@ class TestEdit(BenchCase):
 
     def test_edit_applies_a_list_of_edits_across_two_files(self):
         path = self.prepared()
-        answer = self.ok("edit", branch="work", edits=[
+        answer = self.ok("edit_many", branch="work", edits=[
             {"path": "src/app.py", "old": "MARKER_ONE = 'one'", "new": "MARKER_ONE = 'two'"},
             {"path": "docs/a.txt", "old": "alpha", "new": "ALPHA"},
             {"path": "docs/a.txt", "old": "bravo", "new": "BRAVO"},
@@ -440,7 +452,7 @@ class TestEdit(BenchCase):
 
     def test_edit_list_with_a_missing_old_writes_none_and_names_the_item(self):
         path = self.prepared()
-        answer = self.refused("edit", branch="work", edits=[
+        answer = self.refused("edit_many", branch="work", edits=[
             {"path": "src/app.py", "old": "MARKER_ONE = 'one'", "new": "MARKER_ONE = 'two'"},
             {"path": "docs/h.txt", "new": "hotel\n", "create": True},
             {"path": "docs/a.txt", "old": "zulu", "new": "ZULU"},
@@ -453,7 +465,7 @@ class TestEdit(BenchCase):
 
     def test_edit_list_with_a_protected_path_refuses_the_whole_list(self):
         path = self.prepared()
-        answer = self.refused("edit", branch="work", edits=[
+        answer = self.refused("edit_many", branch="work", edits=[
             {"path": "docs/a.txt", "old": "alpha", "new": "ALPHA"},
             {"path": ".github/workflows/ci.yml", "old": "name: ci", "new": "name: gate"},
         ])
@@ -464,20 +476,29 @@ class TestEdit(BenchCase):
 
     def test_edit_list_beside_the_fields_of_one_edit_is_refused(self):
         self.prepared()
-        answer = self.refused("edit", branch="work", path="docs/a.txt", delete=True,
+        answer = self.refused("edit_many", branch="work", path="docs/a.txt", delete=True,
                               edits=[{"path": "docs/a.txt", "old": "alpha", "new": "ALPHA"}])
         self.assertEqual(answer["field"], "edits")
         self.assertEqual(answer["beside"], ["path", "delete"])
 
     def test_edit_list_is_capped(self):
         self.prepared()
-        answer = self.refused("edit", branch="work",
+        answer = self.refused("edit_many", branch="work",
                               edits=[{"path": "docs/a.txt", "delete": True}] * 51)
         self.assertEqual(answer["field"], "edits")
 
+    def test_edit_refuses_edits(self):
+        path = self.prepared()
+        answer = self.refused("edit", branch="work",
+                              edits=[{"path": "docs/a.txt", "old": "alpha", "new": "ALPHA"}])
+        self.assertEqual(answer["field"], "edits")
+        self.assertIn("edit_many", answer["reason"])
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "alpha\nbravo\ncharlie\n")
+
     def test_edit_list_follows_the_file_from_edit_to_edit(self):
         path = self.prepared()
-        self.ok("edit", branch="work", edits=[
+        self.ok("edit_many", branch="work", edits=[
             {"path": "docs/i.txt", "new": "india\n", "create": True},
             {"path": "docs/i.txt", "move_to": "docs/j.txt"},
             {"path": "docs/j.txt", "old": "india", "new": "juliett"},
