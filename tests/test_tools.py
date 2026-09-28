@@ -313,6 +313,69 @@ class TestEdit(BenchCase):
         self.assertEqual(answer["field"], "create")
         self.assertIn("new with create: true", answer["reason"])
 
+    def test_edit_applies_a_list_of_edits_across_two_files(self):
+        path = self.prepared()
+        answer = self.ok("edit", branch="work", edits=[
+            {"path": "src/app.py", "old": "MARKER_ONE = 'one'", "new": "MARKER_ONE = 'two'"},
+            {"path": "docs/a.txt", "old": "alpha", "new": "ALPHA"},
+            {"path": "docs/a.txt", "old": "bravo", "new": "BRAVO"},
+        ])
+        self.assertEqual([item["path"] for item in answer["edits"]],
+                         ["src/app.py", "docs/a.txt", "docs/a.txt"])
+        self.assertNotIn("content", answer["edits"][0])
+        with open(os.path.join(path, "src/app.py"), encoding="utf-8") as handle:
+            self.assertIn("MARKER_ONE = 'two'", handle.read())
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "ALPHA\nBRAVO\ncharlie\n")
+
+    def test_edit_list_with_a_missing_old_writes_none_and_names_the_item(self):
+        path = self.prepared()
+        answer = self.refused("edit", branch="work", edits=[
+            {"path": "src/app.py", "old": "MARKER_ONE = 'one'", "new": "MARKER_ONE = 'two'"},
+            {"path": "docs/h.txt", "new": "hotel\n", "create": True},
+            {"path": "docs/a.txt", "old": "zulu", "new": "ZULU"},
+        ])
+        self.assertEqual(answer["refused"], "found")
+        self.assertEqual(answer["item"], 3)
+        with open(os.path.join(path, "src/app.py"), encoding="utf-8") as handle:
+            self.assertIn("MARKER_ONE = 'one'", handle.read())
+        self.assertFalse(os.path.exists(os.path.join(path, "docs/h.txt")))
+
+    def test_edit_list_with_a_protected_path_refuses_the_whole_list(self):
+        path = self.prepared()
+        answer = self.refused("edit", branch="work", edits=[
+            {"path": "docs/a.txt", "old": "alpha", "new": "ALPHA"},
+            {"path": ".github/workflows/ci.yml", "old": "name: ci", "new": "name: gate"},
+        ])
+        self.assertEqual(answer["refused"], "protected")
+        self.assertEqual(answer["item"], 2)
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "alpha\nbravo\ncharlie\n")
+
+    def test_edit_list_beside_the_fields_of_one_edit_is_refused(self):
+        self.prepared()
+        answer = self.refused("edit", branch="work", path="docs/a.txt", delete=True,
+                              edits=[{"path": "docs/a.txt", "old": "alpha", "new": "ALPHA"}])
+        self.assertEqual(answer["field"], "edits")
+        self.assertEqual(answer["beside"], ["path", "delete"])
+
+    def test_edit_list_is_capped(self):
+        self.prepared()
+        answer = self.refused("edit", branch="work",
+                              edits=[{"path": "docs/a.txt", "delete": True}] * 51)
+        self.assertEqual(answer["field"], "edits")
+
+    def test_edit_list_follows_the_file_from_edit_to_edit(self):
+        path = self.prepared()
+        self.ok("edit", branch="work", edits=[
+            {"path": "docs/i.txt", "new": "india\n", "create": True},
+            {"path": "docs/i.txt", "move_to": "docs/j.txt"},
+            {"path": "docs/j.txt", "old": "india", "new": "juliett"},
+        ])
+        self.assertFalse(os.path.exists(os.path.join(path, "docs/i.txt")))
+        with open(os.path.join(path, "docs/j.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "juliett\n")
+
     def test_edit_creates_from_new_with_create_true(self):
         path = self.prepared()
         self.ok("edit", branch="work", path="docs/g.txt", new="golf\n", create=True)

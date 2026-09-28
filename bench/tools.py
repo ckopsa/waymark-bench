@@ -720,16 +720,17 @@ def read(bench, args):
         }
 
 
-def edit(bench, args):
-    """Changes one path: a replace, a create, a delete or a move."""
-    repo = bench.repo(args.get("repo"))
-    branch = check_branch(_text(args, "branch", required=True))
-    allow_protected = bool(args.get("allow_protected"))
-    allow = _globs(args, "allow")
-    old = args.get("old")
-    new = args.get("new")
-    content = args.get("content")
-    create = args.get("create")
+EDIT_FIELDS = ("path", "old", "new", "content", "create", "delete", "move_to")
+MAX_EDITS = 50
+_ON_DISK = "on_disk"
+
+
+def _operation_of(item):
+    """Reads one edit's fields. Gives (operation, old, new)."""
+    old = item.get("old")
+    new = item.get("new")
+    content = item.get("content")
+    create = item.get("create")
     if create is not None and not isinstance(create, bool):
         raise Refusal("input", field="create", reason="create is true or false: give the "
                       "content in new, as new with create: true")
@@ -743,68 +744,171 @@ def edit(bench, args):
             raise Refusal("input", field="content", reason="a text is necessary")
         new = content
         create = True
-    create = bool(create)
-    delete = bool(args.get("delete"))
-    move_to = args.get("move_to")
     operations = []
     if old is not None:
         operations.append("replace")
     if create:
         operations.append("create")
-    if delete:
+    if item.get("delete"):
         operations.append("delete")
-    if move_to:
+    if item.get("move_to"):
         operations.append("move")
     if len(operations) != 1:
         raise Refusal("operation", operations=operations,
                       reason="give exactly one of: old with new (replace), new with create: true "
                              "(a new file), delete: true, or move_to")
-    operation = operations[0]
+    return operations[0], old, new
+
+
+class _Plan:
+    """The worktree as the edits so far leave it, before a byte is written.
+
+    A path maps to None (gone), to a text (its new content) or to
+    _ON_DISK with the path whose bytes it holds (a file moved as it is).
+    """
+
+    def __init__(self):
+        self.state = {}
+        self.steps = []
+
+    def exists(self, full):
+        if full in self.state:
+            return self.state[full] is not None
+        return os.path.exists(full)
+
+    def is_file(self, full):
+        if full in self.state:
+            return self.state[full] is not None
+        return os.path.isfile(full)
+
+    def text(self, full):
+        value = self.state.get(full, (_ON_DISK, full))
+        if isinstance(value, tuple):
+            with open(value[1], "r", encoding="utf-8") as handle:
+                return handle.read()
+        return value
+
+    def write(self):
+        """Applies the steps in order. The plan has judged each one."""
+        for step in self.steps:
+            if step[0] == "write":
+                os.makedirs(os.path.dirname(step[1]), exist_ok=True)
+                with open(step[1], "w", encoding="utf-8") as handle:
+                    handle.write(step[2])
+            elif step[0] == "delete":
+                os.remove(step[1])
+            else:
+                os.makedirs(os.path.dirname(step[2]), exist_ok=True)
+                os.replace(step[1], step[2])
+
+
+def _plan_edit(bench, repo, worktree, plan, item, allow_protected, allow):
+    """Judges one edit against the plan and adds its steps. Gives its answer."""
+    operation, old, new = _operation_of(item)
+    full, rel = bench.resolve(repo, worktree, item.get("path"), for_write=True,
+                              allow_protected=allow_protected, allow=allow)
+    if operation == "replace":
+        if new is None or not isinstance(new, str) or not isinstance(old, str):
+            raise Refusal("input", field="new", reason="old and new must be texts")
+        if not plan.is_file(full):
+            raise Refusal("not_found", path=rel)
+        content = plan.text(full)
+        found = content.count(old)
+        if found != 1:
+            raise Refusal("found", path=rel, found=found,
+                          remedy="give more of the file in old, so it is unique")
+        content = content.replace(old, new, 1)
+        plan.state[full] = content
+        plan.steps.append(("write", full, content))
+        return {"path": rel}, full
+    if operation == "create":
+        if new is None or not isinstance(new, str):
+            raise Refusal("input", field="new", reason="give the content in new, as new with create: true")
+        if plan.exists(full):
+            raise Refusal("exists", path=rel, remedy="use old and new to change the file")
+        plan.state[full] = new
+        plan.steps.append(("write", full, new))
+        return {"path": rel}, full
+    if operation == "delete":
+        if not plan.is_file(full):
+            raise Refusal("not_found", path=rel)
+        plan.state[full] = None
+        plan.steps.append(("delete", full))
+        return {"path": rel, "deleted": True}, None
+    target, target_rel = bench.resolve(repo, worktree, item.get("move_to"), for_write=True,
+                                       allow_protected=allow_protected, allow=allow)
+    if not plan.exists(full):
+        raise Refusal("not_found", path=rel)
+    if plan.exists(target):
+        raise Refusal("exists", path=target_rel)
+    plan.state[target] = plan.state.get(full, (_ON_DISK, full))
+    plan.state[full] = None
+    plan.steps.append(("move", full, target))
+    return {"path": target_rel, "from": rel}, target
+
+
+def edit(bench, args):
+    """Changes paths: a replace, a create, a delete or a move, or a list of them.
+
+    A list is judged whole before a byte is written: one refused edit
+    writes none of them.
+    """
+    repo = bench.repo(args.get("repo"))
+    branch = check_branch(_text(args, "branch", required=True))
+    allow_protected = bool(args.get("allow_protected"))
+    allow = _globs(args, "allow")
+    edits = args.get("edits")
+    if edits is None:
+        items = [args]
+    else:
+        beside = [key for key in EDIT_FIELDS if args.get(key) is not None]
+        if beside:
+            raise Refusal("input", field="edits", beside=beside,
+                          reason="give edits or the fields of one edit, not both")
+        if not isinstance(edits, list) or not edits:
+            raise Refusal("input", field="edits", reason="edits is a list of one edit or more")
+        if len(edits) > MAX_EDITS:
+            raise Refusal("input", field="edits", count=len(edits),
+                          reason="at most %d edits in one call" % MAX_EDITS)
+        for index, item in enumerate(edits, 1):
+            if not isinstance(item, dict):
+                raise Refusal("input", field="edits", item=index, reason="each edit is an object")
+            extra = sorted(set(item) - set(EDIT_FIELDS))
+            if extra:
+                raise Refusal("input", field="edits", item=index, fields=extra,
+                              reason="an edit takes only: " + ", ".join(EDIT_FIELDS))
+        items = edits
+    # The fields of each edit are judged before the lock, as one edit's were.
+    for index, item in enumerate(items, 1):
+        try:
+            _operation_of(item)
+        except Refusal as exc:
+            if edits is not None:
+                exc.data["item"] = index
+            raise
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
         bench.no_landing(repo, branch)
-        full, rel = bench.resolve(repo, worktree, args.get("path"), for_write=True,
-                                  allow_protected=allow_protected, allow=allow)
-        if operation == "replace":
-            if new is None or not isinstance(new, str) or not isinstance(old, str):
-                raise Refusal("input", field="new", reason="old and new must be texts")
-            if not os.path.isfile(full):
-                raise Refusal("not_found", path=rel)
-            with open(full, "r", encoding="utf-8") as handle:
-                content = handle.read()
-            found = content.count(old)
-            if found != 1:
-                raise Refusal("found", path=rel, found=found,
-                              remedy="give more of the file in old, so it is unique")
-            content = content.replace(old, new, 1)
-            with open(full, "w", encoding="utf-8") as handle:
-                handle.write(content)
-        elif operation == "create":
-            if new is None or not isinstance(new, str):
-                raise Refusal("input", field="new", reason="give the content in new, as new with create: true")
-            if os.path.exists(full):
-                raise Refusal("exists", path=rel, remedy="use old and new to change the file")
-            os.makedirs(os.path.dirname(full) or worktree, exist_ok=True)
-            with open(full, "w", encoding="utf-8") as handle:
-                handle.write(new)
-        elif operation == "delete":
-            if not os.path.isfile(full):
-                raise Refusal("not_found", path=rel)
-            os.remove(full)
-            return {"repo": repo.name, "branch": branch, "path": rel, "deleted": True}
-        else:
-            target, target_rel = bench.resolve(repo, worktree, move_to, for_write=True,
-                                               allow_protected=allow_protected, allow=allow)
-            if not os.path.exists(full):
-                raise Refusal("not_found", path=rel)
-            if os.path.exists(target):
-                raise Refusal("exists", path=target_rel)
-            os.makedirs(os.path.dirname(target) or worktree, exist_ok=True)
-            os.replace(full, target)
-            return {"repo": repo.name, "branch": branch, "path": target_rel, "from": rel,
-                    "hash": git.line(["hash-object", "--", target], cwd=worktree)}
-        return {"repo": repo.name, "branch": branch, "path": rel,
-                "hash": git.line(["hash-object", "--", full], cwd=worktree)}
+        plan = _Plan()
+        results = []
+        for index, item in enumerate(items, 1):
+            try:
+                results.append(_plan_edit(bench, repo, worktree, plan, item, allow_protected, allow))
+            except Refusal as exc:
+                if edits is not None:
+                    exc.data["item"] = index
+                raise
+        plan.write()
+        answers = []
+        for result, full in results:
+            if full is not None and os.path.isfile(full):
+                result["hash"] = git.line(["hash-object", "--", full], cwd=worktree)
+            answers.append(result)
+        if edits is None:
+            answer = {"repo": repo.name, "branch": branch}
+            answer.update(answers[0])
+            return answer
+        return {"repo": repo.name, "branch": branch, "edits": answers}
 
 
 def pull(bench, args):
@@ -1636,13 +1740,16 @@ TOOL_SPECS = [
         "name": "edit",
         "function": edit,
         "description": (
-            "Changes one path with exactly one operation. Replace: old with new, and old "
-            "must be in the file one time, e.g. {\"path\": \"a.py\", \"old\": \"x = 1\", "
-            "\"new\": \"x = 2\"}. Create: new with create: true, e.g. {\"path\": \"b.py\", "
-            "\"new\": \"print(1)\\n\", \"create\": true}; content is taken as a spelling of "
-            "new for a new file. Delete: delete: true, e.g. {\"path\": \"c.py\", "
+            "Changes one path with exactly one operation, or many paths with edits. Replace: "
+            "old with new, and old must be in the file one time, e.g. {\"path\": \"a.py\", "
+            "\"old\": \"x = 1\", \"new\": \"x = 2\"}. Create: new with create: true, e.g. "
+            "{\"path\": \"b.py\", \"new\": \"print(1)\\n\", \"create\": true}; content is "
+            "taken as a spelling of new for a new file. Delete: delete: true, e.g. {\"path\": \"c.py\", "
             "\"delete\": true}. Move: move_to, e.g. {\"path\": \"c.py\", \"move_to\": "
-            "\"d.py\"}. A write under .github/ or .claude/ is "
+            "\"d.py\"}. Many: edits, a list of up to 50 of these objects, applied in order "
+            "and together or not at all, e.g. {\"edits\": [{\"path\": \"a.py\", \"old\": "
+            "\"x = 1\", \"new\": \"x = 2\"}, {\"path\": \"c.py\", \"delete\": true}]}; a "
+            "refusal names the edit by its number, from 1. A write under .github/ or .claude/ is "
             "refused when the scope does not name the path. With allow, a path that no glob "
             "of the list matches is refused."
         ),
@@ -1667,13 +1774,34 @@ TOOL_SPECS = [
                            "description": "True to remove the file: delete: true, with no other "
                                           "operation."},
                 "move_to": {"type": "string", "description": "The new path of the file."},
+                "edits": {
+                    "type": "array", "minItems": 1, "maxItems": 50,
+                    "description": "Many edits in one call, each shaped as one edit: path with "
+                                   "old and new, new with create: true, delete: true, or move_to. "
+                                   "They apply in order, and one refused edit writes none. Not "
+                                   "beside path and the other fields of one edit.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "old": {"type": "string"},
+                            "new": {"type": "string"},
+                            "content": {"type": "string"},
+                            "create": {"type": "boolean"},
+                            "delete": {"type": "boolean"},
+                            "move_to": {"type": "string"},
+                        },
+                        "required": ["path"],
+                        "additionalProperties": False,
+                    },
+                },
                 "allow_protected": {"type": "boolean",
                                     "description": "True to permit a write under .github/ or .claude/."},
                 "allow": _ALLOW,
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },
-            "required": ["repo", "branch", "path"],
+            "required": ["repo", "branch"],
             "additionalProperties": False,
         },
     },

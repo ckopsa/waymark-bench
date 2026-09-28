@@ -11,6 +11,7 @@ needs, so the token can be made whole, and no larger.
 |---|---|---|---|
 | `prepare`, `pull` | fetch the repository | Contents: read, Metadata: read | `repo` |
 | `enroll` | clone the repository | Contents: read, Metadata: read | `repo` |
+| `edit` (one edit, or many in `edits`) | nothing: it writes the worktree on the disk | none | none |
 | `submit` | push the branch | Contents: read and write | `repo` |
 | `submit` of a change under `.github/workflows/` | push a workflow file | Workflows: read and write | `workflow` |
 | `submit` (landing) | open the pull request, turn on auto-merge | Pull requests: read and write | `repo` |
