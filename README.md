@@ -1,9 +1,9 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives sixteen
+for each repository and a git worktree for each branch. It gives seventeen
 tools: `prepare`, `status`, `find`, `read`, `check`, `edit`, `pull`, `submit`,
-`feedback`, `discard`, `merge`, `update_branch`, `rerun`, `enroll`, `repos` and `unenroll`. It
+`feedback`, `discard`, `merge`, `update_branch`, `rerun`, `test`, `enroll`, `repos` and `unenroll`. It
 needs Python
 3.11, git, and one library: pydantic-settings, for the settings.
 

@@ -65,13 +65,16 @@ class RepoConfig:
     """One repository on the bench."""
 
     def __init__(self, name, clone_url, default_branch="main", deny=None, land=None,
-                 source="config"):
+                 source="config", test=None):
         self.name = name
         self.source = source
         self.clone_url = clone_url
         self.default_branch = default_branch or "main"
         self.deny = list(deny) if deny is not None else list(DEFAULT_DENY)
         self.land = land
+        # {workflow, input}: the CI workflow the test tool dispatches, and
+        # the name of its input that narrows the run to one selection
+        self.test = test
 
     def to_dict(self):
         return {
@@ -80,6 +83,7 @@ class RepoConfig:
             "default_branch": self.default_branch,
             "deny": list(self.deny),
             "land": self.land.to_dict() if self.land else None,
+            "test": dict(self.test) if self.test else None,
         }
 
 
@@ -182,6 +186,7 @@ def repos_from_dict(data, source="config"):
             deny=spec.get("deny"),
             land=land_from_dict(name, spec.get("land"), default_branch),
             source=source,
+            test=test_from_dict(name, spec.get("test")),
         )
     return repos
 
@@ -196,6 +201,21 @@ def load(path):
     except ValueError as exc:
         raise ConfigError("cannot parse %s: %s" % (path, exc))
     return from_dict(data, base_dir=os.path.dirname(os.path.abspath(path)))
+
+
+def test_from_dict(repo_name, data):
+    """Makes the test block of one repository, {workflow, input}, or None."""
+    if data is None or data is False:
+        return None
+    if not isinstance(data, dict):
+        raise ConfigError("repo %s: test must be a JSON object" % repo_name)
+    block = {}
+    for key in ("workflow", "input"):
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError("repo %s: test needs a %s" % (repo_name, key))
+        block[key] = value.strip()
+    return block
 
 
 def land_from_dict(repo_name, data, default_branch):
