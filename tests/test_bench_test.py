@@ -136,6 +136,32 @@ class TestTheTestTool(LandingCase):
         self.assertEqual(self.dispatches(), [])
         self.assertEqual(self.scratch(), "")
 
+    def test_a_second_test_refuses_while_the_first_run_is_going(self):
+        head = self.make_test()
+        self.serve(head, "in_progress")
+        self.ok("test", branch="work", select="waymark.core-test")
+        pushed = self.scratch()
+        self.calls = []
+        answer = self.refused("test", branch="work", select="waymark.api-test")
+        self.assertEqual(answer["refused"], "test_running")
+        self.assertEqual(answer["run_id"], 31)
+        self.assertEqual(answer["run_url"], "https://github.com/o/r/actions/runs/31")
+        self.assertEqual(self.dispatches(), [])
+        self.assertEqual(self.scratch(), pushed)
+        self.run["status"], self.run["conclusion"] = "completed", "success"
+        self.ok("test", branch="work", select="waymark.api-test")
+        self.assertEqual(self.dispatches(),
+                         [{"ref": "bench-test/work", "inputs": {"only": "waymark.api-test"}}])
+
+    def test_a_going_run_whose_scratch_ref_is_gone_does_not_block(self):
+        head = self.make_test()
+        self.serve(head, "in_progress")
+        self.ok("test", branch="work", select="waymark.core-test")
+        util.git(["push", "origin", ":refs/heads/bench-test/work"], cwd=self.bench.bare_dir("demo"))
+        self.calls = []
+        self.ok("test", branch="work", select="waymark.api-test")
+        self.assertEqual(len(self.dispatches()), 1)
+
     def test_a_run_not_seen_at_dispatch_is_found_by_test_result(self):
         head = self.make_test()
         self.serve(head, "completed", "success")

@@ -2065,10 +2065,18 @@ def _dispatch_test(bench, repo, spec, client, args):
     branch = check_branch(_text(args, "branch", required=True))
     select = _text(args, "select", required=True)
     scratch = TEST_PREFIX + branch
-    before = {run["id"] for run in client.workflow_runs(spec["workflow"], scratch)}
+    runs = client.workflow_runs(spec["workflow"], scratch)
+    before = {run["id"] for run in runs}
+    running = [run for run in runs if run.get("state") != "completed"]
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
         head = head_of(worktree)
+        # a new push to the scratch ref would cancel the run still on it
+        if running and _scratch_exists(worktree, scratch):
+            raise Refusal("test_running", repo=repo.name, branch=branch,
+                          run_id=running[0]["id"], run_url=running[0].get("url"),
+                          reason="a test run of this branch is not done: "
+                                 "read it with test_result, then test again")
         # the scratch ref, never the pull request's branch
         git.run(["push", "--force", "origin", "HEAD:refs/heads/" + scratch],
                 cwd=worktree, timeout=600)
@@ -2141,6 +2149,13 @@ def _find_test_run(bench, repo, spec, client, args, deadline):
         if left <= 0:
             return None
         _sleep(min(TEST_POLL_SECONDS, left))
+
+
+def _scratch_exists(worktree, scratch):
+    """Gives whether the scratch ref is still on the remote."""
+    code, out, _ = git.run(["ls-remote", "origin", "refs/heads/" + scratch],
+                           cwd=worktree, check=False, timeout=120)
+    return code == 0 and bool(out.strip())
 
 
 def _utc_stamp(seconds):
@@ -2953,7 +2968,10 @@ TOOL_SPECS = [
             "workflow bench.json names with select as its input, and answers {run_id, run_url, "
             "conclusion: pending, head, dispatched_at}. When no run shows within about 15 s, "
             "run_id is null: give test_result the branch, head and dispatched_at instead. "
-            "Read the result with test_result. The refusals are no_test_workflow, git and forge."
+            "Read the result with test_result. While a run of the branch is not completed and "
+            "its scratch ref is still there, test refuses test_running with that run's run_id "
+            "and run_url and pushes nothing: read it with test_result, then test again. "
+            "The refusals are no_test_workflow, test_running, git and forge."
         ),
         "schema": {
             "type": "object",
