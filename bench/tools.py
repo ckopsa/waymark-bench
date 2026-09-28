@@ -1939,9 +1939,13 @@ def enroll(bench, args):
         land = config_module.land_from_dict(name, args.get("land"), default_branch)
     except config_module.ConfigError as exc:
         raise Refusal("input", field="land", reason=str(exc))
+    try:
+        test = config_module.test_from_dict(name, args.get("test"))
+    except config_module.ConfigError as exc:
+        raise Refusal("input", field="test", reason=str(exc))
     entry = config_module.RepoConfig(
         name=name, clone_url=clone_url, default_branch=default_branch,
-        deny=deny, land=land, source="file")
+        deny=deny, land=land, source="file", test=test)
     with bench.lock(name):
         cloned = not bench.bare_exists(name)
         try:
@@ -2630,6 +2634,11 @@ TOOL_SPECS = [
                 "land": {"type": "object",
                          "description": "The landing block, as bench.json spells it: target, "
                                         "rebase, stages, env and pull_request."},
+                "test": {"type": "object",
+                         "description": "The test block, as bench.json spells it: workflow, "
+                                        "the CI workflow the test tool dispatches, and input, "
+                                        "the name of its input that takes the selection. "
+                                        "Without it the test tool refuses no_test_workflow."},
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },

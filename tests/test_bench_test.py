@@ -52,6 +52,20 @@ class TestTheTestTool(LandingCase):
         path = self.prepared()
         return util.git(["rev-parse", "HEAD"], cwd=path).strip()
 
+    def make_enrolled(self, test={"workflow": "tests.yml", "input": "only"}):
+        """Makes a bench with no repositories and enrolls demo with this test block."""
+        data_dir = os.path.join(self.root, "data")
+        os.makedirs(data_dir, exist_ok=True)
+        self.bench = Bench(config_module.from_dict({"data_dir": data_dir, "repos": {}}))
+        return self.enroll(test)
+
+    def enroll(self, test):
+        args = {"clone_url": self.clone_url,
+                "land": {"stages": [], "pull_request": PULL_REQUEST}}
+        if test is not None:
+            args["test"] = test
+        return self.ok("enroll", **args)
+
     def serve(self, head, status, conclusion=None, jobs=()):
         """Answers run 31 of workflow tests on the scratch ref; it shows once dispatched."""
         run = {"id": 31, "run_number": 4, "status": status, "conclusion": conclusion,
@@ -115,3 +129,44 @@ class TestTheTestTool(LandingCase):
         answer = self.refused("test", branch="work", select="waymark.core-test")
         self.assertEqual(answer["refused"], "no_test_workflow")
         self.assertEqual(self.calls, [])
+
+    def test_an_enrolled_test_block_dispatches_its_workflow(self):
+        enrolled = self.make_enrolled()
+        self.assertEqual(enrolled["test"], {"workflow": "tests.yml", "input": "only"})
+        path = self.prepared()
+        head = util.git(["rev-parse", "HEAD"], cwd=path).strip()
+        self.serve(head, "completed", "success")
+        answer = self.ok("test", branch="work", select="waymark.core-test")
+        self.assertEqual(self.dispatches(),
+                         [{"ref": "bench-test/work", "inputs": {"only": "waymark.core-test"}}])
+        self.assertEqual(answer["conclusion"], "success")
+        with open(os.path.join(self.bench.config.data_dir, "repos.json"), encoding="utf-8") as handle:
+            entry = json.load(handle)["repos"]["demo"]
+        self.assertEqual(entry["test"], {"workflow": "tests.yml", "input": "only"})
+
+    def test_an_enroll_without_a_test_block_refuses_the_test_tool(self):
+        enrolled = self.make_enrolled(test=None)
+        self.assertIsNone(enrolled["test"])
+        self.prepared()
+        self.calls = []
+        answer = self.refused("test", branch="work", select="waymark.core-test")
+        self.assertEqual(answer["refused"], "no_test_workflow")
+        self.assertEqual(self.calls, [])
+
+    def test_a_re_enroll_without_a_test_block_clears_it(self):
+        self.make_enrolled()
+        again = self.enroll(None)
+        self.assertIsNone(again["test"])
+        self.assertIsNone(self.bench.config.repo("demo").test)
+        self.prepared()
+        answer = self.refused("test", branch="work", select="waymark.core-test")
+        self.assertEqual(answer["refused"], "no_test_workflow")
+
+    def test_an_enroll_with_a_bad_test_block_refuses_input(self):
+        data_dir = os.path.join(self.root, "data")
+        os.makedirs(data_dir, exist_ok=True)
+        self.bench = Bench(config_module.from_dict({"data_dir": data_dir, "repos": {}}))
+        answer = self.refused("enroll", clone_url=self.clone_url, test={"workflow": "tests.yml"})
+        self.assertEqual(answer["refused"], "input")
+        self.assertEqual(answer["field"], "test")
+        self.assertNotIn("demo", self.bench.config.repos)
