@@ -552,6 +552,46 @@ class TestPull(BenchCase):
         self.assertTrue(os.path.isfile(os.path.join(self.worktree(), "docs/head.txt")))
 
 
+class TestConflicts(BenchCase):
+
+    def state(self, path):
+        return (util.git(["rev-parse", "HEAD"], cwd=path),
+                util.git(["status", "--porcelain", "--untracked-files=all"], cwd=path))
+
+    def test_conflicts_answers_nothing_for_a_clean_merge(self):
+        path = self.prepared()
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/new.txt", "from the other person\n")
+        before = self.state(path)
+        answer = self.ok("conflicts", branch="work")
+        self.assertEqual(answer["paths"], [])
+        self.assertEqual(answer["base"], "main")
+        self.assertEqual(self.state(path), before)
+        self.assertFalse(os.path.exists(os.path.join(path, "docs/new.txt")))
+
+    def test_conflicts_answers_the_conflicted_file(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")
+        self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/a.txt", "alpha\ntheirs\ncharlie\n")
+        before = self.state(path)
+        answer = self.ok("conflicts", branch="work")
+        self.assertEqual(answer["paths"], ["docs/a.txt"])
+        self.assertEqual(self.state(path), before)
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "alpha\nours\ncharlie\n")
+
+    def test_conflicts_refuses_a_dirty_worktree(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nedited\ncharlie\n")
+        before = self.state(path)
+        answer = self.refused("conflicts", branch="work")
+        self.assertEqual(answer["refused"], "dirty")
+        self.assertEqual(answer["paths"], ["docs/a.txt"])
+        self.assertEqual(self.state(path), before)
+
+
 class TestSubmit(BenchCase):
 
     def test_submit_commits_with_trailers_and_pushes(self):

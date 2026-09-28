@@ -1,4 +1,4 @@
-"""The twenty tools of the bench.
+"""The twenty-one tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -409,6 +409,13 @@ def base_ref_of(bare, base):
     if git.ref_exists(base, cwd=bare):
         return base
     raise Refusal("no_base", base=base, reason="the base branch is not in the clone")
+
+
+def unmerged_paths(worktree):
+    """Gives the paths a merge left unmerged in the worktree."""
+    return [name for name in
+            git.out(["diff", "--name-only", "--diff-filter=U"], cwd=worktree).splitlines()
+            if name]
 
 
 # ------------------------------------------------------------------ tools
@@ -1215,9 +1222,7 @@ def pull(bench, args):
         code, text, err = git.run(["merge", "--no-edit", remote], cwd=worktree, check=False)
         conflicts = []
         if code != 0:
-            conflicts = [name for name in
-                         git.out(["diff", "--name-only", "--diff-filter=U"],
-                                 cwd=worktree).splitlines() if name]
+            conflicts = unmerged_paths(worktree)
             if not conflicts:
                 raise Refusal("merge_failed", branch=branch, base=base,
                               reason=(err or text).strip()[:400])
@@ -1230,6 +1235,37 @@ def pull(bench, args):
             "conflicts": conflicts,
             "note": "the markers stay in the files" if conflicts else "",
         }
+
+
+def conflicts(bench, args):
+    """Trial-merges the base into a worktree and gives the unmerged paths.
+
+    The merge is aborted before the answer, so the worktree is left as it
+    was. A dirty worktree is refused rather than merged over.
+    """
+    repo = bench.repo(args.get("repo"))
+    branch = check_branch(_text(args, "branch", required=True))
+    base = check_branch(_text(args, "base", default=repo.default_branch))
+    with bench.lock(repo.name):
+        worktree = bench.worktree(repo, branch)
+        bench.no_landing(repo, branch)
+        dirty = status_paths(worktree)
+        if dirty:
+            raise Refusal("dirty", branch=branch, paths=dirty[:50],
+                          remedy="submit or discard the edits, then ask again")
+        bare = bench.fetch(repo)
+        remote = base_ref_of(bare, base)
+        code, text, err = git.run(["merge", "--no-commit", "--no-ff", remote],
+                                  cwd=worktree, check=False)
+        try:
+            paths = unmerged_paths(worktree) if code != 0 else []
+            if code != 0 and not paths:
+                raise Refusal("merge_failed", branch=branch, base=base,
+                              reason=(err or text).strip()[:400])
+        finally:
+            # An up-to-date merge leaves no MERGE_HEAD, so the abort may fail.
+            git.run(["merge", "--abort"], cwd=worktree, check=False)
+        return {"repo": repo.name, "branch": branch, "base": base, "paths": paths}
 
 
 def submit(bench, args):
@@ -2306,6 +2342,29 @@ TOOL_SPECS = [
                 "sitting": _SITTING,
             },
             "required": ["repo", "branch", "from"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "conflicts",
+        "function": conflicts,
+        "description": (
+            "Fetches, trial-merges the base branch into the worktree, gives the unmerged "
+            "paths ([] when it merges clean), and aborts the merge: the worktree is left "
+            "as it was. A dirty worktree is refused (dirty). The engine calls this tool; "
+            "put it in no powers entry."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "branch": _BRANCH,
+                "base": {"type": "string",
+                         "description": "The branch to merge in. Default the repo's default branch."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "branch"],
             "additionalProperties": False,
         },
     },
