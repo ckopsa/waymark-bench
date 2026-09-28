@@ -336,7 +336,8 @@ class Bench:
             raise Refusal("denied", path=rel, allow=list(allow))
         if for_write and is_protected(rel) and not allow_protected:
             raise Refusal("protected", path=rel,
-                          reason="a write under .github/ or .claude/ needs the scope to name the path")
+                          reason="a write under .github/ or .claude/ needs this seat's scope to name "
+                                 "the path in its bench.edit filter")
         return full, rel
 
 
@@ -1815,7 +1816,15 @@ def rerun(bench, args):
                           reason="no finished run on the head has a cancelled, timed out or "
                                  "stopped-in-setup job")
         for run in stopped:
-            client.rerun_failed_jobs(run["id"])
+            try:
+                client.rerun_failed_jobs(run["id"])
+            except forge.ForgeError as exc:
+                if exc.status != 403:
+                    raise
+                raise Refusal("token_lacks_actions_write", repo=repo.name, branch=branch,
+                              head=head, run_id=run["id"],
+                              reason="GitHub refused the re-run: the rig's token needs "
+                                     "Actions: read and write (docs/credential.md)")
     except forge.ForgeError as exc:
         raise Refusal("forge", reason=git.scrub(str(exc)))
     with bench.lock(repo.name):

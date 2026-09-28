@@ -41,8 +41,9 @@ then:
   `workflow` gives Workflows;
 - a fine-grained token names nothing, so the rig reads the check runs and the
   commit statuses of the default branch. A refusal there is a missing
-  permission. What only a write could prove (Contents, Pull requests and
-  Workflows) is `unverified`, not missing.
+  permission. What only a write could prove (Contents, Pull requests,
+  Workflows, and the write half of Actions) is `unverified`, not missing.
+  When GitHub refuses `rerun`, it answers `token_lacks_actions_write`.
 
 `repos` and `enroll` answer each repository's check as `credential`:
 

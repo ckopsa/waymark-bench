@@ -973,6 +973,14 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual(answer["jobs"], ["unit"])
         self.assertEqual(self.reruns(), [])
 
+    def test_rerun_refused_by_github_names_the_missing_actions_write(self):
+        head = self.submitted()
+        self.one_run(head, self.DEAD_JOBS)
+        self.answers["/actions/runs/11/rerun-failed-jobs"] = ("POST", 403)
+        answer = self.refused("rerun", branch="work")
+        self.assertEqual(answer["refused"], "token_lacks_actions_write")
+        self.assertIn("Actions: read and write", answer["reason"])
+
     def test_rerun_refuses_a_head_that_is_not_pushed_or_not_interrupted(self):
         self.github()
         self.prepared()
@@ -1048,6 +1056,7 @@ class TestCredential(LandingCase):
         self.assertTrue(credential["ok"])
         self.assertEqual(credential["token"], "fine_grained")
         self.assertIn("workflows", credential["unverified"])
+        self.assertIn("actions", credential["unverified"])
         paths = [path for _, path, _ in self.calls]
         self.assertTrue(any("/check-runs" in path for path in paths), paths)
         self.assertTrue(any(path.startswith("/commits/main/status") for path in paths), paths)
