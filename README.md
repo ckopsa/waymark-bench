@@ -1,8 +1,8 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives sixteen
-tools: `prepare`, `status`, `find`, `read`, `edit`, `pull`, `submit`,
+for each repository and a git worktree for each branch. It gives seventeen
+tools: `prepare`, `status`, `find`, `read`, `check`, `edit`, `pull`, `submit`,
 `feedback`, `discard`, `merge`, `update_branch`, `rerun`, `test`, `enroll`, `repos` and `unenroll`. It
 needs Python
 3.11, git, and one library: pydantic-settings, for the settings.
@@ -53,6 +53,23 @@ use: `pull` from `head` moves the worktree to the remote branch, and
 
 `read` with a `ref` reads the ref as the last fetch left it. `prepare`
 and `pull` fetch.
+
+## Definitions by name
+
+| Tool | Input | Answer |
+| --- | --- | --- |
+| `find` mode `symbols` | `path` (a file or a directory), `pattern` (a regex over the names), `max_matches` | `symbols`: each `{name, kind, path, line, end_line}` |
+| `read` with `symbol` | `path`, `symbol` in place of `offset` and `limit` | `definitions`: each match with its range and its numbered `lines` |
+
+A Clojure, ClojureScript or edn definition is a top-level form whose
+head starts with `def`, with or without an alias: `defn-`, `defmethod`,
+`g/defguard`. Its `end_line` is the line where its parens balance; the
+reader skips strings, comments and character literals. A Python
+definition is a `def`, an `async def` or a `class` at column 0, and a
+method one level in, named `Class.method`. A `read` of several matches
+(the `defmethod`s of one multi) gives each, up to 20, under `max_bytes`.
+A name the file does not define is refused `not_found` with `close`,
+the names that look like it.
 
 ## The enrollment
 
@@ -275,7 +292,9 @@ The engine holds one `mcp_server` row with the name `bench`. The
 transport is stdio. The command is
 `python3 -m bench --stdio --config …`. The `auth_env` is
 `BENCH_GIT_TOKEN`. The powers entries of the row name `find`, `read`,
-`edit` and `pull`. The tools `prepare`, `status`, `submit`, `feedback`,
+`check`, `edit` and `pull`. `check` lints the files a change touched
+before submit: balanced forms for Clojure, with clj-kondo's errors when
+the rig has it, and a compile check for Python. It never writes. The tools `prepare`, `status`, `submit`, `feedback`,
 `discard`, `enroll`, `repos` and `unenroll` are the engine's own. The engine calls `prepare` before a
 sitting, so the model finds the worktree made.
 
