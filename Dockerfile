@@ -7,6 +7,15 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
+# clj-kondo lets check name the errors a balance walk misses.
+ARG CLJ_KONDO_VERSION=2025.01.16
+ARG TARGETARCH
+RUN arch=$([ "$TARGETARCH" = "arm64" ] && echo aarch64 || echo amd64) \
+ && python -c "import io, sys, urllib.request, zipfile; zipfile.ZipFile(io.BytesIO(urllib.request.urlopen(sys.argv[1]).read())).extract('clj-kondo', '/usr/local/bin')" \
+    "https://github.com/clj-kondo/clj-kondo/releases/download/v${CLJ_KONDO_VERSION}/clj-kondo-${CLJ_KONDO_VERSION}-linux-${arch}.zip" \
+ && chmod +x /usr/local/bin/clj-kondo \
+ && clj-kondo --version
+
 WORKDIR /app
 
 # Dependency layer: the project file and the lock first, so a

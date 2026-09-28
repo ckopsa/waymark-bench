@@ -22,8 +22,10 @@ from . import config as config_module, forge, git, landing as landing_module, sy
 DEFAULT_MAX_BYTES = 16384
 CEILING_MAX_BYTES = 65536
 DEFAULT_MAX_MATCHES = 200
-DEFAULT_LIMIT = 200
-CEILING_LIMIT = 2000
+# A read answers DEFAULT_LIMIT lines at most: a larger limit is cut to it, with READ_NOTE.
+DEFAULT_LIMIT = 120
+CEILING_LIMIT = 1000000
+READ_NOTE = "for a definition use bench__read_symbol; for more, page with offset"
 DEFAULT_DEPTH = 2
 CEILING_DEPTH = 12
 # submit starts the landing and answers at once unless it is asked to
@@ -823,7 +825,8 @@ def read(bench, args):
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     offset = _int(args, "offset", 1, 1, 1000000)
-    limit = _int(args, "limit", DEFAULT_LIMIT, 1, CEILING_LIMIT)
+    asked = _int(args, "limit", DEFAULT_LIMIT, 1, CEILING_LIMIT)
+    limit = min(asked, DEFAULT_LIMIT)
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
     if_hash = _text(args, "if_hash")
     allow = _globs(args, "allow")
@@ -839,7 +842,7 @@ def read(bench, args):
         items = [{"line": offset + index, "text": text} for index, text in enumerate(window)]
         kept, dropped = cap_items(items, max_bytes, lambda item: len(item["text"]) + 12)
         last = kept[-1]["line"] if kept else offset - 1
-        return {
+        answer = {
             "repo": repo.name,
             "branch": branch,
             "path": rel,
@@ -851,6 +854,9 @@ def read(bench, args):
             "eof": last >= total,
             "dropped": dropped,
         }
+        if asked > limit:
+            answer["note"] = READ_NOTE
+        return answer
 
 
 CLOJURE_SUFFIXES = (".clj", ".cljs", ".cljc", ".edn")
@@ -979,7 +985,7 @@ def check(bench, args):
         if clojure:
             program = shutil.which("clj-kondo")
             if not program:
-                unavailable.append("clj-kondo is not on the rig's PATH: the Clojure files had the "
+                unavailable.append("clj-kondo not installed on the rig: the Clojure files had the "
                                    "balance check only")
             else:
                 try:
@@ -1078,6 +1084,32 @@ class _Plan:
                 os.replace(step[1], step[2])
 
 
+def _nearest(content, old):
+    """Gives the line of the file nearest old, for a replace that found nothing.
+
+    The first line of old that is not in the file is the one sought: the
+    file's first line with the same words under other spaces, else the
+    line most like it by difflib. None when no line is near.
+    """
+    missing = next((line for line in old.split("\n") if line.strip() and line not in content), None)
+    if missing is None:
+        return None
+    lines = content.split("\n")
+    words = " ".join(missing.split())
+    for number, line in enumerate(lines, 1):
+        if words in " ".join(line.split()):
+            return {"line": number, "text": line, "old": missing}
+    matcher = difflib.SequenceMatcher(None, "", missing.strip(), autojunk=False)
+    best, score = None, 0.6
+    for number, line in enumerate(lines, 1):
+        matcher.set_seq1(line.strip())
+        if matcher.real_quick_ratio() > score and matcher.quick_ratio() > score:
+            ratio = matcher.ratio()
+            if ratio > score:
+                best, score = {"line": number, "text": line, "old": missing}, ratio
+    return best
+
+
 def _plan_edit(bench, repo, worktree, plan, item, allow_protected, allow):
     """Judges one edit against the plan and adds its steps. Gives its answer."""
     operation, old, new = _operation_of(item)
@@ -1090,9 +1122,16 @@ def _plan_edit(bench, repo, worktree, plan, item, allow_protected, allow):
             raise Refusal("not_found", path=rel)
         content = plan.text(full)
         found = content.count(old)
-        if found != 1:
+        if found > 1:
             raise Refusal("found", path=rel, found=found,
                           remedy="give more of the file in old, so it is unique")
+        if not found:
+            nearest = _nearest(content, old)
+            if nearest is None:
+                raise Refusal("found", path=rel, found=0, remedy="old is not in the file: copy it from a read")
+            raise Refusal("found", path=rel, found=0, nearest=nearest,
+                          remedy="old is not in the file: nearest is the file's line near its line "
+                                 "nearest.old, so copy nearest.text into old")
         content = content.replace(old, new, 1)
         plan.state[full] = content
         plan.steps.append(("write", full, content))
@@ -1147,43 +1186,66 @@ def edit_many(bench, args):
     if len(edits) > MAX_EDITS:
         raise Refusal("input", field="edits", count=len(edits),
                       reason="at most %d edits in one call" % MAX_EDITS)
+    problems = []
     for index, item in enumerate(edits, 1):
         if not isinstance(item, dict):
-            raise Refusal("input", field="edits", item=index, reason="each edit is an object")
-        extra = sorted(set(item) - set(EDIT_FIELDS))
-        if extra:
-            raise Refusal("input", field="edits", item=index, fields=extra,
-                          reason="an edit takes only: " + ", ".join(EDIT_FIELDS))
-    return _edit(bench, args, edits)
+            problems.append({"refused": "input", "item": index, "field": "edits",
+                             "reason": "each edit is an object"})
+            continue
+        for key in sorted(set(item) - set(EDIT_FIELDS)):
+            problems.append({"refused": "input", "item": index, "field": key,
+                             "reason": "an edit takes only: " + ", ".join(EDIT_FIELDS)})
+    return _edit(bench, args, edits, problems)
 
 
-def _edit(bench, args, edits):
-    """Plans the edits and writes them together. edits None is the one edit in args."""
+def _refused_items(problems):
+    """One refusal for a list's bad edits: the first at the top, each in items."""
+    problems = sorted(problems, key=lambda problem: problem["item"])
+    first = dict(problems[0])
+    refusal = Refusal(first.pop("refused"), **first)
+    refusal.data["items"] = problems
+    return refusal
+
+
+def _edit(bench, args, edits, problems=None):
+    """Plans the edits and writes them together. edits None is the one edit in args.
+
+    Every edit of a list is judged before a refusal, and the refusal names
+    each bad one in items: problems holds those edit_many found already.
+    """
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     allow_protected = bool(args.get("allow_protected"))
     allow = _globs(args, "allow")
     items = [args] if edits is None else edits
+    problems = list(problems or [])
     # The fields of each edit are judged before the lock, as one edit's were.
     for index, item in enumerate(items, 1):
+        if any(problem["item"] == index for problem in problems):
+            continue
         try:
             _operation_of(item)
         except Refusal as exc:
-            if edits is not None:
-                exc.data["item"] = index
-            raise
+            if edits is None:
+                raise
+            problems.append(dict(exc.data, item=index))
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
         bench.no_landing(repo, branch)
         plan = _Plan()
         results = []
+        bad = set(problem["item"] for problem in problems)
         for index, item in enumerate(items, 1):
+            if index in bad:
+                continue
             try:
                 results.append(_plan_edit(bench, repo, worktree, plan, item, allow_protected, allow))
             except Refusal as exc:
-                if edits is not None:
-                    exc.data["item"] = index
-                raise
+                if edits is None:
+                    raise
+                problems.append(dict(exc.data, item=index))
+        if problems:
+            raise _refused_items(problems)
         plan.write()
         answers = []
         for result, full in results:
@@ -1590,7 +1652,7 @@ def feedback(bench, args):
 # and the like name the failure, the two values and the count.
 LOG_MARKERS = re.compile(
     r"FAIL in|ERROR in|expected:|actual:|Ran \d+ tests|\d+ failures?, \d+ errors?"
-    r"|\d+ tests?, \d+ assertions?, \d+ errors?, \d+ failures?|Uncaught exception|Exception: ")
+    r"|\d+ tests?, \d+ assertions?, \d+ errors?, \d+ failures?|Uncaught exception|Exception: |ExceptionInfo")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 LOG_AFTER_MARK = 8
 # GitHub starts each line of a job log with the time it was written.
@@ -2276,7 +2338,7 @@ TOOL_SPECS = [
                 "offset": {"type": "integer",
                            "description": "The first line. The lines start at 1."},
                 "limit": {"type": "integer",
-                          "description": "The count of lines. The default is 200. The ceiling is 2000."},
+                          "description": "The count of lines. The default is 120, and a read gives 120 at most."},
                 "ref": {"type": "string",
                         "description": "A git ref to read instead of the worktree. Use base for the base branch."},
                 "if_hash": {"type": "string",
@@ -2457,7 +2519,6 @@ TOOL_SPECS = [
                             "move_to": {"type": "string"},
                         },
                         "required": ["path"],
-                        "additionalProperties": False,
                     },
                 },
                 "allow_protected": {"type": "boolean",
