@@ -167,7 +167,8 @@ class TestTheTestTool(LandingCase):
         answer = self.ok("test", branch="work", select="waymark.core-test")
         self.assertEqual(self.dispatches(),
                          [{"ref": "bench-test/work", "inputs": {"only": "waymark.core-test"}}])
-        self.assertEqual(answer["conclusion"], "success")
+        self.assertEqual(answer["conclusion"], "pending")
+        self.assertEqual(answer["run_id"], 31)
         with open(os.path.join(self.bench.config.data_dir, "repos.json"), encoding="utf-8") as handle:
             entry = json.load(handle)["repos"]["demo"]
         self.assertEqual(entry["test"], {"workflow": "tests.yml", "input": "only"})

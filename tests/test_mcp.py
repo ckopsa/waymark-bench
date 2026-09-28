@@ -57,16 +57,16 @@ class TestHttp(TransportCase):
         self.assertEqual(status, 202)
         self.assertIsNone(body)
 
-    def test_tools_list_gives_the_twenty_two_tools_with_schemas(self):
+    def test_tools_list_gives_the_twenty_three_tools_with_schemas(self):
         status, answer = self.post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual(status, 200)
         tools = answer["result"]["tools"]
-        self.assertEqual(len(tools), 22)
+        self.assertEqual(len(tools), 23)
         names = [tool["name"] for tool in tools]
         self.assertEqual(sorted(names), sorted([
             "prepare", "status", "find", "read", "symbols", "read_symbol", "check", "edit",
             "edit_many", "pull", "conflicts", "submit", "feedback", "log", "discard", "merge", "update_branch", "rerun",
-            "test", "enroll", "repos", "unenroll"]))
+            "test", "test_result", "enroll", "repos", "unenroll"]))
         for tool in tools:
             self.assertTrue(tool["description"])
             schema = tool["inputSchema"]
@@ -141,7 +141,7 @@ class TestStdio(unittest.TestCase):
         mcp.serve_stdio(self.bench, io.StringIO("\n".join(lines) + "\n"), output)
         answers = [json.loads(row) for row in output.getvalue().splitlines()]
         self.assertEqual([answer["id"] for answer in answers], [1, 2, 3])
-        self.assertEqual(len(answers[1]["result"]["tools"]), 22)
+        self.assertEqual(len(answers[1]["result"]["tools"]), 23)
         self.assertTrue(answers[2]["result"]["structuredContent"]["result"]["created"])
 
 
