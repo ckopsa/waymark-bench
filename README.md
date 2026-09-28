@@ -296,6 +296,16 @@ no glob matches is not in the answer, and it is not in `dropped`.
 The rig holds no seat and no rule between the calls. The engine judges
 the grant, and the rig obeys the arguments of the call.
 
+## Many edits in one call
+
+`edit` takes `edits`: a list of up to 50 edits, each shaped as one edit
+(`path` with `old` and `new`, `new` with `create: true`, `delete: true`,
+or `move_to`). The paths may differ. The rig judges every edit in order
+before it writes a byte: one refused edit writes none of them, and the
+refusal names it in `item`, counting from 1. The answer gives each
+edit's path and hash, never the content. `edits` beside `path` or the
+other fields of one edit is refused. The one-edit form is unchanged.
+
 ## The tests
 
 `python -m unittest -v`. The tests use a git origin on the disk.
