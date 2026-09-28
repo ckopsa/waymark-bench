@@ -1042,6 +1042,104 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual(tools.log_tail("\x1b[31mshort\x1b[m\n", 1024), "short\n")
 
 
+class TestLog(LandingCase):
+    """The log tool reads one job's log a small answer at a time."""
+
+    JOB = "test10 (shard 8)"
+
+    def setUp(self):
+        super().setUp()
+        self.make({"stages": [], "pull_request": {"provider": "github", "owner": "o", "repo": "r"}})
+        self.prepared()
+        stamp = "2026-09-28T10:00:00.1234567Z "
+        rows = (["setup",
+                 "\x1b[31mERROR\x1b[m in waymark10.law-scenarios-test/the-tier-is-declared-never-sniffed (types.clj:13)",
+                 "Uncaught exception, not in assertion.",
+                 "clojure.lang.ExceptionInfo: the tier was sniffed {:tier :gold}",
+                 " at waymark10.types$tier.invokeStatic (types.clj:13)"]
+                + ["\x1b[32m.\x1b[m waymark10.shard-test/case-%d passed" % i for i in range(300)]
+                + ["\x1b[31m171 tests, 983 assertions, 1 errors, 0 failures.\x1b[m", "x" * 1000]
+                + ["Stop and remove container: postgres-%04d service cleanup" % i for i in range(120)])
+        self.answers = {
+            "/pulls?": ("GET", [GITHUB_PR]),
+            "/actions/runs?": {"workflow_runs": [
+                {"id": 11, "run_number": 3, "status": "completed", "conclusion": "failure",
+                 "head_sha": "abc123", "html_url": "https://github.com/o/r/actions/runs/11",
+                 "name": "tests"}]},
+            "/actions/runs/11/jobs": {"jobs": [
+                {"id": 21, "name": self.JOB, "status": "completed", "conclusion": "failure",
+                 "steps": [{"name": "kaocha", "conclusion": "failure"}]},
+                {"id": 22, "name": "lint", "status": "completed", "conclusion": "success",
+                 "steps": [{"name": "lint", "conclusion": "success"}]}]},
+            "/actions/jobs/21/logs": "".join(stamp + row + "\n" for row in rows),
+        }
+
+    def fetches(self):
+        return len([path for method, path, body in self.calls if path.startswith("/actions/jobs/21/logs")])
+
+    def texts(self, answer, key):
+        return [item["text"] for item in answer[key]]
+
+    def test_without_a_job_the_log_lists_the_jobs(self):
+        answer = self.ok("log", branch="work")
+        jobs = {job["job"]: job for job in answer["jobs"]}
+        self.assertEqual(jobs[self.JOB]["result"], "failure")
+        self.assertEqual(jobs[self.JOB]["lines"], 427)
+        self.assertIsNone(jobs["lint"]["lines"])
+
+    def test_markers_find_the_failure_without_colors_or_timestamps(self):
+        answer = self.ok("log", branch="work", job=self.JOB, mode="markers")
+        texts = self.texts(answer, "matches")
+        text = "\n".join(texts)
+        for marker in ("ERROR in waymark10.law-scenarios-test/the-tier-is-declared-never-sniffed",
+                       "Uncaught exception", "ExceptionInfo: the tier was sniffed",
+                       "171 tests, 983 assertions, 1 errors, 0 failures."):
+            self.assertIn(marker, text)
+        self.assertNotIn("\x1b", text)
+        self.assertNotIn("2026-09-28T", text)
+        self.assertEqual(answer["total"], 427)
+        self.assertTrue(all(len(line) <= 200 + 12 for line in texts))
+
+    def test_every_line_is_cut_at_the_width(self):
+        answer = self.ok("log", branch="work", job=self.JOB, mode="range", offset=300, limit=20, width=80)
+        texts = self.texts(answer, "lines")
+        self.assertTrue(all(len(line) <= 80 + 12 for line in texts))
+        self.assertIn("x" * 80 + "… (+920)", texts)
+
+    def test_grep_names_the_lines_that_range_then_reads(self):
+        answer = self.ok("log", branch="work", job=self.JOB, mode="grep", pattern="ERROR in", context=0)
+        self.assertEqual(answer["count"], 1)
+        self.assertFalse(answer["truncated"])
+        hits = [item["line"] for item in answer["matches"] if item.get("hit")]
+        self.assertEqual(hits, [2])
+        page = self.ok("log", branch="work", job=self.JOB, mode="range", offset=hits[0], limit=3)
+        self.assertEqual([item["line"] for item in page["lines"]], [2, 3, 4])
+        self.assertTrue(page["lines"][0]["text"].startswith("ERROR in waymark10"))
+        self.refused("log", branch="work", job="nope", mode="range")
+        self.refused("log", branch="work", job=self.JOB, mode="grep", pattern="(")
+
+    def test_the_log_is_fetched_once_an_hour(self):
+        now = [0.0]
+        self.addCleanup(setattr, tools, "_clock", tools._clock)
+        tools._clock = lambda: now[0]
+        self.ok("log", branch="work", job=self.JOB, mode="markers")
+        self.ok("log", branch="work", job=self.JOB, mode="range")
+        self.assertEqual(self.fetches(), 1)
+        now[0] += 3601
+        self.ok("log", branch="work", job=self.JOB, mode="range")
+        self.assertEqual(self.fetches(), 2)
+
+    def test_feedback_names_the_job_its_marked_lines_and_the_log_tool(self):
+        feedback = self.ok("feedback", branch="work")
+        pipeline = [f for f in feedback["findings"] if f["source"] == "pipeline"][0]
+        self.assertEqual(pipeline["job"], self.JOB)
+        self.assertEqual(pipeline["lines"][:2], [2, 3])
+        self.assertIn(306, pipeline["lines"])
+        self.assertTrue(pipeline["message"].endswith('read more with bench__log {job: "test10 (shard 8)"}'))
+        self.ok("log", branch="work", job=self.JOB, mode="markers")
+        self.assertEqual(self.fetches(), 1)
+
+
 class TestCredential(LandingCase):
     """The rig checks its GitHub token against what it does with GitHub."""
 
