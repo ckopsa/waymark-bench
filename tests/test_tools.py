@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from bench import config as config_module, tools
 from bench.tools import Bench
@@ -363,6 +364,15 @@ class TestRead(BenchCase):
         answer = self.refused("read", branch="work", path="no/such.txt")
         self.assertEqual(answer["refused"], "not_found")
 
+    def test_a_long_read_gives_120_lines_and_a_note(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/long.txt"), "".join("line %d\n" % i for i in range(1, 301)))
+        answer = self.ok("read", branch="work", path="docs/long.txt", limit=300)
+        self.assertEqual([item["line"] for item in answer["lines"]], list(range(1, 121)))
+        self.assertFalse(answer["eof"])
+        self.assertEqual(answer["note"], "for a definition use bench__read_symbol; for more, page with offset")
+        self.assertNotIn("note", self.ok("read", branch="work", path="docs/long.txt", limit=10))
+
 
 class TestEdit(BenchCase):
 
@@ -514,6 +524,30 @@ class TestEdit(BenchCase):
         path = self.prepared()
         self.ok("edit", branch="work", path="docs/g.txt", new="golf\n", create=True)
         self.assertTrue(os.path.isfile(os.path.join(path, "docs/g.txt")))
+
+    def test_a_missed_old_names_the_nearest_line(self):
+        self.prepared()
+        answer = self.refused("edit", branch="work", path="docs/a.txt",
+                              old="alpha\n  bravo", new="ALPHA\nBRAVO")
+        self.assertEqual(answer["found"], 0)
+        self.assertEqual(answer["nearest"], {"line": 2, "text": "bravo", "old": "  bravo"})
+        answer = self.refused("edit", branch="work", path="docs/a.txt", old="charlee", new="C")
+        self.assertEqual(answer["nearest"]["line"], 3)
+
+    def test_edit_list_names_every_bad_item(self):
+        path = self.prepared()
+        answer = self.refused("edit_many", branch="work", edits=[
+            {"path": "docs/a.txt", "old": "alpha", "new": "ALPHA"},
+            {"path": "docs/a.txt", "old": "zulu", "new": "ZULU"},
+            {"path": "docs/a.txt", "delete": True, "move_to": "docs/z.txt"},
+            {"path": "docs/a.txt", "old": "bravo", "new": "BRAVO", "why": "a reason"},
+        ])
+        self.assertEqual((answer["refused"], answer["item"]), ("found", 2))
+        self.assertEqual([(item["item"], item["refused"]) for item in answer["items"]],
+                         [(2, "found"), (3, "operation"), (4, "input")])
+        self.assertEqual(answer["items"][2]["field"], "why")
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "alpha\nbravo\ncharlie\n")
 
     def test_edit_schema_types_create_and_delete_as_booleans(self):
         properties = tools.TOOLS["edit"]["schema"]["properties"]
@@ -972,6 +1006,32 @@ class TestCheck(BenchCase):
         answer = self.ok("check", branch="work", paths=["README.md"])
         self.assertTrue(answer["ok"])
         self.assertEqual(answer["skipped"], ["README.md"])
+
+    ODD_LET = "(ns demo.core)\n\n(defn f []\n  (let [x] x))\n"
+
+    def test_check_says_when_clj_kondo_is_not_installed(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "src/core.clj"), self.ODD_LET)
+        with mock.patch.object(tools.shutil, "which", return_value=None):
+            answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"])
+        self.assertIn("clj-kondo not installed", answer["unavailable"][0])
+
+    @unittest.skipUnless(shutil.which("clj-kondo"), "clj-kondo is not on PATH")
+    def test_clj_kondo_names_an_unbalanced_let_binding(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "src/core.clj"), self.ODD_LET)
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        self.assertTrue([f for f in answer["findings"]
+                         if f["path"] == "src/core.clj" and f["message"].startswith("clj-kondo")])
+
+
+class TestLogMarkers(unittest.TestCase):
+
+    def test_a_kaocha_exception_info_line_is_marked(self):
+        self.assertTrue(tools.LOG_MARKERS.search("ExceptionInfo: the tier was sniffed {:tier :gold}"))
+        self.assertFalse(tools.LOG_MARKERS.search("waymark10.shard-test/case-1 passed"))
 
 
 if __name__ == "__main__":
