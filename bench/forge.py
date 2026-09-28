@@ -247,6 +247,15 @@ class Bitbucket(Client):
     def rerun_failed_jobs(self, run_id):
         raise ForgeError("the rig re-runs a pipeline only on github")
 
+    def dispatch_workflow(self, workflow, ref, inputs):
+        raise ForgeError("the rig dispatches a test workflow only on github")
+
+    def workflow_runs(self, workflow, branch, limit=10):
+        raise ForgeError("the rig dispatches a test workflow only on github")
+
+    def pipeline(self, run_id):
+        raise ForgeError("the rig dispatches a test workflow only on github")
+
     def _pr(self, data):
         approvals = [p.get("user", {}).get("display_name") for p in data.get("participants") or []
                      if p.get("approved")]
@@ -504,17 +513,33 @@ class GitHub(Client):
 
     def pipelines(self, branch, limit=10):
         data = self.request("GET", self.url("/actions/runs", branch=branch, per_page=limit))
-        found = []
-        for item in data.get("workflow_runs") or []:
-            found.append({
-                "id": item.get("id"), "number": item.get("run_number"),
-                "state": (item.get("status") or "").lower(),
-                "result": (item.get("conclusion") or "").lower(),
-                "created": item.get("created_at"), "completed": item.get("updated_at"),
-                "commit": item.get("head_sha"), "url": item.get("html_url"),
-                "kind": item.get("name"),
-            })
-        return found
+        return [self._run(item) for item in data.get("workflow_runs") or []]
+
+    def _run(self, item):
+        return {
+            "id": item.get("id"), "number": item.get("run_number"),
+            "state": (item.get("status") or "").lower(),
+            "result": (item.get("conclusion") or "").lower(),
+            "created": item.get("created_at"), "completed": item.get("updated_at"),
+            "commit": item.get("head_sha"), "url": item.get("html_url"),
+            "kind": item.get("name"), "branch": item.get("head_branch"),
+        }
+
+    def pipeline(self, run_id):
+        """Gives one workflow run, shaped as pipelines gives it."""
+        return self._run(self.request("GET", self.url("/actions/runs/%s" % run_id)))
+
+    def workflow_runs(self, workflow, branch, limit=10):
+        """Gives the dispatched runs of one workflow on one branch, newest first."""
+        data = self.request("GET", self.url("/actions/workflows/%s/runs" % workflow, branch=branch,
+                                            event="workflow_dispatch", per_page=limit))
+        return [self._run(item) for item in data.get("workflow_runs") or []]
+
+    def dispatch_workflow(self, workflow, ref, inputs):
+        """Starts one workflow on ref with these inputs. GitHub answers no run id."""
+        self.request("POST", self.url("/actions/workflows/%s/dispatches" % workflow),
+                     {"ref": ref, "inputs": inputs})
+        return True
 
     def steps(self, pipeline_id):
         data = self.request("GET", self.url("/actions/runs/%s/jobs" % pipeline_id, per_page=50))

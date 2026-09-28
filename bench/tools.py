@@ -1,4 +1,4 @@
-"""The fifteen tools of the bench.
+"""The sixteen tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -12,6 +12,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 
 from . import config as config_module, forge, git, landing as landing_module
 
@@ -30,6 +31,17 @@ CEILING_DEPTH = 12
 # rig. The way to follow a landing is status or feedback.
 DEFAULT_WAIT = 0
 CEILING_WAIT = 3600
+# test waits for its run the same bounded way: a short default the engine
+# stands, up to fifteen minutes for a caller that can hold the line; past
+# the wait it answers running, and test {run_id} asks again.
+DEFAULT_TEST_WAIT = 15
+CEILING_TEST_WAIT = 900
+TEST_POLL_SECONDS = 20
+TEST_FIND_TRIES = 5
+TEST_FIND_SECONDS = 2
+TEST_PREFIX = "bench-test/"
+_sleep = time.sleep
+_clock = time.monotonic
 PROTECTED_PREFIXES = (".github/", ".claude/")
 BRANCH_CHARS = re.compile(r"^[A-Za-z0-9._/-]+$")
 # A repository name is the key in bench.json. The engine names a
@@ -1515,6 +1527,101 @@ def rerun(bench, args):
             "run_id": stopped[0]["id"], "runs": stopped}
 
 
+def test(bench, args):
+    """Runs one test selection of a branch on the repository's own CI and answers the result."""
+    repo = bench.repo(args.get("repo"))
+    spec = repo.test
+    if not spec:
+        raise Refusal("no_test_workflow", repo=repo.name,
+                      reason="bench.json gives this repository no test block {workflow, input}")
+    wait = _int(args, "wait", DEFAULT_TEST_WAIT, 0, CEILING_TEST_WAIT)
+    log_bytes = _int(args, "log_bytes", 4096, 256, 32768)
+    try:
+        client = forge.client(repo)
+        if args.get("run_id") is not None:
+            run_id = _int(args, "run_id", 0, 1, 2 ** 63)
+        else:
+            run_id = _dispatch_test(bench, repo, spec, client, args)
+        run = _wait_for_run(client, run_id, wait)
+        answer = {"repo": repo.name, "run_id": run["id"], "url": run.get("url"),
+                  "branch": run.get("branch"), "head": run.get("commit")}
+        if run.get("state") != "completed":
+            answer["conclusion"] = "running"
+            return answer
+        answer["conclusion"] = run.get("result") or "unknown"
+        answer["failed"] = _failed_jobs(client, run["id"], log_bytes)
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=git.scrub(str(exc)))
+    answer["scratch_deleted"] = _drop_scratch(bench, repo, run.get("branch"), run.get("commit"))
+    return answer
+
+
+def _dispatch_test(bench, repo, spec, client, args):
+    """Pushes the worktree head to the scratch ref and dispatches the test
+    workflow on it. Gives the id of the run that dispatch started."""
+    branch = check_branch(_text(args, "branch", required=True))
+    select = _text(args, "select", required=True)
+    scratch = TEST_PREFIX + branch
+    before = {run["id"] for run in client.workflow_runs(spec["workflow"], scratch)}
+    with bench.lock(repo.name):
+        worktree = bench.worktree(repo, branch)
+        head = head_of(worktree)
+        # the scratch ref, never the pull request's branch
+        git.run(["push", "--force", "origin", "HEAD:refs/heads/" + scratch],
+                cwd=worktree, timeout=600)
+    client.dispatch_workflow(spec["workflow"], scratch, {spec["input"]: select})
+    for attempt in range(TEST_FIND_TRIES):
+        runs = [run for run in client.workflow_runs(spec["workflow"], scratch)
+                if run["id"] not in before and run.get("commit") == head]
+        if runs:
+            return runs[0]["id"]
+        if attempt + 1 < TEST_FIND_TRIES:
+            _sleep(TEST_FIND_SECONDS)
+    _drop_scratch(bench, repo, scratch, head)
+    raise Refusal("run_not_found", repo=repo.name, branch=branch, head=head,
+                  reason="the workflow was dispatched but no run of it showed on the scratch ref")
+
+
+def _wait_for_run(client, run_id, wait):
+    """Reads the run until it completes or the wait runs out; gives the last read."""
+    deadline = _clock() + wait
+    while True:
+        run = client.pipeline(run_id)
+        left = deadline - _clock()
+        if run.get("state") == "completed" or left <= 0:
+            return run
+        _sleep(min(TEST_POLL_SECONDS, left))
+
+
+def _failed_jobs(client, run_id, log_bytes):
+    """Gives each failed job of a run with its failed step and its log tail."""
+    failed = []
+    for job in client.steps(run_id):
+        if job.get("result") not in ("failed", "error", "failure"):
+            continue
+        names = job.get("failed_steps") or []
+        log = client.step_log(run_id, job["id"]) or ""
+        failed.append({"job": job.get("name"), "step": names[0] if names else None,
+                       "log_tail": log_tail(log, log_bytes)})
+    return failed
+
+
+def _drop_scratch(bench, repo, scratch, commit):
+    """Deletes a scratch ref while it still points at commit. Gives whether it did."""
+    if not scratch or not scratch.startswith(TEST_PREFIX) or not commit:
+        return False
+    try:
+        branch = check_branch(scratch[len(TEST_PREFIX):])
+        with bench.lock(repo.name):
+            worktree = bench.worktree(repo, branch)
+            code, _, _ = git.run(["push", "--force-with-lease=refs/heads/%s:%s" % (scratch, commit),
+                                  "origin", ":refs/heads/" + scratch],
+                                 cwd=worktree, check=False, timeout=120)
+    except Refusal:
+        return False
+    return code == 0
+
+
 def _repo_name(args):
     """Gives the repository name of an enrollment call, or refuses."""
     name = _text(args, "repo", required=True)
@@ -2031,6 +2138,36 @@ TOOL_SPECS = [
             "type": "object",
             "properties": {"repo": _REPO, "branch": _BRANCH, "seat": _SEAT, "sitting": _SITTING},
             "required": ["repo", "branch"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "test",
+        "function": test,
+        "description": (
+            "Runs one test selection of the branch on the repository's own CI. The rig pushes "
+            "the worktree's head to the scratch ref bench-test/<branch> (never the pull "
+            "request's branch), dispatches the test workflow bench.json names with select as "
+            "its input, waits up to wait seconds, and answers {run_id, url, conclusion, "
+            "failed: [{job, step, log_tail}]}. It deletes the scratch ref when the run is "
+            "done. Past the wait it answers conclusion running: ask again with {run_id}. "
+            "The refusals are no_test_workflow, run_not_found, git and forge."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "branch": _BRANCH,
+                "select": {"type": "string",
+                           "description": "The test selection: a namespace or a test id."},
+                "run_id": {"type": "integer",
+                           "description": "A run an earlier test answered running: read it again."},
+                "wait": {"type": "integer", "minimum": 0, "maximum": CEILING_TEST_WAIT,
+                         "description": "Seconds to wait for the run. Default 15."},
+                "log_bytes": {"type": "integer", "minimum": 256, "maximum": 32768},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
+            "required": ["repo"],
             "additionalProperties": False,
         },
     },

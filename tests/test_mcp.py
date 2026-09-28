@@ -57,15 +57,15 @@ class TestHttp(TransportCase):
         self.assertEqual(status, 202)
         self.assertIsNone(body)
 
-    def test_tools_list_gives_the_fifteen_tools_with_schemas(self):
+    def test_tools_list_gives_the_sixteen_tools_with_schemas(self):
         status, answer = self.post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual(status, 200)
         tools = answer["result"]["tools"]
-        self.assertEqual(len(tools), 15)
+        self.assertEqual(len(tools), 16)
         names = [tool["name"] for tool in tools]
         self.assertEqual(sorted(names), sorted([
             "prepare", "status", "find", "read", "edit", "pull", "submit", "feedback", "discard",
-            "merge", "update_branch", "rerun", "enroll", "repos", "unenroll"]))
+            "merge", "update_branch", "rerun", "test", "enroll", "repos", "unenroll"]))
         for tool in tools:
             self.assertTrue(tool["description"])
             schema = tool["inputSchema"]
