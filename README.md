@@ -1,9 +1,9 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives twenty
+for each repository and a git worktree for each branch. It gives twenty-one
 tools: `prepare`, `status`, `find`, `read`, `symbols`, `read_symbol`, `check`, `edit`,
-`edit_many`, `pull`, `submit`, `feedback`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
+`edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
 `enroll`, `repos` and `unenroll`. It
 needs Python
 3.11, git, and one library: pydantic-settings, for the settings.
@@ -51,6 +51,11 @@ worktree does not have. It is `null` when the branch is not on the
 remote. When one of the two is more than zero, `note` names the pull to
 use: `pull` from `head` moves the worktree to the remote branch, and
 `pull` from `base` merges the base in.
+
+`conflicts` trial-merges the base (`base`, default the repo's default
+branch) into a clean worktree, gives the unmerged `paths`, and aborts
+the merge, so the worktree is left as it was. A dirty worktree is
+refused (`dirty`). The engine calls it; it is in no powers entry.
 
 `read` with a `ref` reads the ref as the last fetch left it. `prepare`
 and `pull` fetch.

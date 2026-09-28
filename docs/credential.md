@@ -9,7 +9,7 @@ needs, so the token can be made whole, and no larger.
 
 | Tool | What it does on GitHub | Fine-grained permission | Classic scope |
 |---|---|---|---|
-| `prepare`, `pull` | fetch the repository | Contents: read, Metadata: read | `repo` |
+| `prepare`, `pull`, `conflicts` | fetch the repository | Contents: read, Metadata: read | `repo` |
 | `enroll` | clone the repository | Contents: read, Metadata: read | `repo` |
 | `edit`, `edit_many` | nothing: it writes the worktree on the disk | none | none |
 | `check` | nothing: it reads the worktree on the disk | none | none |
