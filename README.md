@@ -1,9 +1,9 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives twenty-one
+for each repository and a git worktree for each branch. It gives twenty-two
 tools: `prepare`, `status`, `find`, `read`, `symbols`, `read_symbol`, `check`, `edit`,
-`edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
+`edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
 `enroll`, `repos` and `unenroll`. It
 needs Python
 3.11, git, and one library: pydantic-settings, for the settings.
@@ -334,6 +334,19 @@ refusal names it in `item`, counting from 1. The answer gives each
 edit's path and hash, never the content. `edits` beside `path` or the
 other fields of one edit is refused. `edit` takes exactly one edit, and
 refuses `edits` with the name of `edit_many`.
+
+## A job's log
+
+`feedback` gives about 4 KB of each failed job's log, with the job's name,
+the numbers of its marked lines and a hint. `log {repo, branch, job?, mode}`
+reads the rest, a small answer at a time, from the newest run on the
+branch's head. Without `job` it lists the jobs with their result and line
+count. `mode: "markers"` (the default) gives the test report's lines with
+`context` lines around them; `mode: "grep"` gives what a regex `pattern`
+finds; `mode: "range"` gives `limit` lines from `offset`, counting from 1.
+Each line comes without colors and without GitHub's timestamp, cut at
+`width` characters (200 by default) and ending in `… (+N)` when cut. The rig
+keeps a log an hour, so paging fetches it once.
 
 ## The tests
 

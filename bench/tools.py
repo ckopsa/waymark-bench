@@ -1,4 +1,4 @@
-"""The twenty-one tools of the bench.
+"""The twenty-two tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -224,6 +224,9 @@ class Bench:
         self.landings = landing_module.Landings(self)
         # The last credential check of each repository, by name.
         self.credentials = {}
+        # The cleaned lines of the job logs read in the last hour, by
+        # (repository, run, job): (the time they came, the lines).
+        self.logs = {}
 
     def check_credentials(self):
         """Checks the forge credential of every repository. The rig runs it
@@ -1525,13 +1528,17 @@ def feedback(bench, args):
                     answer["unavailable"].append("log: %s %s: %s" % (
                         pipeline.get("kind") or "pipeline", step.get("name"), reason))
                     read.append((pipeline, step, None))
+                    marked = []
                 else:
                     read.append((pipeline, step, log))
+                    cleaned = remember_log(bench, repo, pipeline["id"], step["id"], log)
+                    marked = [i + 1 for i, line in enumerate(cleaned) if LOG_MARKERS.search(line)]
                 log = log_tail(log, log_bytes)
                 findings.append({
                     "source": "pipeline", "step": step.get("name"), "severity": "error",
-                    "message": log, "locations": landing_module.locations(log),
-                    "url": pipeline.get("url"),
+                    "message": log + LOG_HINT % json.dumps(step.get("name")),
+                    "locations": landing_module.locations(log),
+                    "url": pipeline.get("url"), "job": step.get("name"), "lines": marked[:50],
                 })
         elif pipeline.get("state") in ("in_progress", "pending", "queued", "inprogress"):
             findings.append({"source": "pipeline", "severity": "info",
@@ -1586,6 +1593,11 @@ LOG_MARKERS = re.compile(
     r"|\d+ tests?, \d+ assertions?, \d+ errors?, \d+ failures?|Uncaught exception|Exception: ")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 LOG_AFTER_MARK = 8
+# GitHub starts each line of a job log with the time it was written.
+LOG_STAMP = re.compile(r"^﻿?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
+LOG_CACHE_SECONDS = 3600
+LOG_HINT = "\nread more with bench__log {job: %s}"
+LOG_MODES = ("markers", "grep", "range")
 
 
 # A job that was cancelled, timed out or stopped in setup ran no test: its
@@ -1689,6 +1701,119 @@ def log_tail(text, size):
         out.append(lines[i])
         last = i
     return "\n".join(out)
+
+
+def clean_log(text):
+    """Gives the lines of a log, without the colors and without GitHub's timestamps."""
+    return [LOG_STAMP.sub("", ANSI_ESCAPE.sub("", line)) for line in (text or "").splitlines()]
+
+
+def cut_line(text, width):
+    """Cuts a line at width characters. A cut line ends in '… (+N)', N the characters dropped."""
+    if len(text) <= width:
+        return text
+    return "%s… (+%d)" % (text[:width], len(text) - width)
+
+
+def remember_log(bench, repo, run_id, job_id, text):
+    """Cleans a job's log, keeps its lines for an hour, and gives them."""
+    lines = clean_log(text)
+    with bench._guard:
+        now = _clock()
+        for key in [key for key, (at, _) in bench.logs.items() if now - at > LOG_CACHE_SECONDS]:
+            del bench.logs[key]
+        bench.logs[(repo.name, run_id, job_id)] = (now, lines)
+    return lines
+
+
+def job_lines(bench, repo, client, run_id, job_id):
+    """Gives a job's cleaned lines: from the rig when read within the hour, else from the forge."""
+    with bench._guard:
+        held = bench.logs.get((repo.name, run_id, job_id))
+    if held and _clock() - held[0] <= LOG_CACHE_SECONDS:
+        return held[1]
+    try:
+        text = client.step_log(run_id, job_id) or ""
+    except forge.ForgeError as exc:
+        text = "(no log: %s)" % exc
+    if not text.strip() or text.startswith("(no log:"):
+        raise Refusal("log", reason=text.strip() or "the forge gave an empty log")
+    return remember_log(bench, repo, run_id, job_id, text)
+
+
+def log(bench, args):
+    """Reads one job's log of the newest run on a branch's head: its jobs, the
+    marked lines, a grep, or a range. Every line comes cleaned and cut."""
+    repo = bench.repo(args.get("repo"))
+    branch = check_branch(_text(args, "branch", required=True))
+    max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
+    name = _text(args, "job")
+    mode = _text(args, "mode", default="markers")
+    if mode not in LOG_MODES:
+        raise Refusal("input", field="mode", reason="one of markers, grep, range")
+    width = _int(args, "width", 200, 80, 400)
+    item = bench.landings.get(repo, branch)
+    head = item.state.get("head") if item else None
+    try:
+        client = forge.client(repo)
+        jobs = []
+        for run in pipelines_of_head(client.pipelines(branch), head):
+            jobs.extend((run, job) for job in client.steps(run["id"]))
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=str(exc))
+    answer = {"repo": repo.name, "branch": branch}
+    if not name:
+        answer["jobs"] = []
+        for run, job in jobs:
+            count = None
+            if job.get("result") in ("failed", "error", "failure"):
+                try:
+                    count = len(job_lines(bench, repo, client, run["id"], job["id"]))
+                except Refusal:
+                    pass
+            answer["jobs"].append({"job": job.get("name"), "workflow": run.get("kind"),
+                                   "result": job.get("result"), "lines": count})
+        return answer
+    found = [(run, job) for run, job in jobs if job.get("name") == name]
+    if not found:
+        raise Refusal("job", job=name, jobs=[job.get("name") for _, job in jobs])
+    run, job = found[0]
+    lines = job_lines(bench, repo, client, run["id"], job["id"])
+    answer.update({"job": name, "workflow": run.get("kind"), "mode": mode, "total": len(lines)})
+
+    def row(index):
+        return {"line": index + 1, "text": cut_line(lines[index], width)}
+
+    if mode == "range":
+        offset = _int(args, "offset", 1, 1, max(1, len(lines)))
+        limit = _int(args, "limit", 60, 1, 200)
+        rows = [row(i) for i in range(offset - 1, min(len(lines), offset - 1 + limit))]
+        answer.update({"offset": offset, "eof": offset - 1 + limit >= len(lines)})
+        key = "lines"
+    else:
+        pattern = LOG_MARKERS
+        if mode == "grep":
+            text = _text(args, "pattern", required=True)
+            try:
+                pattern = re.compile(text)
+            except re.error as exc:
+                raise Refusal("input", field="pattern", reason=str(exc))
+        limit = _int(args, "limit", 20, 1, 100)
+        context = _int(args, "context", 2, 0, 10)
+        hits = [i for i, line in enumerate(lines) if pattern.search(line)]
+        shown = set()
+        for i in hits[:limit]:
+            shown.update(range(max(0, i - context), min(len(lines), i + context + 1)))
+        rows = []
+        for i in sorted(shown):
+            rows.append(row(i))
+            if i in hits[:limit]:
+                rows[-1]["hit"] = True
+        answer.update({"count": len(hits), "truncated": len(hits) > limit})
+        key = "matches"
+    answer[key], answer["dropped"] = cap_items(
+        rows, max_bytes, lambda item: len(item["text"].encode("utf-8", "replace")) + 32)
+    return answer
 
 
 def cap_answer(answer, max_bytes):
@@ -2466,6 +2591,47 @@ TOOL_SPECS = [
                 "log_bytes": {"type": "integer",
                               "description": "The tail of each failed pipeline log to give. "
                                              "The default is 4096. The ceiling is 32768."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "branch"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "log",
+        "function": log,
+        "description": (
+            "Reads the log of one job of the newest run on a branch's head, a small answer at a "
+            "time, for when feedback's excerpt does not show why a check failed. Without job it "
+            "lists the run's jobs with their result and, for a failed job, its line count. With "
+            "job (the name feedback reports): mode markers (the default) gives the lines of the "
+            "test report (FAIL in, ERROR in, the exception, the summary) with context around "
+            "them; mode grep gives the lines a regex pattern finds, with context, the found ones "
+            "marked hit; mode range gives limit lines from offset, counting from 1. Every line "
+            "comes without colors and without GitHub's timestamp, cut at width characters; a "
+            "cut line ends in '… (+N)'. The rig keeps a log an hour, so paging does not fetch "
+            "it again."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "branch": _BRANCH,
+                "job": {"type": "string", "description": "The job's name, as feedback reports it."},
+                "mode": {"type": "string", "enum": list(LOG_MODES),
+                         "description": "markers (the default), grep or range."},
+                "pattern": {"type": "string", "description": "The regex of mode grep."},
+                "offset": {"type": "integer", "description": "The first line of mode range, from 1."},
+                "limit": {"type": "integer",
+                          "description": "Lines of a range (default 60, ceiling 200), or "
+                                         "matches of grep and markers (default 20, ceiling 100)."},
+                "context": {"type": "integer",
+                            "description": "Lines before and after each match. The default is 2. "
+                                           "The ceiling is 10."},
+                "width": {"type": "integer",
+                          "description": "Characters of a line. The default is 200, from 80 to 400."},
+                "max_bytes": _MAX_BYTES,
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },
