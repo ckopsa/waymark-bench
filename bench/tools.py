@@ -1,4 +1,4 @@
-"""The seventeen tools of the bench.
+"""The twenty tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -693,12 +693,12 @@ def _find_symbols(bench, repo, worktree, args, max_bytes, allow=None):
 
     dropped = sum(size_of(item) for item in found[max_matches:])
     kept, dropped_bytes = cap_items(found[:max_matches], max_bytes, size_of)
-    return {"mode": "symbols", "path": rel, "pattern": pattern, "symbols": kept,
+    return {"path": rel, "pattern": pattern, "symbols": kept,
             "dropped": dropped + dropped_bytes}
 
 
 def find(bench, args):
-    """Looks in a worktree: a tree, a glob, a grep, a diff or the definitions."""
+    """Looks in a worktree: a tree, a glob, a grep or a diff."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     mode = _text(args, "mode", default="tree")
@@ -714,10 +714,22 @@ def find(bench, args):
             answer = _find_grep(bench, repo, worktree, args, max_bytes, allow)
         elif mode == "diff":
             answer = _find_diff(bench, repo, worktree, args, max_bytes, allow)
-        elif mode == "symbols":
-            answer = _find_symbols(bench, repo, worktree, args, max_bytes, allow)
         else:
-            raise Refusal("input", field="mode", reason="use tree, glob, grep, diff or symbols")
+            raise Refusal("input", field="mode",
+                          reason="use tree, glob, grep or diff; the symbols tool gives the definitions")
+        answer.update({"repo": repo.name, "branch": branch, "max_bytes": max_bytes})
+        return answer
+
+
+def list_symbols(bench, args):
+    """Gives the definitions of the Clojure and Python files under a path."""
+    repo = bench.repo(args.get("repo"))
+    branch = check_branch(_text(args, "branch", required=True))
+    max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
+    allow = _globs(args, "allow")
+    with bench.lock(repo.name):
+        worktree = bench.worktree(repo, branch)
+        answer = _find_symbols(bench, repo, worktree, args, max_bytes, allow)
         answer.update({"repo": repo.name, "branch": branch, "max_bytes": max_bytes})
         return answer
 
@@ -755,45 +767,61 @@ def _read_symbol(answer, content, symbol, max_bytes):
     return answer
 
 
+def _load(bench, repo, worktree, branch, args, allow):
+    """Gives (rel, ref, hash, content) of one file, from the worktree or from a ref."""
+    ref = _text(args, "ref")
+    full, rel = bench.resolve(repo, worktree, args.get("path"), allow=allow)
+    if ref:
+        if ref == "base":
+            ref = bench.base_of(repo, branch)
+        spec = "%s:%s" % (ref, rel)
+        code, blob, err = git.run(["rev-parse", "--verify", "--quiet", spec], cwd=worktree,
+                                  check=False)
+        if code != 0:
+            raise Refusal("not_found", path=rel, ref=ref)
+        return rel, ref, blob.strip(), git.out(["show", spec], cwd=worktree)
+    if not os.path.isfile(full):
+        raise Refusal("not_found", path=rel)
+    file_hash = git.line(["hash-object", "--", full], cwd=worktree)
+    try:
+        with open(full, "r", encoding="utf-8", errors="replace") as handle:
+            content = handle.read()
+    except OSError as exc:
+        raise Refusal("not_found", path=rel, reason=str(exc))
+    return rel, ref, file_hash, content
+
+
+def read_symbol(bench, args):
+    """Gives the lines of each definition of one name in one file."""
+    repo = bench.repo(args.get("repo"))
+    branch = check_branch(_text(args, "branch", required=True))
+    symbol = _text(args, "symbol", required=True)
+    max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
+    allow = _globs(args, "allow")
+    with bench.lock(repo.name):
+        worktree = bench.worktree(repo, branch)
+        rel, ref, file_hash, content = _load(bench, repo, worktree, branch, args, allow)
+        return _read_symbol({"repo": repo.name, "branch": branch, "path": rel, "ref": ref,
+                             "hash": file_hash}, content, symbol, max_bytes)
+
+
 def read(bench, args):
     """Gives lines with numbers from the worktree or from a ref."""
+    if args.get("symbol") is not None:
+        raise Refusal("input", field="symbol", reason="read takes no symbol; use read_symbol")
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     offset = _int(args, "offset", 1, 1, 1000000)
     limit = _int(args, "limit", DEFAULT_LIMIT, 1, CEILING_LIMIT)
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
-    ref = _text(args, "ref")
     if_hash = _text(args, "if_hash")
-    symbol = _text(args, "symbol")
     allow = _globs(args, "allow")
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
-        full, rel = bench.resolve(repo, worktree, args.get("path"), allow=allow)
-        if ref:
-            if ref == "base":
-                ref = bench.base_of(repo, branch)
-            spec = "%s:%s" % (ref, rel)
-            code, blob, err = git.run(["rev-parse", "--verify", "--quiet", spec], cwd=worktree,
-                                      check=False)
-            if code != 0:
-                raise Refusal("not_found", path=rel, ref=ref)
-            file_hash = blob.strip()
-            content = git.out(["show", spec], cwd=worktree)
-        else:
-            if not os.path.isfile(full):
-                raise Refusal("not_found", path=rel)
-            file_hash = git.line(["hash-object", "--", full], cwd=worktree)
-            try:
-                with open(full, "r", encoding="utf-8", errors="replace") as handle:
-                    content = handle.read()
-            except OSError as exc:
-                raise Refusal("not_found", path=rel, reason=str(exc))
+        rel, ref, file_hash, content = _load(bench, repo, worktree, branch, args, allow)
         if if_hash and if_hash == file_hash:
             return {"repo": repo.name, "branch": branch, "path": rel,
                     "unchanged": True, "hash": file_hash}
-        if symbol:
-            return _read_symbol({"repo": repo.name, "branch": branch, "path": rel, "ref": ref,
-                                 "hash": file_hash}, content, symbol, max_bytes)
         all_lines = content.splitlines()
         total = len(all_lines)
         window = all_lines[offset - 1: offset - 1 + limit]
@@ -1085,36 +1113,46 @@ def _plan_edit(bench, repo, worktree, plan, item, allow_protected, allow):
 
 
 def edit(bench, args):
-    """Changes paths: a replace, a create, a delete or a move, or a list of them.
+    """Changes one path: a replace, a create, a delete or a move."""
+    if args.get("edits") is not None:
+        raise Refusal("input", field="edits",
+                      reason="edit takes the fields of one edit; use edit_many for a list")
+    return _edit(bench, args, None)
 
-    A list is judged whole before a byte is written: one refused edit
+
+def edit_many(bench, args):
+    """Changes paths with a list of edits.
+
+    The list is judged whole before a byte is written: one refused edit
     writes none of them.
     """
+    edits = args.get("edits")
+    beside = [key for key in EDIT_FIELDS if args.get(key) is not None]
+    if beside:
+        raise Refusal("input", field="edits", beside=beside,
+                      reason="give edits or the fields of one edit, not both")
+    if not isinstance(edits, list) or not edits:
+        raise Refusal("input", field="edits", reason="edits is a list of one edit or more")
+    if len(edits) > MAX_EDITS:
+        raise Refusal("input", field="edits", count=len(edits),
+                      reason="at most %d edits in one call" % MAX_EDITS)
+    for index, item in enumerate(edits, 1):
+        if not isinstance(item, dict):
+            raise Refusal("input", field="edits", item=index, reason="each edit is an object")
+        extra = sorted(set(item) - set(EDIT_FIELDS))
+        if extra:
+            raise Refusal("input", field="edits", item=index, fields=extra,
+                          reason="an edit takes only: " + ", ".join(EDIT_FIELDS))
+    return _edit(bench, args, edits)
+
+
+def _edit(bench, args, edits):
+    """Plans the edits and writes them together. edits None is the one edit in args."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     allow_protected = bool(args.get("allow_protected"))
     allow = _globs(args, "allow")
-    edits = args.get("edits")
-    if edits is None:
-        items = [args]
-    else:
-        beside = [key for key in EDIT_FIELDS if args.get(key) is not None]
-        if beside:
-            raise Refusal("input", field="edits", beside=beside,
-                          reason="give edits or the fields of one edit, not both")
-        if not isinstance(edits, list) or not edits:
-            raise Refusal("input", field="edits", reason="edits is a list of one edit or more")
-        if len(edits) > MAX_EDITS:
-            raise Refusal("input", field="edits", count=len(edits),
-                          reason="at most %d edits in one call" % MAX_EDITS)
-        for index, item in enumerate(edits, 1):
-            if not isinstance(item, dict):
-                raise Refusal("input", field="edits", item=index, reason="each edit is an object")
-            extra = sorted(set(item) - set(EDIT_FIELDS))
-            if extra:
-                raise Refusal("input", field="edits", item=index, fields=extra,
-                              reason="an edit takes only: " + ", ".join(EDIT_FIELDS))
-        items = edits
+    items = [args] if edits is None else edits
     # The fields of each edit are judged before the lock, as one edit's were.
     for index, item in enumerate(items, 1):
         try:
@@ -2001,9 +2039,8 @@ TOOL_SPECS = [
             "Looks in the worktree. Mode tree gives the files under a path to a depth "
             "with their sizes. Mode glob gives the paths that match a pattern. Mode grep "
             "gives the count of matches for each file first, then the lines. Mode diff "
-            "gives the change of the worktree against the base. Mode symbols gives the "
-            "top-level definitions of the Clojure and Python files under path, each with "
-            "its name, kind, path, line and end_line. Every answer has a cap. "
+            "gives the change of the worktree against the base. The symbols tool gives the "
+            "definitions. Every answer has a cap. "
             "With allow, the answer holds only the paths that a glob of the list matches."
         ),
         "schema": {
@@ -2011,7 +2048,7 @@ TOOL_SPECS = [
             "properties": {
                 "repo": _REPO,
                 "branch": _BRANCH,
-                "mode": {"type": "string", "enum": ["tree", "glob", "grep", "diff", "symbols"],
+                "mode": {"type": "string", "enum": ["tree", "glob", "grep", "diff"],
                          "description": "The kind of look. The default is tree."},
                 "path": {"type": "string", "description": "The path to look in."},
                 "depth": {"type": "integer",
@@ -2020,15 +2057,13 @@ TOOL_SPECS = [
                             "description": (
                                 "The glob for mode glob, or the pattern for mode grep. A grep "
                                 "pattern is a Perl regular expression: a|b, (?i), \\b and .? "
-                                "all work. A pattern git cannot read is refused, not empty. For mode "
-                                "symbols, a Python regular expression over the names.")},
+                                "all work. A pattern git cannot read is refused, not empty.")},
                 "ignore_case": {"type": "boolean",
                                 "description": "For mode grep: match without regard to case."},
                 "context": {"type": "integer",
                             "description": "The count of lines around each match for mode grep."},
                 "max_matches": {"type": "integer",
-                                "description": "The cap on the lines for mode grep, or on the "
-                                               "definitions for mode symbols. The default is 200."},
+                                "description": "The cap on the lines for mode grep. The default is 200."},
                 "max_bytes": _MAX_BYTES,
                 "allow": _ALLOW,
                 "seat": _SEAT,
@@ -2046,11 +2081,8 @@ TOOL_SPECS = [
             "range. Use ref to read the file at a git ref, for example base. A ref is read "
             "as the last fetch left it; prepare and pull fetch. Give if_hash "
             "with the hash of your last read: if the file did not change, the answer is "
-            "unchanged and the hash, and not the bytes. Give symbol in place of offset and "
-            "limit to read one definition of a Clojure or Python file by its name: each "
-            "match comes with its lines and its range, and a name the file does not "
-            "define is refused with the close names. With allow, a path that no glob of "
-            "the list matches is refused."
+            "unchanged and the hash, and not the bytes. To read one definition by its name, "
+            "use read_symbol. With allow, a path that no glob of the list matches is refused."
         ),
         "schema": {
             "type": "object",
@@ -2058,9 +2090,6 @@ TOOL_SPECS = [
                 "repo": _REPO,
                 "branch": _BRANCH,
                 "path": {"type": "string", "description": "The path in the repository."},
-                "symbol": {"type": "string",
-                           "description": "The name of a definition to read, e.g. greet, "
-                                          "Thing.method or a defmethod's multi."},
                 "offset": {"type": "integer",
                            "description": "The first line. The lines start at 1."},
                 "limit": {"type": "integer",
@@ -2075,6 +2104,67 @@ TOOL_SPECS = [
                 "sitting": _SITTING,
             },
             "required": ["repo", "branch", "path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "symbols",
+        "function": list_symbols,
+        "description": (
+            "Gives the top-level definitions of the Clojure and Python files under a path, "
+            "each with its name, kind, path, line and end_line, e.g. {\"path\": \"lib/core.clj\"} "
+            "or {\"path\": \"lib\", \"pattern\": \"^(area|top)$\"}. Read one with read_symbol. "
+            "The answer has a cap. With allow, the answer holds only the paths that a glob of "
+            "the list matches."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "branch": _BRANCH,
+                "path": {"type": "string",
+                         "description": "A file or a directory. The default is the whole worktree."},
+                "pattern": {"type": "string",
+                            "description": "A Python regular expression over the names."},
+                "max_matches": {"type": "integer",
+                                "description": "The cap on the definitions. The default is 200."},
+                "max_bytes": _MAX_BYTES,
+                "allow": _ALLOW,
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "branch"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "read_symbol",
+        "function": read_symbol,
+        "description": (
+            "Gives one definition of a Clojure or Python file by its name, e.g. "
+            "{\"path\": \"lib/core.clj\", \"symbol\": \"greet\"} or {\"path\": \"a.py\", "
+            "\"symbol\": \"Thing.method\"}. Each match comes with its range and its numbered "
+            "lines, up to 20 under max_bytes; a name the file does not define is refused with "
+            "the close names. Use ref to read the file at a git ref, for example base. With "
+            "allow, a path that no glob of the list matches is refused."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "branch": _BRANCH,
+                "path": {"type": "string", "description": "The path in the repository."},
+                "symbol": {"type": "string",
+                           "description": "The name of a definition to read, e.g. greet, "
+                                          "Thing.method or a defmethod's multi."},
+                "ref": {"type": "string",
+                        "description": "A git ref to read instead of the worktree. Use base for the base branch."},
+                "max_bytes": _MAX_BYTES,
+                "allow": _ALLOW,
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "branch", "path", "symbol"],
             "additionalProperties": False,
         },
     },
@@ -2108,16 +2198,13 @@ TOOL_SPECS = [
         "name": "edit",
         "function": edit,
         "description": (
-            "Changes one path with exactly one operation, or many paths with edits. Replace: "
+            "Changes one path with exactly one operation. Replace: "
             "old with new, and old must be in the file one time, e.g. {\"path\": \"a.py\", "
             "\"old\": \"x = 1\", \"new\": \"x = 2\"}. Create: new with create: true, e.g. "
             "{\"path\": \"b.py\", \"new\": \"print(1)\\n\", \"create\": true}; content is "
             "taken as a spelling of new for a new file. Delete: delete: true, e.g. {\"path\": \"c.py\", "
             "\"delete\": true}. Move: move_to, e.g. {\"path\": \"c.py\", \"move_to\": "
-            "\"d.py\"}. Many: edits, a list of up to 50 of these objects, applied in order "
-            "and together or not at all, e.g. {\"edits\": [{\"path\": \"a.py\", \"old\": "
-            "\"x = 1\", \"new\": \"x = 2\"}, {\"path\": \"c.py\", \"delete\": true}]}; a "
-            "refusal names the edit by its number, from 1. A write under .github/ or .claude/ is "
+            "\"d.py\"}. For many edits in one call, use edit_many. A write under .github/ or .claude/ is "
             "refused when the scope does not name the path. With allow, a path that no glob "
             "of the list matches is refused."
         ),
@@ -2142,12 +2229,39 @@ TOOL_SPECS = [
                            "description": "True to remove the file: delete: true, with no other "
                                           "operation."},
                 "move_to": {"type": "string", "description": "The new path of the file."},
+                "allow_protected": {"type": "boolean",
+                                    "description": "True to permit a write under .github/ or .claude/."},
+                "allow": _ALLOW,
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "branch"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "edit_many",
+        "function": edit_many,
+        "description": (
+            "Changes many paths in one call. edits is a list of up to 50 objects, each shaped "
+            "as one edit of the edit tool: path with old and new, new with create: true, "
+            "delete: true, or move_to. They apply in order and together or not at all, e.g. "
+            "{\"edits\": [{\"path\": \"a.py\", \"old\": \"x = 1\", \"new\": \"x = 2\"}, "
+            "{\"path\": \"c.py\", \"delete\": true}]}; a refusal names the edit by its number, "
+            "from 1, in item. The answer gives each edit's path and hash. A write under .github/ "
+            "or .claude/ is refused when the scope does not name the path. With allow, a path "
+            "that no glob of the list matches is refused."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "branch": _BRANCH,
                 "edits": {
                     "type": "array", "minItems": 1, "maxItems": 50,
-                    "description": "Many edits in one call, each shaped as one edit: path with "
-                                   "old and new, new with create: true, delete: true, or move_to. "
-                                   "They apply in order, and one refused edit writes none. Not "
-                                   "beside path and the other fields of one edit.",
+                    "description": "The edits, each shaped as one edit: path with old and new, "
+                                   "new with create: true, delete: true, or move_to. They apply "
+                                   "in order, and one refused edit writes none.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -2169,7 +2283,7 @@ TOOL_SPECS = [
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },
-            "required": ["repo", "branch"],
+            "required": ["repo", "branch", "edits"],
             "additionalProperties": False,
         },
     },

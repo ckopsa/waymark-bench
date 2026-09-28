@@ -1,9 +1,10 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives seventeen
-tools: `prepare`, `status`, `find`, `read`, `check`, `edit`, `pull`, `submit`,
-`feedback`, `discard`, `merge`, `update_branch`, `rerun`, `test`, `enroll`, `repos` and `unenroll`. It
+for each repository and a git worktree for each branch. It gives twenty
+tools: `prepare`, `status`, `find`, `read`, `symbols`, `read_symbol`, `check`, `edit`,
+`edit_many`, `pull`, `submit`, `feedback`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
+`enroll`, `repos` and `unenroll`. It
 needs Python
 3.11, git, and one library: pydantic-settings, for the settings.
 
@@ -58,15 +59,18 @@ and `pull` fetch.
 
 | Tool | Input | Answer |
 | --- | --- | --- |
-| `find` mode `symbols` | `path` (a file or a directory), `pattern` (a regex over the names), `max_matches` | `symbols`: each `{name, kind, path, line, end_line}` |
-| `read` with `symbol` | `path`, `symbol` in place of `offset` and `limit` | `definitions`: each match with its range and its numbered `lines` |
+| `symbols` | `path` (a file or a directory), `pattern` (a regex over the names), `max_matches` | `symbols`: each `{name, kind, path, line, end_line}` |
+| `read_symbol` | `path`, `symbol`, and `ref` if you want one | `definitions`: each match with its range and its numbered `lines` |
+
+`find` has no mode `symbols` and `read` takes no `symbol`: each refuses
+it and names the tool to use.
 
 A Clojure, ClojureScript or edn definition is a top-level form whose
 head starts with `def`, with or without an alias: `defn-`, `defmethod`,
 `g/defguard`. Its `end_line` is the line where its parens balance; the
 reader skips strings, comments and character literals. A Python
 definition is a `def`, an `async def` or a `class` at column 0, and a
-method one level in, named `Class.method`. A `read` of several matches
+method one level in, named `Class.method`. A `read_symbol` of several matches
 (the `defmethod`s of one multi) gives each, up to 20, under `max_bytes`.
 A name the file does not define is refused `not_found` with `close`,
 the names that look like it.
@@ -317,13 +321,14 @@ the grant, and the rig obeys the arguments of the call.
 
 ## Many edits in one call
 
-`edit` takes `edits`: a list of up to 50 edits, each shaped as one edit
+`edit_many` takes `edits`: a list of up to 50 edits, each shaped as one edit
 (`path` with `old` and `new`, `new` with `create: true`, `delete: true`,
 or `move_to`). The paths may differ. The rig judges every edit in order
 before it writes a byte: one refused edit writes none of them, and the
 refusal names it in `item`, counting from 1. The answer gives each
 edit's path and hash, never the content. `edits` beside `path` or the
-other fields of one edit is refused. The one-edit form is unchanged.
+other fields of one edit is refused. `edit` takes exactly one edit, and
+refuses `edits` with the name of `edit_many`.
 
 ## The tests
 
