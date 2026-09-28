@@ -119,7 +119,7 @@ CLASSIC_SCOPES = {
     "workflow": ("workflows",),
 }
 # A fine-grained token is probed by reads; a write alone proves these.
-WRITE_ONLY = ("contents", "pull_requests", "workflows")
+WRITE_ONLY = ("contents", "pull_requests", "workflows", "actions")
 
 
 def _keychain_bitbucket():

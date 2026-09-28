@@ -397,6 +397,8 @@ class TestEdit(BenchCase):
         answer = self.refused("edit", branch="work", path=".github/workflows/ci.yml",
                               old="name: ci", new="name: gate")
         self.assertEqual(answer["refused"], "protected")
+        self.assertEqual(answer["reason"], "a write under .github/ or .claude/ needs this "
+                         "seat's scope to name the path in its bench.edit filter")
         permitted = self.ok("edit", branch="work", path=".github/workflows/ci.yml",
                             old="name: ci", new="name: gate", allow_protected=True)
         self.assertTrue(permitted["hash"])
@@ -471,6 +473,7 @@ class TestEdit(BenchCase):
         ])
         self.assertEqual(answer["refused"], "protected")
         self.assertEqual(answer["item"], 2)
+        self.assertIn("its bench.edit filter", answer["reason"])
         with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "alpha\nbravo\ncharlie\n")
 
