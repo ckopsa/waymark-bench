@@ -1,10 +1,10 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives twenty-two
+for each repository and a git worktree for each branch. It gives twenty-three
 tools: `prepare`, `status`, `find`, `read`, `symbols`, `read_symbol`, `check`, `edit`,
 `edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
-`enroll`, `repos` and `unenroll`. It
+`test_result`, `enroll`, `repos` and `unenroll`. It
 needs Python
 3.11, git, and one library: pydantic-settings, for the settings.
 
@@ -183,6 +183,16 @@ such run on the branch's pushed head, and answers the `run_id`. It does
 so one time per head (`already_rerun` after), and refuses `not_pushed`,
 `red` (a job failed in a test step: fix the code) and
 `nothing_interrupted`.
+
+`test` dispatches one test selection of a branch on the repository's
+own CI and answers at once `{run_id, run_url, conclusion: pending}`.
+`test_result {run_id, wait_seconds}` reads that run every 5 seconds for
+up to `wait_seconds` (40 by default, 45 at most) and answers `success`,
+`cancelled`, `failure` with `failures: [{test, job, lines}]` (4 KB in
+all), or `pending`: ask again. No call holds the line past 45 seconds,
+and `test_result` never dispatches. When the run did not show within
+about 15 seconds, `test` answers `run_id: null` with `head` and
+`dispatched_at`, and `test_result` finds the run by them.
 
 The landing runs in the background, and `submit` answers at once with
 the landing running: follow it with `status` or `feedback`. Give `wait`
