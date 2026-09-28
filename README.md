@@ -1,8 +1,8 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives fifteen
-tools: `prepare`, `status`, `find`, `read`, `edit`, `pull`, `submit`,
+for each repository and a git worktree for each branch. It gives sixteen
+tools: `prepare`, `status`, `find`, `read`, `check`, `edit`, `pull`, `submit`,
 `feedback`, `discard`, `merge`, `update_branch`, `rerun`, `enroll`, `repos` and `unenroll`. It
 needs Python
 3.11, git, and one library: pydantic-settings, for the settings.
@@ -275,7 +275,9 @@ The engine holds one `mcp_server` row with the name `bench`. The
 transport is stdio. The command is
 `python3 -m bench --stdio --config …`. The `auth_env` is
 `BENCH_GIT_TOKEN`. The powers entries of the row name `find`, `read`,
-`edit` and `pull`. The tools `prepare`, `status`, `submit`, `feedback`,
+`check`, `edit` and `pull`. `check` lints the files a change touched
+before submit: balanced forms for Clojure, with clj-kondo's errors when
+the rig has it, and a compile check for Python. It never writes. The tools `prepare`, `status`, `submit`, `feedback`,
 `discard`, `enroll`, `repos` and `unenroll` are the engine's own. The engine calls `prepare` before a
 sitting, so the model finds the worktree made.
 

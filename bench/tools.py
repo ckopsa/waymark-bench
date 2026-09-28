@@ -1,4 +1,4 @@
-"""The fifteen tools of the bench.
+"""The sixteen tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 
@@ -718,6 +719,149 @@ def read(bench, args):
             "eof": last >= total,
             "dropped": dropped,
         }
+
+
+CLOJURE_SUFFIXES = (".clj", ".cljs", ".cljc", ".edn")
+CLOSERS = {")": "(", "]": "[", "}": "{"}
+
+
+def clojure_balance(text):
+    """Gives the first unbalanced place of a Clojure text, or None.
+
+    A walk at the reader's level: strings, regexes, char literals and
+    comments hold no forms. The answer is {line, col, message}.
+    """
+    stack = []
+    string_at = None
+    line, col = 1, 0
+    index, size = 0, len(text)
+    while index < size:
+        char = text[index]
+        index += 1
+        if char == "\n":
+            line, col = line + 1, 0
+            continue
+        col += 1
+        if char == "\\":
+            # An escape in a string, or a char literal such as \( outside one.
+            if index < size:
+                if text[index] == "\n":
+                    line, col = line + 1, 0
+                else:
+                    col += 1
+                index += 1
+            continue
+        if string_at:
+            if char == '"':
+                string_at = None
+            continue
+        if char == ";":
+            while index < size and text[index] != "\n":
+                index += 1
+            continue
+        if char == '"':
+            string_at = (line, col)
+        elif char in "([{":
+            stack.append((char, line, col))
+        elif char in CLOSERS:
+            if not stack:
+                return {"line": line, "col": col, "message": "%s closes no open form" % char}
+            opener, open_line, open_col = stack.pop()
+            if opener != CLOSERS[char]:
+                return {"line": line, "col": col,
+                        "message": "%s closes the %s opened at line %d col %d"
+                                   % (char, opener, open_line, open_col)}
+    if string_at:
+        return {"line": string_at[0], "col": string_at[1],
+                "message": "the string opened here is never closed"}
+    if stack:
+        opener, open_line, open_col = stack[0]
+        return {"line": open_line, "col": open_col,
+                "message": "the %s opened at line %d is never closed" % (opener, open_line)}
+    return None
+
+
+def changed_paths(bench, repo, branch, worktree):
+    """Gives the files a branch changed against its base, deleted ones aside. No write."""
+    base = bench.base_of(repo, branch)
+    base_head = git.rev_parse(base_ref_of(bench.bare_dir(repo.name), base), cwd=worktree)
+    changed = git.out(["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=d",
+                       base_head], cwd=worktree).splitlines()
+    untracked = git.out(["-c", "core.quotePath=false", "ls-files", "--others",
+                         "--exclude-standard"], cwd=worktree).splitlines()
+    names = sorted(set(name for name in changed + untracked if name))
+    return [name for name in names if not deny_pattern(name, repo.deny)]
+
+
+def kondo_errors(program, worktree, paths):
+    """Gives the errors clj-kondo finds in paths; its warnings stay out."""
+    done = subprocess.run(
+        [program, "--lint"] + paths + ["--config", "{:output {:format :json}}"],
+        cwd=worktree, capture_output=True, text=True, timeout=120, check=False)
+    report = json.loads(done.stdout or "{}")
+    return [
+        {"path": item.get("filename"), "line": item.get("row"), "col": item.get("col"),
+         "message": "clj-kondo: %s" % item.get("message")}
+        for item in report.get("findings", []) if item.get("level") == "error"
+    ]
+
+
+def check(bench, args):
+    """Lints the files a change touched: Clojure forms, Python compiles. It never writes."""
+    repo = bench.repo(args.get("repo"))
+    branch = check_branch(_text(args, "branch", required=True))
+    given = args.get("paths")
+    if given is not None and (not isinstance(given, list)
+                              or not all(isinstance(item, str) and item for item in given)):
+        raise Refusal("input", field="paths", reason="paths is a list of paths")
+    findings, skipped, unavailable, clojure = [], [], [], []
+    with bench.lock(repo.name):
+        worktree = bench.worktree(repo, branch)
+        if given:
+            places = [bench.resolve(repo, worktree, item, allow=None) for item in given]
+        else:
+            places = [(os.path.join(worktree, rel), rel)
+                      for rel in changed_paths(bench, repo, branch, worktree)]
+        for full, rel in places:
+            if not os.path.isfile(full):
+                skipped.append(rel)
+            elif rel.endswith(CLOJURE_SUFFIXES):
+                with open(full, "r", encoding="utf-8", errors="replace") as handle:
+                    place = clojure_balance(handle.read())
+                if place:
+                    findings.append(dict(path=rel, **place))
+                else:
+                    clojure.append(rel)
+            elif rel.endswith(".py"):
+                with open(full, "rb") as handle:
+                    source = handle.read()
+                try:
+                    compile(source, rel, "exec", dont_inherit=True)
+                except SyntaxError as exc:
+                    findings.append({"path": rel, "line": exc.lineno or 1, "col": exc.offset or 1,
+                                     "message": exc.msg})
+                except ValueError as exc:
+                    findings.append({"path": rel, "line": 1, "col": 1, "message": str(exc)})
+            else:
+                skipped.append(rel)
+        if clojure:
+            program = shutil.which("clj-kondo")
+            if not program:
+                unavailable.append("clj-kondo is not on the rig's PATH: the Clojure files had the "
+                                   "balance check only")
+            else:
+                try:
+                    findings.extend(kondo_errors(program, worktree, clojure))
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    unavailable.append("clj-kondo did not answer: %s" % exc)
+    return {
+        "repo": repo.name,
+        "branch": branch,
+        "ok": not findings,
+        "findings": findings,
+        "skipped": skipped,
+        "unavailable": unavailable,
+    }
 
 
 EDIT_FIELDS = ("path", "old", "new", "content", "create", "delete", "move_to")
@@ -1733,6 +1877,32 @@ TOOL_SPECS = [
                 "sitting": _SITTING,
             },
             "required": ["repo", "branch", "path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "check",
+        "function": check,
+        "description": (
+            "Lints the files a change touched, before submit. With no paths it checks every "
+            "file the branch changed against its base. Clojure files (.clj .cljs .cljc .edn) "
+            "get a balance check of their forms, and clj-kondo's errors when the rig has it; "
+            "Python files get a compile check. Other files are listed as skipped. The answer "
+            "is ok, the findings with path, line, col and message, skipped and unavailable. "
+            "It never writes."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "branch": _BRANCH,
+                "paths": {"type": "array", "items": {"type": "string"},
+                          "description": "The paths to check. The default is every file the "
+                                         "branch changed."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "branch"],
             "additionalProperties": False,
         },
     },

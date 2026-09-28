@@ -748,5 +748,57 @@ class TestEnroll(BenchCase):
         self.assertEqual(Bench(config_module.from_dict(spec)).config.names(), ["only"])
 
 
+class TestCheck(BenchCase):
+    def test_an_unbalanced_form_gives_its_line_and_col(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "src/core.clj"),
+                   "(ns demo.core)\n\n(defn f [x]\n  (+ x 1)))\n")
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        finding = answer["findings"][0]
+        self.assertEqual((finding["path"], finding["line"], finding["col"]), ("src/core.clj", 4, 11))
+
+    def test_a_mismatched_close_names_the_open_form_line(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "src/core.clj"), "(ns demo.core)\n\n(defn f [x\n  x)\n")
+        answer = self.ok("check", branch="work")
+        finding = answer["findings"][0]
+        self.assertEqual((finding["line"], finding["col"]), (4, 4))
+        self.assertIn("line 3", finding["message"])
+
+    def test_strings_regexes_chars_and_comments_hold_no_forms(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "src/core.clj"),
+                   "(ns demo.core)\n(def s \")\")\n(def r #\"(\")\n(def c \\()\n; a ( comment\n")
+        answer = self.ok("check", branch="work")
+        self.assertEqual([f for f in answer["findings"] if f["path"] == "src/core.clj"
+                          and not f["message"].startswith("clj-kondo")], [])
+
+    def test_a_python_syntax_error_is_found(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "src/app.py"), "def broken(:\n    pass\n")
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["findings"][0]["path"], "src/app.py")
+        self.assertEqual(answer["findings"][0]["line"], 1)
+
+    def test_a_clean_change_answers_ok(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "src/app.py"), "VALUE = 1\n")
+        util.write(os.path.join(path, "notes.txt"), "a note\n")
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["findings"], [])
+        self.assertEqual(answer["skipped"], ["notes.txt"])
+        self.assertEqual(self.ok("status", branch="work")["dirty"], 2)
+
+    def test_paths_limit_the_check(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "src/app.py"), "def broken(:\n")
+        answer = self.ok("check", branch="work", paths=["README.md"])
+        self.assertTrue(answer["ok"])
+        self.assertEqual(answer["skipped"], ["README.md"])
+
+
 if __name__ == "__main__":
     unittest.main()
