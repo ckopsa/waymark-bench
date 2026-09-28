@@ -1020,6 +1020,27 @@ class TestPullRequestAndFeedback(LandingCase):
         plain = "x\n" * 2000
         self.assertEqual(tools.log_tail(plain, 256), tools.landing_module.tail(plain, 256))
 
+    def test_the_log_tail_finds_the_failure_in_a_colored_kaocha_log(self):
+        report = (
+            "\x1b[31mERROR\x1b[m in waymark10.law-scenarios-test/the-tier-is-declared-never-sniffed (types.clj:13)\n"
+            "Uncaught exception, not in assertion.\n"
+            "clojure.lang.ExceptionInfo: the tier was sniffed {:tier :gold}\n"
+            " at waymark10.types$tier.invokeStatic (types.clj:13)\n"
+            " at waymark10.law_scenarios_test$fn__4211.invoke (law_scenarios_test.clj:88)\n")
+        progress = "".join("\x1b[32m.\x1b[m waymark10.shard-test/case-%d passed\n" % i for i in range(300))
+        summary = "\x1b[31m171 tests, 983 assertions, 1 errors, 0 failures.\x1b[m\n"
+        noise = "".join("Stop and remove container: postgres-%04d service cleanup\n" % i for i in range(120))
+        text = "setup\n" + report + progress + summary + noise
+        self.assertGreater(len(noise.encode("utf-8")), 4096)
+        cut = tools.log_tail(text, 4096)
+        self.assertLessEqual(len(cut.encode("utf-8")), 4096)
+        self.assertNotIn("\x1b", cut)
+        for marker in ("ERROR in waymark10.law-scenarios-test/the-tier-is-declared-never-sniffed",
+                       "Uncaught exception", "ExceptionInfo: the tier was sniffed",
+                       "171 tests, 983 assertions, 1 errors, 0 failures."):
+            self.assertIn(marker, cut)
+        self.assertEqual(tools.log_tail("\x1b[31mshort\x1b[m\n", 1024), "short\n")
+
 
 class TestCredential(LandingCase):
     """The rig checks its GitHub token against what it does with GitHub."""

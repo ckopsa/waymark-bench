@@ -1581,7 +1581,11 @@ def feedback(bench, args):
 
 # The lines of a test report that must survive the cut of a log: clojure.test
 # and the like name the failure, the two values and the count.
-LOG_MARKERS = re.compile(r"FAIL in|ERROR in|expected:|actual:|Ran \d+ tests|\d+ failures?, \d+ errors?")
+LOG_MARKERS = re.compile(
+    r"FAIL in|ERROR in|expected:|actual:|Ran \d+ tests|\d+ failures?, \d+ errors?"
+    r"|\d+ tests?, \d+ assertions?, \d+ errors?, \d+ failures?|Uncaught exception|Exception: ")
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+LOG_AFTER_MARK = 8
 
 
 # A job that was cancelled, timed out or stopped in setup ran no test: its
@@ -1638,11 +1642,13 @@ def status_of_pipeline(status, pipelines):
 def log_tail(text, size):
     """Gives the end of a log in size bytes, keeping the lines of the test report.
 
-    Half the room goes to the last lines; the rest to the lines around each
-    marker, the latest first, and then to more of the end. A gap is "...".
+    The colors come off first. The marked lines lead: each marker, then the
+    lines around it (a few after, for an exception's first frames), and the
+    rest of the room goes to the last lines. A gap is "...".
     """
+    text = ANSI_ESCAPE.sub("", text or "")
     if not text or len(text.encode("utf-8", "replace")) <= size:
-        return text or ""
+        return text
     lines = text.splitlines()
     marks = [i for i, line in enumerate(lines) if LOG_MARKERS.search(line)]
     if not marks:
@@ -1653,23 +1659,26 @@ def log_tail(text, size):
 
     keep = set()
     used = 0
-    index = len(lines) - 1
-    while index >= 0 and used + cost(index) <= size // 2:
-        keep.add(index)
-        used += cost(index)
-        index -= 1
-    for mark in reversed(marks):
-        window = [i for i in range(max(0, mark - 2), min(len(lines), mark + 4)) if i not in keep]
+    for mark in marks:
+        if used + cost(mark) <= size:
+            keep.add(mark)
+            used += cost(mark)
+    for mark in marks:
+        window = [i for i in range(max(0, mark - 2), min(len(lines), mark + 1 + LOG_AFTER_MARK))
+                  if i not in keep]
         extra = sum(cost(i) for i in window)
         if used + extra > size:
             continue
         keep.update(window)
         used += extra
+    index = len(lines) - 1
     while index >= 0 and used + cost(index) <= size:
         if index not in keep:
             keep.add(index)
             used += cost(index)
         index -= 1
+        while index in keep:
+            index -= 1
     if not keep:
         return landing_module.tail(text, size)
     out = []
