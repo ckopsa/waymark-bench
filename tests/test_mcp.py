@@ -140,7 +140,7 @@ class TestStdio(unittest.TestCase):
         mcp.serve_stdio(self.bench, io.StringIO("\n".join(lines) + "\n"), output)
         answers = [json.loads(row) for row in output.getvalue().splitlines()]
         self.assertEqual([answer["id"] for answer in answers], [1, 2, 3])
-        self.assertEqual(len(answers[1]["result"]["tools"]), 15)
+        self.assertEqual(len(answers[1]["result"]["tools"]), 16)
         self.assertTrue(answers[2]["result"]["structuredContent"]["result"]["created"])
 
 
