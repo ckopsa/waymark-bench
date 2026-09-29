@@ -1,8 +1,10 @@
 """One test for each tool, and one test for each refusal."""
 
+import importlib.util
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -1072,6 +1074,27 @@ class TestCheck(BenchCase):
             answer = self.ok("check", branch="work")
         self.assertTrue(answer["ok"])
         self.assertIn("clj-kondo not installed", answer["unavailable"][0])
+
+    BROKEN_WORKFLOW = "name: tests\non:\n  push: [main\njobs: {}\n"
+
+    def test_check_says_when_no_yaml_parser_is_on_the_rig(self):
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/ci.yml"), self.BROKEN_WORKFLOW)
+        with mock.patch.dict(sys.modules, {"yaml": None}):
+            answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"])
+        self.assertNotIn(".github/workflows/ci.yml", answer["skipped"])
+        self.assertIn("no YAML parser", answer["unavailable"][0])
+
+    @unittest.skipUnless(importlib.util.find_spec("yaml"), "PyYAML is not installed")
+    def test_a_github_yaml_parse_error_is_found(self):
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/ci.yml"), self.BROKEN_WORKFLOW)
+        util.write(os.path.join(path, ".github/workflows/ok.yaml"), "name: ok\non: push\n")
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        self.assertEqual([f["path"] for f in answer["findings"]], [".github/workflows/ci.yml"])
+        self.assertGreater(answer["findings"][0]["line"], 1)
 
     @unittest.skipUnless(shutil.which("clj-kondo"), "clj-kondo is not on PATH")
     def test_clj_kondo_names_an_unbalanced_let_binding(self):

@@ -983,6 +983,28 @@ def kondo_errors(program, worktree, paths):
     ]
 
 
+def yaml_errors(places, unavailable):
+    """Parses each (full, rel) YAML file. Gives a finding for each file that does not parse."""
+    try:
+        import yaml
+    except ImportError:
+        unavailable.append("no YAML parser (PyYAML) on the rig: the .github YAML files were not parsed")
+        return []
+    findings = []
+    for full, rel in places:
+        with open(full, "rb") as handle:
+            source = handle.read()
+        try:
+            for _ in yaml.safe_load_all(source):
+                pass
+        except yaml.YAMLError as exc:
+            mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+            problem = getattr(exc, "problem", None) or str(exc)
+            findings.append({"path": rel, "line": mark.line + 1 if mark else 1,
+                             "col": mark.column + 1 if mark else 1, "message": "YAML: %s" % problem})
+    return findings
+
+
 BASH_ERROR = re.compile(r"^.*?: line (\d+): (.*)$")
 
 
@@ -1006,14 +1028,15 @@ def shell_errors(program, worktree, rel):
 
 
 def check(bench, args):
-    """Lints the files a change touched: Clojure forms, Python compiles, shell parses. It never writes."""
+    """Lints the files a change touched: Clojure forms, Python compiles, shell parses,
+    .github YAML parses. It never writes."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     given = args.get("paths")
     if given is not None and (not isinstance(given, list)
                               or not all(isinstance(item, str) and item for item in given)):
         raise Refusal("input", field="paths", reason="paths is a list of paths")
-    findings, skipped, unavailable, clojure, shell = [], [], [], [], []
+    findings, skipped, unavailable, clojure, shell, workflows = [], [], [], [], [], []
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
         if given:
@@ -1043,8 +1066,12 @@ def check(bench, args):
                     findings.append({"path": rel, "line": 1, "col": 1, "message": str(exc)})
             elif rel.endswith(".sh"):
                 shell.append(rel)
+            elif rel.startswith(".github/") and rel.endswith((".yml", ".yaml")):
+                workflows.append((full, rel))
             else:
                 skipped.append(rel)
+        if workflows:
+            findings.extend(yaml_errors(workflows, unavailable))
         if shell:
             program = shutil.which("bash")
             if not program:
