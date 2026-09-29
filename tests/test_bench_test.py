@@ -282,6 +282,57 @@ class TestTheTestTool(LandingCase):
         self.assertNotIn("demo", self.bench.config.repos)
 
 
+class TestTrainChecks(LandingCase):
+    """train_checks dispatches the workflow it is given and names it."""
+
+    setUp = TestTheTestTool.setUp
+    sleep = TestTheTestTool.sleep
+    fake_http = TestTheTestTool.fake_http
+    make_test = TestTheTestTool.make_test
+
+    def train(self, workflow, shows=True):
+        """Pushes train/one and serves run 61 of this workflow on it once dispatched."""
+        path = util.clone(self.root, self.clone_url, name="train")
+        util.push_change(path, "train/one", "docs/t.txt", "train\n")
+        head = util.git(["rev-parse", "HEAD"], cwd=path).strip()
+        runs = "/actions/workflows/%s/runs" % workflow
+        run = {"id": 61, "status": "queued", "head_sha": head, "head_branch": "train/one",
+               "html_url": "https://github.com/o/r/actions/runs/61", "name": "checks"}
+        self.answers = {"/actions/workflows/%s/dispatches" % workflow: ("POST", {}),
+                        runs: ("GET", {"workflow_runs": []})}
+        self.after_dispatch = {runs: ("GET", {"workflow_runs": [run]})} if shows else {}
+        self.calls = []
+        return head
+
+    def dispatched(self):
+        return [path for method, path, body in self.calls if method == "POST"]
+
+    def test_a_given_workflow_is_dispatched_and_echoed(self):
+        self.make_test()
+        head = self.train("checks.yml")
+        answer = self.ok("train_checks", branch="train/one", workflow="checks.yml")
+        self.assertEqual(self.dispatched(), ["/actions/workflows/checks.yml/dispatches"])
+        self.assertEqual(answer["workflow"], "checks.yml")
+        self.assertEqual(answer["run_id"], 61)
+        self.assertEqual(answer["head"], head)
+
+    def test_without_a_workflow_the_default_is_dispatched_and_named(self):
+        self.make_test()
+        self.train("tests.yml")
+        answer = self.ok("train_checks", branch="train/one")
+        self.assertEqual(self.dispatched(), ["/actions/workflows/tests.yml/dispatches"])
+        self.assertEqual(answer["workflow"], "tests.yml")
+        self.assertEqual(answer["run_id"], 61)
+
+    def test_the_workflow_is_named_when_no_run_showed(self):
+        self.make_test()
+        head = self.train("checks.yml", shows=False)
+        answer = self.ok("train_checks", branch="train/one", workflow="checks.yml")
+        self.assertIsNone(answer["run_id"])
+        self.assertEqual(answer["workflow"], "checks.yml")
+        self.assertEqual(answer["head"], head)
+
+
 class TestTrain(LandingCase):
     """The merge train: build, land and delete a train/* branch."""
 

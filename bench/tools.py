@@ -2546,7 +2546,8 @@ def train_checks(bench, args):
                 _sleep(TEST_FIND_SECONDS)
     except forge.ForgeError as exc:
         raise Refusal("forge", reason=git.scrub(str(exc)))
-    return {"repo": repo.name, "branch": branch, "run_id": run_id, "head": head}
+    return {"repo": repo.name, "branch": branch, "workflow": workflow, "run_id": run_id,
+            "head": head}
 
 
 def train_status(bench, args):
@@ -3386,8 +3387,10 @@ TOOL_SPECS = [
         "function": train_checks,
         "description": (
             "Dispatches the check workflow on a pushed train branch, as test does but with "
-            "no narrowing, and answers {run_id, head}. run_id is null when no run showed "
-            "within about 15 s: give train_status the branch and head instead. The "
+            "no narrowing, and answers {workflow, run_id, head}: workflow is the one it "
+            "dispatched, the given one or the test block's. run_id is null when no run "
+            "showed within about 15 s: give train_status the branch, head and workflow "
+            "instead. The "
             "refusals are not_train, not_pushed, no_test_workflow and forge."
         ),
         "schema": {
