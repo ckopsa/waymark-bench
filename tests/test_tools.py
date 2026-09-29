@@ -753,6 +753,35 @@ class TestSubmit(BenchCase):
         parents = util.git(["log", "-1", "--format=%P", done["commit"]], cwd=path).split()
         self.assertEqual(len(parents), 2)
 
+    def test_submit_refuses_a_merge_whose_files_still_hold_markers(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")
+        self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/a.txt", "alpha\ntheirs\ncharlie\n")
+        self.assertFalse(self.ok("pull", branch="work", **{"from": "base"})["merged"])
+        head = util.git(["rev-parse", "HEAD"], cwd=path).strip()
+        answer = self.refused("submit", branch="work", message="the markers")
+        self.assertEqual(answer["refused"], "conflicts")
+        self.assertEqual(answer["paths"], ["docs/a.txt"])
+        self.assertEqual(util.git(["rev-parse", "HEAD"], cwd=path).strip(), head)
+        util.git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=path)
+
+    def test_submit_over_the_ceiling_keeps_the_unmerged_entries(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")
+        self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/a.txt", "alpha\ntheirs\ncharlie\n")
+        self.assertFalse(self.ok("pull", branch="work", **{"from": "base"})["merged"])
+        # resolved but not staged; a file of its own puts the change over the ceiling
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nboth\ncharlie\n")
+        util.write(os.path.join(path, "mine.txt"), "line\n" * 40)
+        answer = self.refused("submit", branch="work", message="the merge", max_lines=10)
+        self.assertEqual(answer["refused"], "over_ceiling")
+        unmerged = util.git(["diff", "--name-only", "--diff-filter=U"], cwd=path).split()
+        self.assertEqual(unmerged, ["docs/a.txt"])
+
     def test_submit_refuses_a_push_that_does_not_land(self):
         path = self.prepared()
         other = util.clone(self.root, self.clone_url)

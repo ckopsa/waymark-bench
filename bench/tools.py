@@ -1484,8 +1484,26 @@ def submit(bench, args):
         target = land.target if land else bench.base_of(repo, branch)
         against = "HEAD"
         if paths:
+            if git.ref_exists("MERGE_HEAD", cwd=worktree):
+                marked = marked_paths(worktree, unmerged_paths(worktree))
+                if marked:
+                    raise Refusal("conflicts", paths=marked, merge_in_progress=True,
+                                  remedy="resolve the conflict markers in these paths, "
+                                         "then submit again")
+            # A refusal puts the index back byte for byte, as _scratch_commit does:
+            # a reset keeps MERGE_HEAD but drops the unmerged entries, and a later
+            # pull's finish_merge would then find none and commit the markers.
+            index = os.path.join(worktree, git.line(["rev-parse", "--git-path", "index"],
+                                                    cwd=worktree))
+            saved = index + ".bench-submit"
+            shutil.copyfile(index, saved)
             git.run(["add", "-A", "--", "."], cwd=worktree)
-            against = _against_of(bench, repo, worktree, target, fetch=max_lines is not None)
+            try:
+                against = _against_of(bench, repo, worktree, target,
+                                      fetch=max_lines is not None)
+            except BaseException:
+                os.replace(saved, index)
+                raise
             stat = git.out(["diff", "--cached", "--numstat", against], cwd=worktree)
             workflows = []
             for row in stat.splitlines():
@@ -1502,17 +1520,14 @@ def submit(bench, args):
             if max_lines is not None:
                 ceiling = _int(args, "max_lines", 0, 0, 1000000)
                 if added + removed > ceiling:
-                    # A pathspec unstages without git reset's other work: a
-                    # path-less reset also drops MERGE_HEAD, and a merge from
-                    # pull would then commit with one parent.
-                    git.run(["reset", "-q", "--", "."], cwd=worktree, check=False)
+                    os.replace(saved, index)
                     raise Refusal("over_ceiling", lines=added + removed, max_lines=ceiling,
                                   files=files, against=against, target=target,
                                   remedy="make the change smaller, or raise the ceiling")
             credential = bench.credentials.get(repo.name) or {}
             if workflows and "workflows" in (credential.get("missing") or []):
                 # GitHub rejects the push of a workflow file without it.
-                git.run(["reset", "-q", "--", "."], cwd=worktree, check=False)
+                os.replace(saved, index)
                 raise Refusal("missing_workflow_permission", repo=repo.name,
                               permission="workflows", classic_scope="workflow", paths=workflows,
                               reason="the rig's GitHub token lacks the workflows permission, "
@@ -1524,7 +1539,9 @@ def submit(bench, args):
                 commit_args += ["--trailer", item]
             code, text, err = git.run(commit_args, cwd=worktree, check=False)
             if code != 0:
+                os.replace(saved, index)
                 raise Refusal("commit_failed", reason=(err or text).strip()[:400])
+            os.remove(saved)
             committed = True
         elif not land or not _has_work_to_land(bench, repo, branch, worktree):
             raise Refusal("nothing_to_commit", repo=repo.name, branch=branch)
