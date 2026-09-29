@@ -483,11 +483,51 @@ def undo_merge(worktree, before):
     return wrote
 
 
+def _ledger_path(worktree):
+    """The worktree's file of the paths the edit tools wrote since the last submit."""
+    return os.path.join(worktree, git.line(["rev-parse", "--git-path", "bench-written"],
+                                           cwd=worktree))
+
+
+def written_paths(worktree):
+    """Gives the paths the edit tools wrote since the last submit, as a set."""
+    try:
+        with open(_ledger_path(worktree), "r", encoding="utf-8") as handle:
+            return set(line for line in handle.read().split("\n") if line)
+    except FileNotFoundError:
+        return set()
+
+
+def note_written(worktree, paths):
+    """Adds paths to the worktree's ledger of what the edit tools wrote."""
+    known = written_paths(worktree)
+    fresh = sorted(set(name for name in paths if name and name not in known))
+    if fresh:
+        with open(_ledger_path(worktree), "a", encoding="utf-8") as handle:
+            handle.write("".join(name + "\n" for name in fresh))
+
+
+def clear_written(worktree):
+    """Empties the ledger: a commit holds what the edit tools wrote."""
+    try:
+        os.remove(_ledger_path(worktree))
+    except FileNotFoundError:
+        pass
+
+
+def _is_written(name, written):
+    """True when the edit tools wrote name, or a path under it for an untracked directory."""
+    if name in written:
+        return True
+    return name.endswith("/") and any(path.startswith(name) for path in written)
+
+
 def drop_stray(repo, bare, worktree, branch):
-    """Resets a dirty worktree whose head is already pushed. Gives the paths it dropped.
+    """Resets the stray paths of a worktree whose head is already pushed. Gives the paths it dropped.
 
     The head is pushed when it is origin/<branch> or an ancestor of it, so
-    the uncommitted paths are no seat's work: a failed pull left them. It
+    an uncommitted path the edit tools did not write is no seat's work: a
+    failed pull left it. A path in the ledger of written paths is kept. It
     drops nothing when the branch is not on the remote, when the branch has
     commits the remote does not, or while a merge is in progress. An
     untracked path that matches a deny glob is kept.
@@ -501,11 +541,22 @@ def drop_stray(repo, bare, worktree, branch):
     code = git.run(["merge-base", "--is-ancestor", "HEAD", remote], cwd=worktree, check=False)[0]
     if code != 0:
         return []
-    git.run(["reset", "--hard", "HEAD"], cwd=worktree)
-    keep = [arg for pattern in repo.deny for arg in ("-e", pattern)]
-    git.run(["clean", "-fd"] + keep, cwd=worktree)
+    written = written_paths(worktree)
+    stray = [name for name in dirty if not _is_written(name, written)]
+    if not stray:
+        return []
+    listed = git.out(["ls-tree", "-r", "-z", "--name-only", "HEAD", "--"] + stray, cwd=worktree)
+    in_head = set(name for name in listed.split("\0") if name)
+    if in_head:
+        git.run(["checkout", "HEAD", "--"] + sorted(in_head), cwd=worktree)
+    added = [name for name in stray if name not in in_head]
+    if added:
+        git.run(["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"] + added,
+                cwd=worktree, check=False)
+        keep = [arg for pattern in repo.deny for arg in ("-e", pattern)]
+        git.run(["clean", "-fd"] + keep + ["--"] + added, cwd=worktree)
     left = set(status_paths(worktree))
-    return [name for name in dirty if name not in left]
+    return [name for name in stray if name not in left]
 
 
 # ------------------------------------------------------------------ tools
@@ -1398,6 +1449,8 @@ def _edit(bench, args, edits, problems=None):
         if problems:
             raise _refused_items(problems)
         plan.write()
+        note_written(worktree, [name for result, _ in results
+                                for name in (result["path"], result.get("from"))])
         answers = []
         for result, full in results:
             if full is not None and os.path.isfile(full):
@@ -1598,6 +1651,7 @@ def submit(bench, args):
                 os.replace(saved, index)
                 raise Refusal("commit_failed", reason=(err or text).strip()[:400])
             os.remove(saved)
+            clear_written(worktree)
             committed = True
         elif not land or not _has_work_to_land(bench, repo, branch, worktree):
             raise Refusal("nothing_to_commit", repo=repo.name, branch=branch)
@@ -2105,6 +2159,7 @@ def discard(bench, args):
         git.run(["merge", "--abort"], cwd=worktree, check=False)
         git.run(["reset", "--hard", target], cwd=worktree)
         git.run(["clean", "-fd"], cwd=worktree)
+        clear_written(worktree)
         return {"repo": repo.name, "branch": branch, "head": head_of(worktree), "dirty": 0,
                 "dropped": False}
 
