@@ -403,7 +403,12 @@ branch is refused `not_train`. None of them force-pushes a base.
 - `train_land {base, branch, expect_base_head, head}` fast-forwards the
   base to `head` with a plain push when the base is still at
   `expect_base_head`, and answers `{landed: true}`. A moved base is
-  refused `base_moved` and nothing changes.
+  refused `base_moved` with the `base_head` it is at, and nothing
+  changes: build the train again. When the forge rejects the push itself
+  (branch protection, required checks, a hook), the answer is
+  `push_refused` with the forge's words in `reason`; building again will
+  not help. `expect_base_head` must be a whole sha of 40 hex characters
+  (case and spaces do not matter); any other value is refused `input`.
 - `train_delete {branch}` deletes the train branch on the remote.
 
 ## The tests

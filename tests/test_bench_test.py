@@ -451,7 +451,31 @@ class TestTrain(LandingCase):
         answer = self.refused("train_land", base="main", branch="train/one",
                               expect_base_head=base, head=head)
         self.assertEqual(answer["refused"], "base_moved")
+        self.assertEqual(answer["base_head"], moved)
         self.assertEqual(self.base_head(), moved)
+
+    def test_land_answers_push_refused_when_the_forge_rejects_the_push(self):
+        base = self.base_head()
+        head = self.build([1])["head"]
+        hook = os.path.join(self.clone_url[len("file://"):], "hooks", "pre-receive")
+        with open(hook, "w") as out:
+            out.write("#!/bin/sh\necho 'GH006: Protected branch update failed for refs/heads/main.' >&2\nexit 1\n")
+        os.chmod(hook, 0o755)
+        answer = self.refused("train_land", base="main", branch="train/one",
+                              expect_base_head=base.upper(), head=head)
+        self.assertEqual(answer["refused"], "push_refused")
+        self.assertIn("branch protection", answer["reason"])
+        self.assertIn("GH006", answer["reason"])
+        self.assertEqual(self.base_head(), base)
+
+    def test_land_refuses_a_short_sha_as_input(self):
+        base = self.base_head()
+        head = self.build([1])["head"]
+        answer = self.refused("train_land", base="main", branch="train/one",
+                              expect_base_head=base[:7], head=head)
+        self.assertEqual(answer["refused"], "input")
+        self.assertEqual(answer["field"], "expect_base_head")
+        self.assertEqual(self.base_head(), base)
 
     def test_delete_refuses_a_branch_that_is_not_a_train(self):
         answer = self.refused("train_delete", branch="main")

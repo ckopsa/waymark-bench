@@ -2652,7 +2652,10 @@ def train_land(bench, args):
     repo = bench.repo(args.get("repo"))
     base = _train_base(repo, args)
     branch = _train_branch(args)
-    expect = _text(args, "expect_base_head", required=True)
+    expect = _text(args, "expect_base_head", required=True).strip().lower()
+    if len(expect) != 40 or not all(c in "0123456789abcdef" for c in expect):
+        raise Refusal("input", field="expect_base_head",
+                      reason="a whole sha of 40 hex characters is necessary")
     head = _text(args, "head", required=True)
     with bench.lock(repo.name):
         bare = bench.fetch(repo)
@@ -2673,8 +2676,12 @@ def train_land(bench, args):
         code, text, err = git.run(["push", "origin", head + ":refs/heads/" + base],
                                   cwd=bare, check=False, timeout=600)
     if code != 0:
-        raise Refusal("base_moved", repo=repo.name, base=base,
-                      reason=(err or text).strip()[:400])
+        # the base was where we expected: the forge refused the push itself,
+        # so building the train again would only be refused again
+        said = (err or text).strip()
+        if "protected branch" in said.lower() or "GH006" in said:
+            said = "branch protection refused the push: " + said
+        raise Refusal("push_refused", repo=repo.name, base=base, reason=said[:400])
     return {"repo": repo.name, "base": base, "branch": branch, "head": head, "landed": True}
 
 
@@ -3510,8 +3517,11 @@ TOOL_SPECS = [
             "Lands a merge train: when the base is still at expect_base_head and the train "
             "branch at head, the rig fast-forwards the base to head with a plain push (never "
             "a force), and GitHub shows each merged pull request as merged. Answers "
-            "{landed: true}. The refusals are base_moved (nothing changed), head_moved, "
-            "not_fast_forward and not_train."
+            "{landed: true}. The refusals are base_moved (the base is not at "
+            "expect_base_head, with base_head: nothing changed, build the train again), "
+            "push_refused (the forge rejected the push, for instance branch protection: "
+            "building again will not help), head_moved, not_fast_forward, not_train, and "
+            "input when expect_base_head is not a sha of 40 hex characters."
         ),
         "schema": {
             "type": "object",
