@@ -225,3 +225,67 @@ class TestTheTestTool(LandingCase):
         self.assertEqual(answer["refused"], "input")
         self.assertEqual(answer["field"], "test")
         self.assertNotIn("demo", self.bench.config.repos)
+
+
+class TestTrain(LandingCase):
+    """The merge train: build, land and delete a train/* branch."""
+
+    def setUp(self):
+        LandingCase.setUp(self)
+        self.make({"stages": [], "pull_request": PULL_REQUEST})
+        # pull requests 1 and 2 change the same line: 2 conflicts once 1 is in
+        for number, word in ((1, "delta"), (2, "echo")):
+            path = util.clone(self.root, self.clone_url, name="pr%d" % number)
+            util.push_change(path, "pr%d" % number, "docs/a.txt", "alpha\n%s\ncharlie\n" % word)
+            sha = util.git(["rev-parse", "HEAD"], cwd=path).strip()
+            self.answers["/pulls/%d" % number] = ("GET", {
+                "number": number, "state": "open", "base": {"ref": "main"},
+                "head": {"ref": "pr%d" % number, "sha": sha}})
+
+    def base_head(self):
+        return util.git(["ls-remote", self.clone_url, "refs/heads/main"], cwd=self.root).split()[0]
+
+    def build(self, prs):
+        return self.ok("train_build", base="main", branch="train/one", prs=prs)
+
+    def test_build_skips_a_conflicting_pull_request(self):
+        base = self.base_head()
+        answer = self.build([1, 2])
+        self.assertEqual(answer["merged"], [1])
+        self.assertEqual(answer["conflicted"], [2])
+        self.assertEqual(answer["base_head"], base)
+        self.assertEqual(self.remote_head("train/one"), answer["head"])
+        parents = util.git(["log", "-1", "--format=%P", answer["head"]],
+                           cwd=self.bench.bare_dir("demo")).split()
+        self.assertEqual(parents[0], base)
+        self.assertEqual(self.base_head(), base)
+
+    def test_land_fast_forwards_the_base(self):
+        base = self.base_head()
+        head = self.build([1])["head"]
+        answer = self.ok("train_land", base="main", branch="train/one",
+                         expect_base_head=base, head=head)
+        self.assertTrue(answer["landed"])
+        self.assertEqual(self.base_head(), head)
+
+    def test_land_refuses_when_the_base_moved(self):
+        base = self.base_head()
+        head = self.build([1])["head"]
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/b.txt", "the base moved\n")
+        moved = self.base_head()
+        answer = self.refused("train_land", base="main", branch="train/one",
+                              expect_base_head=base, head=head)
+        self.assertEqual(answer["refused"], "base_moved")
+        self.assertEqual(self.base_head(), moved)
+
+    def test_delete_refuses_a_branch_that_is_not_a_train(self):
+        answer = self.refused("train_delete", branch="main")
+        self.assertEqual(answer["refused"], "not_train")
+        self.assertTrue(self.base_head())
+
+    def test_delete_removes_a_train_branch(self):
+        self.build([1])
+        self.ok("train_delete", branch="train/one")
+        self.assertEqual(util.git(["ls-remote", self.clone_url, "refs/heads/train/one"],
+                                  cwd=self.root), "")
