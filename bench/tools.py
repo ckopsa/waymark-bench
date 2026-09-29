@@ -2644,12 +2644,18 @@ def train_status(bench, args):
     try:
         client = forge.client(repo)
         if args.get("run_id") is not None:
-            run = client.pipeline(_int(args, "run_id", 0, 1, 2 ** 63))
+            run_id = _int(args, "run_id", 0, 1, 2 ** 63)
+            run = dict(client.pipeline(run_id))
+            if run.get("id") is None:
+                run["id"] = run_id
         else:
             branch = _train_branch(args)
             head = _text(args, "head", required=True)
+            skip = None
+            if args.get("skip_run_id") is not None:
+                skip = _int(args, "skip_run_id", 0, 1, 2 ** 63)
             runs = [run for run in client.workflow_runs(_train_workflow(repo, args), branch)
-                    if run.get("commit") == head]
+                    if run.get("commit") == head and (skip is None or run.get("id") != skip)]
             if not runs:
                 return {"repo": repo.name, "run_id": None, "state": "pending",
                         "head": head, "url": None}
@@ -3547,7 +3553,9 @@ TOOL_SPECS = [
         "description": (
             "Reads one train check run, once, and answers {run_id, state: pending, success, "
             "failure or cancelled, head, url}. Give run_id, or with a null run_id the "
-            "branch and head (and workflow) train_checks answered. The refusals are "
+            "branch and head (and workflow) train_checks answered; by branch, skip_run_id "
+            "passes over that run (a cancelled run a retry left behind). The answer always "
+            "names run_id, null only while no run has the head. The refusals are "
             "not_train and forge."
         ),
         "schema": {
@@ -3558,6 +3566,9 @@ TOOL_SPECS = [
                 "branch": _BRANCH,
                 "head": {"type": "string", "description": "With no run_id: the head."},
                 "workflow": {"type": "string", "description": "With no run_id: the workflow."},
+                "skip_run_id": {"type": "integer", "description": (
+                    "With no run_id: a run to pass over, the stale run a retry left behind. "
+                    "Ignored when absent.")},
                 "seat": _SEAT, "sitting": _SITTING,
             },
             "required": ["repo"],
