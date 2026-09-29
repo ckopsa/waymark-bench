@@ -54,6 +54,21 @@ remote. When one of the two is more than zero, `note` names the pull to
 use: `pull` from `head` moves the worktree to the remote branch, and
 `pull` from `base` merges the base in.
 
+`dirty` counts the uncommitted paths of the worktree, and `dirty_paths`
+names them, up to 100. When a worktree that exists is dirty and its head
+is already pushed (it is `origin/<branch>` or an ancestor of it), the
+uncommitted paths are no seat's work: a failed pull left them. `prepare`
+resets them and names them in `dropped`, up to 100. It drops nothing
+when the branch is not on the remote, when the branch has commits the
+remote does not, or while a merge is in progress, and it keeps an
+untracked path that matches a `deny` glob. `dropped` is `[]` on a
+worktree that `prepare` made.
+
+A `pull` that fails puts the worktree back as it was before it. Its
+refusal, `not_fast_forward` (from `head`) or `merge_failed` (from
+`base`, with no conflicts), carries `reset`: the paths it put back, up
+to 100.
+
 `conflicts` trial-merges the base (`base`, default the repo's default
 branch) into a clean worktree, gives the unmerged `paths`, and aborts
 the merge, so the worktree is left as it was. A dirty worktree is
