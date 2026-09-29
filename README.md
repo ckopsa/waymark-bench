@@ -187,6 +187,12 @@ so one time per head (`already_rerun` after), and refuses `not_pushed`,
 
 `test` dispatches one test selection of a branch on the repository's
 own CI and answers at once `{run_id, run_url, conclusion: pending}`.
+It tests the worktree as it stands: when the worktree holds uncommitted
+edits, `test` commits them to a scratch commit on the head, pushes that
+to the `bench-test/<branch>` scratch ref (never the work branch or the
+pull request) and answers `head` (the scratch commit),
+`dirty_included: true` and `paths`; a clean worktree runs its head with
+`dirty_included: false`. `test_result` echoes `dirty_included`.
 `test_result {run_id, wait_seconds}` reads that run every 5 seconds for
 up to `wait_seconds` (40 by default, 45 at most) and answers `success`,
 `cancelled`, `failure` with `failures: [{test, job, lines}]` (4 KB in

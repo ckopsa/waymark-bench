@@ -2059,9 +2059,10 @@ def _test_spec(repo):
 
 
 def _dispatch_test(bench, repo, spec, client, args):
-    """Pushes the worktree head to the scratch ref and dispatches the test
-    workflow on it. Answers pending with the run that dispatch started, or with
-    run_id null when no run showed within about fifteen seconds."""
+    """Pushes the worktree to the scratch ref and dispatches the test workflow
+    on it: a dirty worktree rides a scratch commit on the head, and the work
+    branch never moves. Answers pending with the run that dispatch started, or
+    with run_id null when no run showed within about fifteen seconds."""
     branch = check_branch(_text(args, "branch", required=True))
     select = _text(args, "select", required=True)
     scratch = TEST_PREFIX + branch
@@ -2077,13 +2078,21 @@ def _dispatch_test(bench, repo, spec, client, args):
                           run_id=running[0]["id"], run_url=running[0].get("url"),
                           reason="a test run of this branch is not done: "
                                  "read it with test_result, then test again")
+        head, paths = _scratch_commit(worktree, head)
         # the scratch ref, never the pull request's branch
-        git.run(["push", "--force", "origin", "HEAD:refs/heads/" + scratch],
+        git.run(["push", "--force", "origin", (head or "HEAD") + ":refs/heads/" + scratch],
                 cwd=worktree, timeout=600)
+        meta = bench.meta_read(repo.name)
+        entry = meta.setdefault(branch, {})
+        entry["test_head"] = head
+        if paths:
+            entry["dirty_heads"] = (entry.get("dirty_heads") or [])[-9:] + [head]
+        bench.meta_write(repo.name, meta)
     dispatched_at = _utc_stamp(time.time() - TEST_SKEW_SECONDS)
     client.dispatch_workflow(spec["workflow"], scratch, {spec["input"]: select})
     answer = {"repo": repo.name, "branch": branch, "head": head, "conclusion": "pending",
-              "run_id": None, "run_url": None, "dispatched_at": dispatched_at}
+              "run_id": None, "run_url": None, "dispatched_at": dispatched_at,
+              "dirty_included": bool(paths), "paths": paths}
     for attempt in range(TEST_FIND_TRIES):
         runs = [run for run in client.workflow_runs(spec["workflow"], scratch)
                 if run["id"] not in before and run.get("commit") == head]
@@ -2114,7 +2123,9 @@ def test_result(bench, args):
                         "run_url": None, "elapsed_s": _age(since)}
         run = _wait_for_run(client, run_id, max(0, deadline - _clock()))
         answer = {"repo": repo.name, "run_id": run["id"], "run_url": run.get("url"),
-                  "branch": run.get("branch"), "head": run.get("commit")}
+                  "branch": run.get("branch"), "head": run.get("commit"),
+                  "dirty_included": _dirty_included(bench, repo, run.get("branch"),
+                                                    run.get("commit"))}
         start = _stamp_seconds(run.get("created"))
         if run.get("state") != "completed":
             answer.update(conclusion="pending", elapsed_s=_age(start))
@@ -2138,7 +2149,9 @@ def _find_test_run(bench, repo, spec, client, args, deadline):
     head = args.get("head") if isinstance(args.get("head"), str) else None
     if not head:
         with bench.lock(repo.name):
-            head = head_of(bench.worktree(repo, branch))
+            # the head the last test pushed, which a dirty worktree made a scratch commit
+            head = ((bench.meta_read(repo.name).get(branch) or {}).get("test_head")
+                    or head_of(bench.worktree(repo, branch)))
     while True:
         runs = [run for run in client.workflow_runs(spec["workflow"], TEST_PREFIX + branch)
                 if run.get("commit") == head and (run.get("created") or "") >= since]
@@ -2149,6 +2162,32 @@ def _find_test_run(bench, repo, spec, client, args, deadline):
         if left <= 0:
             return None
         _sleep(min(TEST_POLL_SECONDS, left))
+
+
+def _scratch_commit(worktree, head):
+    """Commits the worktree's uncommitted edits on top of head without moving the
+    branch. Gives (commit, paths); a clean worktree gives (head, [])."""
+    paths = status_paths(worktree)
+    if not paths or not head:
+        return head, []
+    git.run(["add", "-A"], cwd=worktree)
+    try:
+        tree = git.line(["write-tree"], cwd=worktree)
+    finally:
+        # the edits stay in the worktree, unstaged as they were
+        git.run(["reset", "-q"], cwd=worktree)
+    commit = git.line(["commit-tree", tree, "-p", head, "-m",
+                       "bench test: the worktree's uncommitted edits"], cwd=worktree)
+    return commit, paths
+
+
+def _dirty_included(bench, repo, scratch, commit):
+    """Gives whether a test run's commit carried a worktree's uncommitted edits."""
+    if not scratch or not scratch.startswith(TEST_PREFIX) or not commit:
+        return False
+    with bench.lock(repo.name):
+        entry = bench.meta_read(repo.name).get(scratch[len(TEST_PREFIX):]) or {}
+    return commit in (entry.get("dirty_heads") or [])
 
 
 def _scratch_exists(worktree, scratch):
