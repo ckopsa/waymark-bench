@@ -7,10 +7,11 @@ tools: `prepare`, `status`, `find`, `read`, `symbols`, `read_symbol`, `check`, `
 `test_result`, `enroll`, `repos`, `unenroll`, `train_build`, `train_checks`,
 `train_status`, `train_land` and `train_delete`. It
 needs Python
-3.11, git, and one library: pydantic-settings, for the settings.
+3.11, git, and two libraries: pydantic-settings, for the settings, and
+PyYAML, so `check` can parse the changed `.github` YAML files.
 
 ```
-uv sync                      # makes .venv with the one dependency
+uv sync                      # makes .venv with the two dependencies
 uv run python -m bench --http 8101 --config bench.json
 ```
 
