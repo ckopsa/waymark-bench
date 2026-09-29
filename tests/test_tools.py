@@ -140,6 +140,40 @@ class TestPrepare(BenchCase):
         with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "work in progress\n")
 
+    def test_prepare_keeps_the_paths_the_edit_tools_wrote(self):
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "work", "docs/head.txt", "from the remote branch\n")
+        path = self.prepared()
+        self.ok("edit", branch="work", path="docs/a.txt", old="bravo", new="delta")
+        self.ok("edit", branch="work", path="docs/made.txt", new="made\n", create=True)
+        util.write(os.path.join(path, "docs/stray.txt"), "stray\n")
+        again = self.ok("prepare", branch="work")
+        self.assertEqual(again["dropped"], ["docs/stray.txt"])
+        self.assertEqual(sorted(again["dirty_paths"]), ["docs/a.txt", "docs/made.txt"])
+        self.assertFalse(os.path.exists(os.path.join(path, "docs/stray.txt")))
+        self.assertTrue(os.path.isfile(os.path.join(path, "docs/made.txt")))
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "alpha\ndelta\ncharlie\n")
+
+    def test_prepare_drops_a_path_written_outside_the_edit_tools(self):
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "work", "docs/head.txt", "from the remote branch\n")
+        path = self.prepared()
+        self.ok("edit", branch="work", path="docs/made.txt", new="made\n", create=True)
+        util.write(os.path.join(path, "docs/a.txt"), "half a pull\n")
+        again = self.ok("prepare", branch="work")
+        self.assertEqual(again["dropped"], ["docs/a.txt"])
+        self.assertEqual(again["dirty_paths"], ["docs/made.txt"])
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "alpha\nbravo\ncharlie\n")
+
+    def test_submit_empties_the_ledger_of_written_paths(self):
+        path = self.prepared()
+        self.ok("edit", branch="work", path="docs/a.txt", old="bravo", new="delta")
+        self.assertEqual(tools.written_paths(path), {"docs/a.txt"})
+        self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
+        self.assertEqual(tools.written_paths(path), set())
+
 
 class TestStatus(BenchCase):
 
