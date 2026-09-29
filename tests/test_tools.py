@@ -487,6 +487,19 @@ class TestEdit(BenchCase):
         with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "alpha\nbravo\ncharlie\n")
 
+    def test_edit_list_with_allow_protected_writes_a_protected_path(self):
+        path = self.prepared()
+        answer = self.ok("edit_many", branch="work", allow_protected=True, edits=[
+            {"path": "docs/a.txt", "old": "alpha", "new": "ALPHA"},
+            {"path": ".github/workflows/ci.yml", "old": "name: ci", "new": "name: gate"},
+        ])
+        self.assertEqual([item["path"] for item in answer["edits"]],
+                         ["docs/a.txt", ".github/workflows/ci.yml"])
+        with open(os.path.join(path, ".github/workflows/ci.yml"), encoding="utf-8") as handle:
+            self.assertIn("name: gate", handle.read())
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "ALPHA\nbravo\ncharlie\n")
+
     def test_edit_list_beside_the_fields_of_one_edit_is_refused(self):
         self.prepared()
         answer = self.refused("edit_many", branch="work", path="docs/a.txt", delete=True,
