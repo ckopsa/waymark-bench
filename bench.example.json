@@ -5,6 +5,12 @@
       "clone_url": "https://github.com/ckopsa/waymark",
       "default_branch": "main",
       "deny": ["*.pem", "*.key", ".env*", "**/secrets/**"]
+    },
+    "ckopsa/waymark-bench": {
+      "clone_url": "https://github.com/ckopsa/waymark-bench",
+      "default_branch": "main",
+      "test": {"workflow": "tests.yml", "input": "only",
+               "select_pattern": "^[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)+$"}
     }
   }
 }

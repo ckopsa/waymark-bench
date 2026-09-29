@@ -202,6 +202,21 @@ and `test_result` never dispatches. When the run did not show within
 about 15 seconds, `test` answers `run_id: null` with `head` and
 `dispatched_at`, and `test_result` finds the run by them.
 
+The repository's `test` block is `{workflow, input, select_pattern}`.
+`select_pattern` is optional: a regex that the whole `select` must
+match, or `test` refuses `input` before it dispatches. Without it,
+`select` must have the Clojure shape: a namespace, dotted and ending in
+`-test` (`factory10.merge-line-test`), or `namespace/test-name`. A
+Python repository names its unittest shape, as waymark-bench does:
+
+```json
+"test": {"workflow": "tests.yml", "input": "only",
+         "select_pattern": "^[A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)+$"}
+```
+
+It passes `tests.test_bench_test` and `tests.test_bench_test.TestTrain`,
+and it refuses `test-factory`.
+
 The landing runs in the background, and `submit` answers at once with
 the landing running: follow it with `status` or `feedback`. Give `wait`
 to have `submit` wait up to that many seconds instead (the ceiling is
