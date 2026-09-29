@@ -432,6 +432,32 @@ def unmerged_paths(worktree):
             if name]
 
 
+def marked_paths(worktree, paths):
+    """Gives the paths that still hold a conflict marker."""
+    marked = []
+    for name in paths:
+        try:
+            with open(os.path.join(worktree, name), encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            continue
+        if any(line.startswith(("<<<<<<<", ">>>>>>>")) for line in lines):
+            marked.append(name)
+    return marked
+
+
+def finish_merge(worktree):
+    """Commits a merge in progress whose markers are gone. Gives the marked paths."""
+    marked = marked_paths(worktree, unmerged_paths(worktree))
+    if marked:
+        return marked
+    git.run(["add", "-A", "--", "."], cwd=worktree)
+    code, text, err = git.run(["commit", "--no-edit"], cwd=worktree, check=False)
+    if code != 0:
+        raise Refusal("commit_failed", reason=(err or text).strip()[:400])
+    return []
+
+
 # ------------------------------------------------------------------ tools
 
 
@@ -492,6 +518,7 @@ def status(bench, args):
         paths = status_paths(path)
         counts = git.line(["rev-list", "--left-right", "--count", "%s...HEAD" % base_head], cwd=path)
         behind, ahead = (counts.split() + ["0", "0"])[:2]
+        merging = git.ref_exists("MERGE_HEAD", cwd=path)
     item = bench.landings.get(repo, branch)
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 1024, CEILING_MAX_BYTES)
     return {
@@ -504,6 +531,7 @@ def status(bench, args):
         "paths": paths[:500],
         "ahead": int(ahead),
         "behind": int(behind),
+        "merge_in_progress": merging,
         "landing": item.view(max_bytes) if item else None,
     }
 
@@ -1277,6 +1305,13 @@ def pull(bench, args):
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
         bench.no_landing(repo, branch)
+        if git.ref_exists("MERGE_HEAD", cwd=worktree):
+            # A merge a conflicted pull left: commit it once its markers are gone.
+            marked = finish_merge(worktree)
+            if marked:
+                return {"repo": repo.name, "branch": branch, "head": head_of(worktree),
+                        "merged": False, "conflicts": marked, "merge_in_progress": True,
+                        "note": "the merge is in progress: remove the markers, then pull or submit"}
         bare = bench.fetch(repo)
         if source == "head":
             remote = "refs/remotes/origin/" + branch
@@ -1307,7 +1342,9 @@ def pull(bench, args):
             "head": head_of(worktree),
             "merged": code == 0,
             "conflicts": conflicts,
-            "note": "the markers stay in the files" if conflicts else "",
+            "merge_in_progress": bool(conflicts),
+            "note": ("the markers stay in the files and the merge stays in progress: "
+                     "remove them, then pull or submit") if conflicts else "",
         }
 
 
