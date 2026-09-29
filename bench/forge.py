@@ -240,6 +240,9 @@ class Bitbucket(Client):
     def merge_when_green(self, number, head_sha, required_checks, method="merge"):
         raise ForgeError("the rig merges a pull request itself only on github")
 
+    def land_pull_request(self, number, sha):
+        raise ForgeError("the rig lands a merge train only on github")
+
     def update_branch(self, number, head_sha):
         return {"refused": "unsupported",
                 "reason": "the rig updates a pull request's branch only on github"}
@@ -449,6 +452,24 @@ class GitHub(Client):
 
     def pull_request(self, number):
         return self._pr(self.request("GET", self.url("/pulls/%s" % number)))
+
+    def merge_pull_request(self, number, sha, method="merge"):
+        """The one merge call: GitHub refuses it when the head is not sha."""
+        return self.request("PUT", self.url("/pulls/%s/merge" % number),
+                            {"sha": sha, "merge_method": method})
+
+    def land_pull_request(self, number, sha):
+        """Merges one pull request at sha with a merge commit, without reading
+        its checks: branch protection judges them. Gives {state: merged, sha},
+        or {state: waiting, reason} while GitHub has not computed whether it
+        merges. GitHub's refusal raises ForgeError."""
+        data = self.request("GET", self.url("/pulls/%s" % number))
+        if data.get("merged") or data.get("merged_at"):
+            return {"state": "merged", "sha": data.get("merge_commit_sha")}
+        if data.get("mergeable") is None:
+            return {"state": "waiting",
+                    "reason": "github has not yet computed whether the pull request merges"}
+        return {"state": "merged", "sha": self.merge_pull_request(number, sha).get("sha")}
 
     def graphql(self, query, variables):
         """Asks the GraphQL API. GitHub answers 200 with `errors`, so the
@@ -672,8 +693,7 @@ class GitHub(Client):
             return {"state": "waiting", "pending": [],
                     "reason": "github has not yet computed whether the pull request merges"}
         try:
-            merged = self.request("PUT", self.url("/pulls/%s/merge" % number),
-                                  {"sha": head_sha, "merge_method": method})
+            merged = self.merge_pull_request(number, head_sha, method)
         except ForgeError as exc:
             return {"refused": "merge_refused", "reason": str(exc)}
         return {"state": "merged", "sha": merged.get("sha")}

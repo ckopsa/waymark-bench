@@ -401,14 +401,21 @@ branch is refused `not_train`. None of them force-pushes a base.
   Give that `workflow` to `train_status` with the branch and head.
 - `train_status {run_id}` (or `{branch, head, workflow}`) reads the run
   once and answers `{state: pending|success|failure|cancelled, head, url}`.
-- `train_land {base, branch, expect_base_head, head}` fast-forwards the
-  base to `head` with a plain push when the base is still at
-  `expect_base_head`, and answers `{landed: true}`. A moved base is
-  refused `base_moved` with the `base_head` it is at, and nothing
-  changes: build the train again. When the forge rejects the push itself
-  (branch protection, required checks, a hook), the answer is
-  `push_refused` with the forge's words in `reason`; building again will
-  not help. `expect_base_head` must be a whole sha of 40 hex characters
+- `train_land {base, branch, expect_base_head, head}` lands the train
+  through one pull request, so the base's branch protection stays on.
+  When the base is still at `expect_base_head` and the branch at `head`,
+  it opens a pull request from the branch into the base, titled
+  `Merge train: #a #b` with one line per rider (read from the train's
+  merge commits), or reuses the open one on a retry. It merges it at
+  sha `head` with a merge commit, never squash or rebase, so each
+  rider's commits stay reachable and GitHub marks each rider merged. It
+  answers `{landed: true, number, sha}`, or `{state: waiting, number,
+  pending}` while GitHub has not computed mergeability or a required
+  check is pending: ask again. A moved base is refused `base_moved` with
+  the `base_head` it is at, before any pull request is opened, and so is
+  GitHub's refusal that the base was modified: build the train again.
+  Any other GitHub refusal is `merge_refused` with its words in
+  `reason`. `expect_base_head` must be a whole sha of 40 hex characters
   (case and spaces do not matter); any other value is refused `input`.
 - `train_delete {branch}` deletes the train branch on the remote.
 

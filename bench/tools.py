@@ -2663,9 +2663,14 @@ def train_status(bench, args):
             "head": run.get("commit"), "url": run.get("url")}
 
 
+# the subject train_build gives each merge commit; train_land reads the riders from it
+TRAIN_MERGE = re.compile(r"^Merge pull request #(\d+) into ")
+
+
 def train_land(bench, args):
-    """Fast-forwards the base to the train's head with a plain push, while the
-    base is still where the train was built on."""
+    """Lands the train through one pull request from its branch into the base,
+    merged with a merge commit at head, while the base is still where the
+    train was built on."""
     repo = bench.repo(args.get("repo"))
     base = _train_base(repo, args)
     branch = _train_branch(args)
@@ -2689,17 +2694,49 @@ def train_land(bench, args):
         if code != 0:
             raise Refusal("not_fast_forward", repo=repo.name, base=base,
                           reason="the head does not hold the base")
-        # a plain push: the forge refuses it unless it fast-forwards the base
-        code, text, err = git.run(["push", "origin", head + ":refs/heads/" + base],
-                                  cwd=bare, check=False, timeout=600)
-    if code != 0:
-        # the base was where we expected: the forge refused the push itself,
-        # so building the train again would only be refused again
-        said = (err or text).strip()
-        if "protected branch" in said.lower() or "GH006" in said:
-            said = "branch protection refused the push: " + said
-        raise Refusal("push_refused", repo=repo.name, base=base, reason=said[:400])
-    return {"repo": repo.name, "base": base, "branch": branch, "head": head, "landed": True}
+        # the riders, from the merge commits train_build made
+        subjects = git.run(["log", "--merges", "--reverse", "--format=%s", expect + ".." + head],
+                           cwd=bare, check=False)[1]
+    riders = [int(found.group(1)) for found in map(TRAIN_MERGE.match, subjects.splitlines())
+              if found]
+    answer = {"repo": repo.name, "base": base, "branch": branch, "head": head}
+    client = None
+    try:
+        client = forge.client(repo)
+        # one pull request per train: a retry finds the one it opened
+        pr = client.find_pull_request(branch, base)
+        if pr is None:
+            pr = client.create_pull_request(
+                branch, base, "Merge train: " + (" ".join("#%d" % n for n in riders) or branch),
+                "\n".join("- #%d" % n for n in riders) or "A merge train of " + branch + ".")
+        answer["number"] = pr.get("number")
+        # a merge commit, never squash or rebase: every rider stays reachable and merged
+        landed = client.land_pull_request(pr.get("number"), head)
+    except forge.ForgeError as exc:
+        said = git.scrub(str(exc))
+        if "base branch was modified" in said.lower():
+            with bench.lock(repo.name):
+                now = git.rev_parse("refs/remotes/origin/" + base, cwd=bench.fetch(repo))
+            raise Refusal("base_moved", repo=repo.name, base=base, base_head=now,
+                          number=answer.get("number"), reason=said[:400])
+        if "required status check" in said.lower() and answer.get("number"):
+            return dict(answer, state="waiting", pending=_train_pending(client, head),
+                        reason=said[:400])
+        raise Refusal("merge_refused", repo=repo.name, base=base,
+                      number=answer.get("number"), reason=said[:400])
+    if landed.get("state") == "waiting":
+        return dict(answer, state="waiting", pending=_train_pending(client, head),
+                    reason=landed.get("reason"))
+    return dict(answer, landed=True, sha=landed.get("sha"))
+
+
+def _train_pending(client, head):
+    """Names the checks still pending on head, or none when the forge will not say."""
+    try:
+        states = client.check_states(head)
+    except forge.ForgeError:
+        return []
+    return sorted(name for name, state in states.items() if state == "pending")
 
 
 def train_delete(bench, args):
@@ -3531,14 +3568,18 @@ TOOL_SPECS = [
         "name": "train_land",
         "function": train_land,
         "description": (
-            "Lands a merge train: when the base is still at expect_base_head and the train "
-            "branch at head, the rig fast-forwards the base to head with a plain push (never "
-            "a force), and GitHub shows each merged pull request as merged. Answers "
-            "{landed: true}. The refusals are base_moved (the base is not at "
-            "expect_base_head, with base_head: nothing changed, build the train again), "
-            "push_refused (the forge rejected the push, for instance branch protection: "
-            "building again will not help), head_moved, not_fast_forward, not_train, and "
-            "input when expect_base_head is not a sha of 40 hex characters."
+            "Lands a merge train through one pull request: when the base is still at "
+            "expect_base_head and the train branch at head, the rig opens (or, on a retry, "
+            "reuses) a pull request from the train branch into the base, titled 'Merge train: "
+            "#a #b', and merges it at sha head with a merge commit (never squash or rebase), "
+            "so branch protection stays on and GitHub shows each rider merged. Answers "
+            "{landed: true, number, sha}, or {state: waiting, number, pending} while GitHub "
+            "has not computed mergeability or a required check is pending: ask again later. "
+            "The refusals are base_moved (the base is not at expect_base_head, or GitHub says "
+            "the base was modified, with base_head: build the train again), merge_refused "
+            "(any other GitHub refusal, with its words in reason), head_moved, "
+            "not_fast_forward, not_train, and input when expect_base_head is not a sha of 40 "
+            "hex characters."
         ),
         "schema": {
             "type": "object",
