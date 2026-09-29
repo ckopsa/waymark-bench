@@ -139,6 +139,23 @@ class TestTheTestTool(LandingCase):
         self.serve(answer["head"], "completed", "success")
         self.assertTrue(self.ok("test_result", run_id=31)["dirty_included"])
 
+    def test_a_refused_scratch_push_refuses_and_dispatches_nothing(self):
+        head = self.make_test()
+        path = self.bench.worktree(self.bench.repo("demo"), "work")
+        util.write(os.path.join(path, "dirty.txt"), "an edit not yet committed\n")
+        hook = os.path.join(self.clone_url[len("file://"):], "hooks", "pre-receive")
+        util.write(hook, "#!/bin/sh\necho no scratch here >&2\nexit 1\n")
+        os.chmod(hook, 0o755)
+        self.serve(head, "completed", "success")
+        answer = self.refused("test", branch="work", select="waymark.core-test")
+        self.assertEqual(answer["refused"], "scratch_push")
+        self.assertTrue(answer["dirty_included"])
+        self.assertEqual(answer["paths"], ["dirty.txt"])
+        self.assertEqual(self.dispatches(), [])
+        self.assertEqual(self.scratch(), "")
+        self.assertEqual(util.git(["rev-parse", "HEAD"], cwd=path).strip(), head)
+        self.assertIn("dirty.txt", util.git(["status", "--porcelain"], cwd=path))
+
     def test_a_conflicted_pull_keeps_its_merge_through_a_test_of_the_dirty_worktree(self):
         self.make_test()
         path = self.bench.worktree(self.bench.repo("demo"), "work")

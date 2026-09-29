@@ -2320,8 +2320,16 @@ def _dispatch_test(bench, repo, spec, client, args):
                                  "read it with test_result, then test again")
         head, paths = _scratch_commit(worktree, head)
         # the scratch ref, never the pull request's branch
-        git.run(["push", "--force", "origin", (head or "HEAD") + ":refs/heads/" + scratch],
-                cwd=worktree, timeout=600)
+        code, out, err = git.run(["push", "--force", "origin",
+                                  (head or "HEAD") + ":refs/heads/" + scratch],
+                                 cwd=worktree, timeout=600, check=False)
+        if code != 0:
+            # no run on the branch head stands in for the worktree the push did not carry
+            raise Refusal("scratch_push", repo=repo.name, branch=branch, scratch=scratch,
+                          head=head, dirty_included=bool(paths), paths=paths,
+                          detail=(err.strip() or out.strip())[-400:],
+                          reason="the push of the scratch branch was refused, so nothing "
+                                 "was tested: no run was dispatched")
         meta = bench.meta_read(repo.name)
         entry = meta.setdefault(branch, {})
         entry["test_head"] = head
