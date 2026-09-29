@@ -1,4 +1,4 @@
-"""The twenty-eight tools of the bench.
+"""The twenty-nine tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
