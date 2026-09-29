@@ -1005,16 +1005,38 @@ def yaml_errors(places, unavailable):
     return findings
 
 
+BASH_ERROR = re.compile(r"^.*?: line (\d+): (.*)$")
+
+
+def shell_errors(program, worktree, rel):
+    """Runs `bash -n` on one script. Gives its syntax errors as findings."""
+    run = subprocess.run([program, "-n", rel], cwd=worktree, capture_output=True,
+                         text=True, timeout=30)
+    if run.returncode == 0:
+        return []
+    lines = [line for line in run.stderr.splitlines() if line.strip()]
+    findings = []
+    for line in lines:
+        match = BASH_ERROR.match(line)
+        if match and "syntax error" in match.group(2):
+            findings.append({"path": rel, "line": int(match.group(1)), "col": 1,
+                             "message": match.group(2)})
+    if not findings:
+        findings.append({"path": rel, "line": 1, "col": 1,
+                         "message": lines[0] if lines else "bash -n failed"})
+    return findings
+
+
 def check(bench, args):
-    """Lints the files a change touched: Clojure forms, Python compiles, .github YAML parses.
-    It never writes."""
+    """Lints the files a change touched: Clojure forms, Python compiles, shell parses,
+    .github YAML parses. It never writes."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     given = args.get("paths")
     if given is not None and (not isinstance(given, list)
                               or not all(isinstance(item, str) and item for item in given)):
         raise Refusal("input", field="paths", reason="paths is a list of paths")
-    findings, skipped, unavailable, clojure, workflows = [], [], [], [], []
+    findings, skipped, unavailable, clojure, shell, workflows = [], [], [], [], [], []
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
         if given:
@@ -1042,12 +1064,24 @@ def check(bench, args):
                                      "message": exc.msg})
                 except ValueError as exc:
                     findings.append({"path": rel, "line": 1, "col": 1, "message": str(exc)})
+            elif rel.endswith(".sh"):
+                shell.append(rel)
             elif rel.startswith(".github/") and rel.endswith((".yml", ".yaml")):
                 workflows.append((full, rel))
             else:
                 skipped.append(rel)
         if workflows:
             findings.extend(yaml_errors(workflows, unavailable))
+        if shell:
+            program = shutil.which("bash")
+            if not program:
+                unavailable.append("bash not installed on the rig: the shell scripts were not checked")
+            else:
+                for rel in shell:
+                    try:
+                        findings.extend(shell_errors(program, worktree, rel))
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        unavailable.append("bash -n did not answer on %s: %s" % (rel, exc))
         if clojure:
             program = shutil.which("clj-kondo")
             if not program:
@@ -2573,7 +2607,8 @@ def train_checks(bench, args):
                 _sleep(TEST_FIND_SECONDS)
     except forge.ForgeError as exc:
         raise Refusal("forge", reason=git.scrub(str(exc)))
-    return {"repo": repo.name, "branch": branch, "run_id": run_id, "head": head}
+    return {"repo": repo.name, "branch": branch, "workflow": workflow, "run_id": run_id,
+            "head": head}
 
 
 def train_status(bench, args):
@@ -3413,8 +3448,10 @@ TOOL_SPECS = [
         "function": train_checks,
         "description": (
             "Dispatches the check workflow on a pushed train branch, as test does but with "
-            "no narrowing, and answers {run_id, head}. run_id is null when no run showed "
-            "within about 15 s: give train_status the branch and head instead. The "
+            "no narrowing, and answers {workflow, run_id, head}: workflow is the one it "
+            "dispatched, the given one or the test block's. run_id is null when no run "
+            "showed within about 15 s: give train_status the branch, head and workflow "
+            "instead. The "
             "refusals are not_train, not_pushed, no_test_workflow and forge."
         ),
         "schema": {

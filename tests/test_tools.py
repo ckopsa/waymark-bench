@@ -489,6 +489,19 @@ class TestEdit(BenchCase):
         with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "alpha\nbravo\ncharlie\n")
 
+    def test_edit_list_with_allow_protected_writes_a_protected_path(self):
+        path = self.prepared()
+        answer = self.ok("edit_many", branch="work", allow_protected=True, edits=[
+            {"path": "docs/a.txt", "old": "alpha", "new": "ALPHA"},
+            {"path": ".github/workflows/ci.yml", "old": "name: ci", "new": "name: gate"},
+        ])
+        self.assertEqual([item["path"] for item in answer["edits"]],
+                         ["docs/a.txt", ".github/workflows/ci.yml"])
+        with open(os.path.join(path, ".github/workflows/ci.yml"), encoding="utf-8") as handle:
+            self.assertIn("name: gate", handle.read())
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "ALPHA\nbravo\ncharlie\n")
+
     def test_edit_list_beside_the_fields_of_one_edit_is_refused(self):
         self.prepared()
         answer = self.refused("edit_many", branch="work", path="docs/a.txt", delete=True,
@@ -1025,6 +1038,25 @@ class TestCheck(BenchCase):
         self.assertEqual(answer["findings"], [])
         self.assertEqual(answer["skipped"], ["notes.txt"])
         self.assertEqual(self.ok("status", branch="work")["dirty"], 2)
+
+    def test_a_shell_syntax_error_is_found(self):
+        path = self.prepared()
+        util.write(os.path.join(path, ".claude/hooks/close.sh"),
+                   "#!/bin/bash\nif true; then\n  echo hi\n")
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        finding = answer["findings"][0]
+        self.assertEqual(finding["path"], ".claude/hooks/close.sh")
+        self.assertIn("syntax error", finding["message"])
+        self.assertGreaterEqual(finding["line"], 1)
+
+    def test_a_clean_shell_script_answers_ok(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "scripts/run.sh"), "#!/bin/bash\nif true; then\n  echo hi\nfi\n")
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["findings"], [])
+        self.assertEqual(answer["skipped"], [])
 
     def test_paths_limit_the_check(self):
         path = self.prepared()
