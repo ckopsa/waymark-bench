@@ -406,6 +406,9 @@ class TestTrain(LandingCase):
                 "head": {"ref": "pr%d" % number, "sha": sha}})
 
     def fake_http(self, method, url, headers, body=None):
+        if method == "PUT" and url.endswith("/merge") and getattr(self, "merge_refusal", None):
+            self.calls.append((method, url.split("/repos/o/r", 1)[-1], body))
+            return self.merge_refusal
         answer = LandingCase.fake_http(self, method, url, headers, body)
         if method == "POST" and "/dispatches" in url:
             self.answers.update(self.after_dispatch)
@@ -434,13 +437,49 @@ class TestTrain(LandingCase):
         self.assertEqual(parents[0], base)
         self.assertEqual(self.base_head(), base)
 
-    def test_land_fast_forwards_the_base(self):
+    def train_pr(self, mergeable=True):
+        pr = {"number": 9, "state": "open", "mergeable": mergeable,
+              "base": {"ref": "main"}, "head": {"ref": "train/one"}}
+        self.answers.update({"/pulls?": ("GET", []), "/pulls/9/merge": ("PUT", {"sha": "f" * 40}),
+                             "/pulls/9": ("GET", pr), "/pulls": ("POST", pr)})
+        return pr
+
+    def land(self, base, head, ok=True):
+        return (self.ok if ok else self.refused)("train_land", base="main", branch="train/one",
+                                                 expect_base_head=base, head=head)
+
+    def opened(self):
+        return [body for method, path, body in self.calls if method == "POST" and path == "/pulls"]
+
+    def merges(self):
+        return [body for method, path, body in self.calls
+                if method == "PUT" and path.endswith("/merge")]
+
+    def test_land_merges_one_pull_request_at_head(self):
         base = self.base_head()
         head = self.build([1])["head"]
-        answer = self.ok("train_land", base="main", branch="train/one",
-                         expect_base_head=base, head=head)
-        self.assertTrue(answer["landed"])
-        self.assertEqual(self.base_head(), head)
+        self.train_pr()
+        answer = self.land(base, head)
+        self.assertEqual((answer["landed"], answer["number"], answer["sha"]), (True, 9, "f" * 40))
+        [opened] = self.opened()
+        self.assertEqual((opened["title"], opened["head"], opened["base"]),
+                         ("Merge train: #1", "train/one", "main"))
+        self.assertIn("#1", opened["body"])
+        self.assertEqual(self.merges(), [{"sha": head, "merge_method": "merge"}])
+
+    def test_land_waits_then_reuses_the_same_pull_request(self):
+        base = self.base_head()
+        head = self.build([1])["head"]
+        pr = self.train_pr(mergeable=None)
+        answer = self.land(base, head)
+        self.assertEqual((answer["state"], answer["number"]), ("waiting", 9))
+        self.assertNotIn("landed", answer)
+        self.assertEqual(self.merges(), [])
+        self.answers.update({"/pulls?": ("GET", [pr]),
+                             "/pulls/9": ("GET", dict(pr, mergeable=True))})
+        answer = self.land(base, head)
+        self.assertEqual((answer["landed"], answer["number"]), (True, 9))
+        self.assertEqual(len(self.opened()), 1)
 
     def test_land_refuses_when_the_base_moved(self):
         base = self.base_head()
@@ -451,22 +490,36 @@ class TestTrain(LandingCase):
         answer = self.refused("train_land", base="main", branch="train/one",
                               expect_base_head=base, head=head)
         self.assertEqual(answer["refused"], "base_moved")
+        self.assertEqual(self.opened(), [])
         self.assertEqual(answer["base_head"], moved)
         self.assertEqual(self.base_head(), moved)
 
-    def test_land_answers_push_refused_when_the_forge_rejects_the_push(self):
+    def test_land_answers_merge_refused_when_github_refuses_the_merge(self):
         base = self.base_head()
         head = self.build([1])["head"]
-        hook = os.path.join(self.clone_url[len("file://"):], "hooks", "pre-receive")
-        with open(hook, "w") as out:
-            out.write("#!/bin/sh\necho 'GH006: Protected branch update failed for refs/heads/main.' >&2\nexit 1\n")
-        os.chmod(hook, 0o755)
-        answer = self.refused("train_land", base="main", branch="train/one",
-                              expect_base_head=base.upper(), head=head)
-        self.assertEqual(answer["refused"], "push_refused")
-        self.assertIn("branch protection", answer["reason"])
-        self.assertIn("GH006", answer["reason"])
-        self.assertEqual(self.base_head(), base)
+        self.train_pr()
+        self.answers["/pulls/9/merge"] = ("PUT", 405)
+        answer = self.land(base.upper(), head, ok=False)
+        self.assertEqual((answer["refused"], answer["number"]), ("merge_refused", 9))
+        self.assertIn("405", answer["reason"])
+
+    def test_land_answers_base_moved_when_github_says_the_base_was_modified(self):
+        base = self.base_head()
+        head = self.build([1])["head"]
+        self.train_pr()
+        self.merge_refusal = (409, '{"message":"Base branch was modified. '
+                                   'Review and try the merge again."}')
+        answer = self.land(base, head, ok=False)
+        self.assertEqual((answer["refused"], answer["base_head"]), ("base_moved", base))
+
+    def test_land_waits_while_a_required_check_is_pending(self):
+        base = self.base_head()
+        head = self.build([1])["head"]
+        self.train_pr()
+        self.merge_refusal = (405, '{"message":"Required status check \\"gate\\" is expected."}')
+        answer = self.land(base, head)
+        self.assertEqual((answer["state"], answer["number"]), ("waiting", 9))
+        self.assertNotIn("landed", answer)
 
     def test_land_refuses_a_short_sha_as_input(self):
         base = self.base_head()
