@@ -629,3 +629,22 @@ class TestTrain(LandingCase):
         answer = self.ok("train_status", branch="train/one", head="abc", workflow="tests.yml")
         self.assertEqual(answer, {"repo": "demo", "run_id": None, "state": "pending",
                                   "head": "abc", "url": None})
+
+    def test_status_by_branch_skips_the_stale_run(self):
+        self.answers[WORKFLOW + "/runs"] = ("GET", {"workflow_runs": [
+            self.train_run(33, "abc", "completed", "cancelled"),
+            self.train_run(34, "abc", "in_progress", None)]})
+        answer = self.ok("train_status", branch="train/one", head="abc", workflow="tests.yml")
+        self.assertEqual(answer["run_id"], 33)
+        answer = self.ok("train_status", branch="train/one", head="abc", workflow="tests.yml",
+                         skip_run_id=33)
+        self.assertEqual(answer["run_id"], 34)
+        self.assertEqual(answer["state"], "pending")
+
+    def test_status_by_branch_is_pending_when_only_the_stale_run_has_the_head(self):
+        self.answers[WORKFLOW + "/runs"] = ("GET", {"workflow_runs": [
+            self.train_run(33, "abc", "completed", "cancelled")]})
+        answer = self.ok("train_status", branch="train/one", head="abc", workflow="tests.yml",
+                         skip_run_id=33)
+        self.assertEqual(answer["run_id"], None)
+        self.assertEqual(answer["state"], "pending")
