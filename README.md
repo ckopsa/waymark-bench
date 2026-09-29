@@ -1,10 +1,11 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives twenty-three
+for each repository and a git worktree for each branch. It gives twenty-eight
 tools: `prepare`, `status`, `find`, `read`, `symbols`, `read_symbol`, `check`, `edit`,
 `edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
-`test_result`, `enroll`, `repos` and `unenroll`. It
+`test_result`, `enroll`, `repos`, `unenroll`, `train_build`, `train_checks`,
+`train_status`, `train_land` and `train_delete`. It
 needs Python
 3.11, git, and one library: pydantic-settings, for the settings.
 
@@ -357,6 +358,29 @@ finds; `mode: "range"` gives `limit` lines from `offset`, counting from 1.
 Each line comes without colors and without GitHub's timestamp, cut at
 `width` characters (200 by default) and ending in `… (+N)` when cut. The rig
 keeps a log an hour, so paging fetches it once.
+
+## The merge train
+
+Five tools build, check, land and delete a `train/*` branch. Each names
+`repo` (on the bench) and a `branch` that starts with `train/`; any other
+branch is refused `not_train`. None of them force-pushes a base.
+
+- `train_build {base, branch, prs}` resets `branch` at the base's current
+  head, merges each pull request's head in the order of `prs` with a
+  merge commit, skips one that does not merge cleanly (the merge is
+  aborted), and pushes the branch. It answers
+  `{branch, base_head, head, merged: [n...], conflicted: [n...]}`.
+- `train_checks {branch, workflow, input}` dispatches the check workflow
+  (default the `test` block's) on the pushed branch, with no narrowing,
+  and answers `{run_id, head}`; `run_id` is `null` when no run showed
+  within about 15 seconds.
+- `train_status {run_id}` (or `{branch, head, workflow}`) reads the run
+  once and answers `{state: pending|success|failure|cancelled, head, url}`.
+- `train_land {base, branch, expect_base_head, head}` fast-forwards the
+  base to `head` with a plain push when the base is still at
+  `expect_base_head`, and answers `{landed: true}`. A moved base is
+  refused `base_moved` and nothing changes.
+- `train_delete {branch}` deletes the train branch on the remote.
 
 ## The tests
 

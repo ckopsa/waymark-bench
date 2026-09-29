@@ -61,12 +61,13 @@ class TestHttp(TransportCase):
         status, answer = self.post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual(status, 200)
         tools = answer["result"]["tools"]
-        self.assertEqual(len(tools), 23)
+        self.assertEqual(len(tools), 28)
         names = [tool["name"] for tool in tools]
         self.assertEqual(sorted(names), sorted([
             "prepare", "status", "find", "read", "symbols", "read_symbol", "check", "edit",
             "edit_many", "pull", "conflicts", "submit", "feedback", "log", "discard", "merge", "update_branch", "rerun",
-            "test", "test_result", "enroll", "repos", "unenroll"]))
+            "test", "test_result", "enroll", "repos", "unenroll", "train_build", "train_checks",
+            "train_status", "train_land", "train_delete"]))
         for tool in tools:
             self.assertTrue(tool["description"])
             schema = tool["inputSchema"]

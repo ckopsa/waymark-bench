@@ -1,4 +1,4 @@
-"""The twenty-three tools of the bench.
+"""The twenty-eight tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -2353,6 +2353,188 @@ def unenroll(bench, args):
     return {"repo": name, "kept": bench.bare_dir(name)}
 
 
+# ------------------------------------------------------------ merge train
+
+TRAIN_PREFIX = "train/"
+
+
+def _train_branch(args):
+    """Gives the train branch of a call, or refuses a branch that is not train/*."""
+    branch = check_branch(_text(args, "branch", required=True))
+    if not branch.startswith(TRAIN_PREFIX):
+        raise Refusal("not_train", branch=branch, reason="a train branch starts with train/")
+    return branch
+
+
+def _train_base(repo, args):
+    base = check_branch(_text(args, "base", default=repo.default_branch))
+    if base.startswith(TRAIN_PREFIX):
+        raise Refusal("input", field="base", reason="the base is never a train branch")
+    return base
+
+
+def train_build(bench, args):
+    """Resets a train branch at the base's head, merges each pull request's head
+    into it in order, skips the ones that conflict, and pushes it."""
+    repo = bench.repo(args.get("repo"))
+    base = _train_base(repo, args)
+    branch = _train_branch(args)
+    prs = args.get("prs")
+    if not isinstance(prs, list) or not prs or not all(
+            isinstance(n, int) and not isinstance(n, bool) and n > 0 for n in prs):
+        raise Refusal("input", field="prs", reason="a list of pull request numbers is necessary")
+    try:
+        client = forge.client(repo)
+        heads = [(number, client.pull_request(number).get("head")) for number in prs]
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=git.scrub(str(exc)))
+    merged, conflicted = [], []
+    with bench.lock(repo.name):
+        bare = bench.fetch(repo)
+        base_head = git.rev_parse("refs/remotes/origin/" + base, cwd=bare)
+        path = bench.wt_dir(repo.name, branch)
+        git.run(["worktree", "remove", "--force", path], cwd=bare, check=False)
+        shutil.rmtree(path, ignore_errors=True)
+        git.run(["worktree", "prune"], cwd=bare)
+        git.run(["worktree", "add", "--force", "-B", branch, path, base_head], cwd=bare)
+        try:
+            for number, sha in heads:
+                if sha and not git.ref_exists(sha, cwd=path):
+                    # a head from a fork is only under the pull request's ref
+                    git.run(["fetch", "origin", "refs/pull/%d/head" % number], cwd=bare,
+                            check=False, timeout=600)
+                code, _, _ = git.run(["merge", "--no-ff", "--no-edit", "-m",
+                                      "Merge pull request #%d into %s" % (number, branch),
+                                      sha or "MISSING"], cwd=path, check=False, timeout=600)
+                if code == 0:
+                    merged.append(number)
+                else:
+                    git.run(["merge", "--abort"], cwd=path, check=False)
+                    git.run(["reset", "--hard", "HEAD"], cwd=path, check=False)
+                    conflicted.append(number)
+            head = head_of(path)
+            # a train branch is the rig's own: it is reset, so the push forces
+            git.run(["push", "--force", "origin", "HEAD:refs/heads/" + branch],
+                    cwd=path, timeout=600)
+        finally:
+            git.run(["worktree", "remove", "--force", path], cwd=bare, check=False)
+    return {"repo": repo.name, "branch": branch, "base_head": base_head, "head": head,
+            "merged": merged, "conflicted": conflicted}
+
+
+def _train_workflow(repo, args):
+    workflow = _text(args, "workflow") or (repo.test or {}).get("workflow")
+    if not workflow:
+        raise Refusal("no_test_workflow", repo=repo.name,
+                      reason="give workflow, or a test block in bench.json")
+    return workflow
+
+
+def train_checks(bench, args):
+    """Dispatches the check workflow on a pushed train branch, without narrowing."""
+    repo = bench.repo(args.get("repo"))
+    branch = _train_branch(args)
+    workflow = _train_workflow(repo, args)
+    inputs = args.get("input") or {}
+    if not isinstance(inputs, dict):
+        raise Refusal("input", field="input", reason="an object of workflow inputs is necessary")
+    with bench.lock(repo.name):
+        bare = bench.fetch(repo)
+        remote = "refs/remotes/origin/" + branch
+        if not git.ref_exists(remote, cwd=bare):
+            raise Refusal("not_pushed", repo=repo.name, branch=branch,
+                          reason="the train branch is not on the remote: call train_build")
+        head = git.rev_parse(remote, cwd=bare)
+    run_id = None
+    try:
+        client = forge.client(repo)
+        before = {run["id"] for run in client.workflow_runs(workflow, branch)}
+        client.dispatch_workflow(workflow, branch, inputs)
+        for attempt in range(TEST_FIND_TRIES):
+            runs = [run for run in client.workflow_runs(workflow, branch)
+                    if run["id"] not in before and run.get("commit") == head]
+            if runs:
+                run_id = runs[-1]["id"]
+                break
+            if attempt + 1 < TEST_FIND_TRIES:
+                _sleep(TEST_FIND_SECONDS)
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=git.scrub(str(exc)))
+    return {"repo": repo.name, "branch": branch, "run_id": run_id, "head": head}
+
+
+def train_status(bench, args):
+    """Reads one train check run: pending, success, failure or cancelled."""
+    repo = bench.repo(args.get("repo"))
+    try:
+        client = forge.client(repo)
+        if args.get("run_id") is not None:
+            run = client.pipeline(_int(args, "run_id", 0, 1, 2 ** 63))
+        else:
+            branch = _train_branch(args)
+            head = _text(args, "head", required=True)
+            runs = [run for run in client.workflow_runs(_train_workflow(repo, args), branch)
+                    if run.get("commit") == head]
+            if not runs:
+                return {"repo": repo.name, "run_id": None, "state": "pending",
+                        "head": head, "url": None}
+            run = runs[0]
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=git.scrub(str(exc)))
+    state = "pending"
+    if run.get("state") == "completed":
+        state = run.get("result") if run.get("result") in ("success", "cancelled") else "failure"
+    return {"repo": repo.name, "run_id": run.get("id"), "state": state,
+            "head": run.get("commit"), "url": run.get("url")}
+
+
+def train_land(bench, args):
+    """Fast-forwards the base to the train's head with a plain push, while the
+    base is still where the train was built on."""
+    repo = bench.repo(args.get("repo"))
+    base = _train_base(repo, args)
+    branch = _train_branch(args)
+    expect = _text(args, "expect_base_head", required=True)
+    head = _text(args, "head", required=True)
+    with bench.lock(repo.name):
+        bare = bench.fetch(repo)
+        now = git.rev_parse("refs/remotes/origin/" + base, cwd=bare)
+        if now != expect:
+            raise Refusal("base_moved", repo=repo.name, base=base, base_head=now,
+                          reason="the base is %s, not %s: build the train again" % (now, expect))
+        remote = "refs/remotes/origin/" + branch
+        train = git.rev_parse(remote, cwd=bare) if git.ref_exists(remote, cwd=bare) else None
+        if train != head:
+            raise Refusal("head_moved", repo=repo.name, branch=branch, head=train,
+                          reason="the train branch is not at head")
+        code = git.run(["merge-base", "--is-ancestor", expect, head], cwd=bare, check=False)[0]
+        if code != 0:
+            raise Refusal("not_fast_forward", repo=repo.name, base=base,
+                          reason="the head does not hold the base")
+        # a plain push: the forge refuses it unless it fast-forwards the base
+        code, text, err = git.run(["push", "origin", head + ":refs/heads/" + base],
+                                  cwd=bare, check=False, timeout=600)
+    if code != 0:
+        raise Refusal("base_moved", repo=repo.name, base=base,
+                      reason=(err or text).strip()[:400])
+    return {"repo": repo.name, "base": base, "branch": branch, "head": head, "landed": True}
+
+
+def train_delete(bench, args):
+    """Deletes one train/* branch on the remote; refuses any other branch."""
+    repo = bench.repo(args.get("repo"))
+    branch = _train_branch(args)
+    with bench.lock(repo.name):
+        bare = bench.ensure_bare(repo)
+        code, text, err = git.run(["push", "origin", ":refs/heads/" + branch],
+                                  cwd=bare, check=False, timeout=120)
+        git.run(["branch", "-D", branch], cwd=bare, check=False)
+    if code != 0:
+        raise Refusal("delete_refused", repo=repo.name, branch=branch,
+                      reason=(err or text).strip()[:400])
+    return {"repo": repo.name, "branch": branch, "deleted": True}
+
+
 # ---------------------------------------------------------------- schemas
 
 _REPO = {"type": "string", "description": "The repository name in bench.json, as the forge spells it: owner/name, or a plain name."}
@@ -3082,6 +3264,113 @@ TOOL_SPECS = [
             "type": "object",
             "properties": {"repo": _REPO_NAME, "seat": _SEAT, "sitting": _SITTING},
             "required": ["repo"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "train_build",
+        "function": train_build,
+        "description": (
+            "Builds a merge train. The rig resets branch (it must start with train/) at the "
+            "base's current head, merges each pull request's head into it in the order of "
+            "prs with a merge commit, and force-pushes the train branch (never the base). A "
+            "pull request that does not merge cleanly is skipped and its merge aborted. "
+            "Answers {branch, base_head, head, merged: [n...], conflicted: [n...]}. The "
+            "refusals are not_train, input, forge and git."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO, "branch": _BRANCH,
+                "base": {"type": "string", "description": "The base branch. Default the repo's."},
+                "prs": {"type": "array", "items": {"type": "integer", "minimum": 1},
+                        "minItems": 1, "description": "The pull request numbers, in order."},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
+            "required": ["repo", "branch", "prs"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "train_checks",
+        "function": train_checks,
+        "description": (
+            "Dispatches the check workflow on a pushed train branch, as test does but with "
+            "no narrowing, and answers {run_id, head}. run_id is null when no run showed "
+            "within about 15 s: give train_status the branch and head instead. The "
+            "refusals are not_train, not_pushed, no_test_workflow and forge."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO, "branch": _BRANCH,
+                "workflow": {"type": "string", "description": "The workflow file, e.g. "
+                             "tests.yml. Default the test block's."},
+                "input": {"type": "object", "description": "The workflow inputs, if any."},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
+            "required": ["repo", "branch"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "train_status",
+        "function": train_status,
+        "description": (
+            "Reads one train check run, once, and answers {run_id, state: pending, success, "
+            "failure or cancelled, head, url}. Give run_id, or with a null run_id the "
+            "branch and head (and workflow) train_checks answered. The refusals are "
+            "not_train and forge."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "run_id": {"type": "integer", "description": "The run train_checks answered."},
+                "branch": _BRANCH,
+                "head": {"type": "string", "description": "With no run_id: the head."},
+                "workflow": {"type": "string", "description": "With no run_id: the workflow."},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
+            "required": ["repo"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "train_land",
+        "function": train_land,
+        "description": (
+            "Lands a merge train: when the base is still at expect_base_head and the train "
+            "branch at head, the rig fast-forwards the base to head with a plain push (never "
+            "a force), and GitHub shows each merged pull request as merged. Answers "
+            "{landed: true}. The refusals are base_moved (nothing changed), head_moved, "
+            "not_fast_forward and not_train."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO, "branch": _BRANCH,
+                "base": {"type": "string", "description": "The base branch. Default the repo's."},
+                "expect_base_head": {"type": "string",
+                                     "description": "The base_head train_build answered."},
+                "head": {"type": "string", "description": "The head train_build answered."},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
+            "required": ["repo", "branch", "expect_base_head", "head"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "train_delete",
+        "function": train_delete,
+        "description": (
+            "Deletes one train/* branch on the remote and answers {deleted: true}. Any other "
+            "branch is refused not_train. The other refusal is delete_refused."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {"repo": _REPO, "branch": _BRANCH, "seat": _SEAT, "sitting": _SITTING},
+            "required": ["repo", "branch"],
             "additionalProperties": False,
         },
     },
