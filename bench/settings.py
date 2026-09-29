@@ -12,6 +12,7 @@ another file). The credentials are secrets: they never print, and
   BENCH_BITBUCKET_USER    the Bitbucket user (an email or a username)
   BENCH_BITBUCKET_TOKEN   the Bitbucket app password
   BENCH_GITHUB_TOKEN      the GitHub token, when it is not the git token
+  BENCH_TEST_WAIT         the seconds test_result waits by default (25; 28 at most)
 """
 
 import os
@@ -31,6 +32,7 @@ class Settings(BaseSettings):
     bitbucket_user: str | None = None
     bitbucket_token: SecretStr | None = None
     github_token: SecretStr | None = None
+    test_wait: int = 25
 
     def secret(self, name):
         """Gives the value of one secret, or None."""

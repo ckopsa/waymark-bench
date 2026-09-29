@@ -125,16 +125,31 @@ class TestTheTestTool(LandingCase):
         answer = self.ok("test_result", run_id=31)
         self.assertEqual(answer["conclusion"], "pending")
         self.assertEqual(answer["run_id"], 31)
-        self.assertEqual(self.slept, [5] * 8)
+        self.assertEqual(self.slept, [5] * 5)
         self.slept = []
         self.ok("test_result", run_id=31, wait_seconds=45)
-        self.assertEqual(self.slept, [5] * 9)
+        self.assertEqual(self.slept, [5] * 5 + [3])
         self.assertNotEqual(self.scratch(), "")
         self.serve(head, "completed", "success")
         again = self.ok("test_result", run_id=31)
         self.assertEqual(again["conclusion"], "success")
         self.assertEqual(self.dispatches(), [])
         self.assertEqual(self.scratch(), "")
+
+    def test_a_pending_run_answers_pending_within_the_cap_of_the_setting(self):
+        head = self.make_test()
+        self.serve(head, "in_progress")
+        self.ok("test", branch="work", select="waymark.core-test")
+        os.environ["BENCH_TEST_WAIT"] = "60"
+        self.addCleanup(os.environ.pop, "BENCH_TEST_WAIT", None)
+        self.slept = []
+        answer = self.ok("test_result", run_id=31)
+        self.assertEqual(answer["conclusion"], "pending")
+        self.assertEqual(sum(self.slept), 28)
+        os.environ["BENCH_TEST_WAIT"] = "10"
+        self.slept = []
+        self.assertEqual(self.ok("test_result", run_id=31)["conclusion"], "pending")
+        self.assertEqual(self.slept, [5, 5])
 
     def test_a_second_test_refuses_while_the_first_run_is_going(self):
         head = self.make_test()
