@@ -205,7 +205,8 @@ about 15 seconds, `test` answers `run_id: null` with `head` and
 The landing runs in the background, and `submit` answers at once with
 the landing running: follow it with `status` or `feedback`. Give `wait`
 to have `submit` wait up to that many seconds instead (the ceiling is
-3600). The default is 0 because a landing runs a repo's whole test suite,
+28, under the engine's 30 s limit on a call; a larger wait is cut to
+it). The default is 0 because a landing runs a repo's whole test suite,
 and a client that brokers the call - a waymark engine gives up on any
 call after 30 seconds and marks the server dark - must not be held that
 long. `landing.steps` has one entry for each step, with its state,
