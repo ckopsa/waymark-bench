@@ -14,6 +14,8 @@ from .test_landing import LandingCase
 
 WORKFLOW = "/actions/workflows/tests.yml"
 PULL_REQUEST = {"provider": "github", "owner": "o", "repo": "r"}
+# the unittest shape waymark-bench names: a dotted module, class or test
+PYTHON_SELECT = r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$"
 RED_JOBS = [
     {"id": 41, "name": "unit", "status": "completed", "conclusion": "failure",
      "steps": [{"name": "Set up job", "conclusion": "success"},
@@ -231,6 +233,36 @@ class TestTheTestTool(LandingCase):
             self.assertEqual(self.dispatches(),
                              [{"ref": "bench-test/work", "inputs": {"only": select}}])
             self.ok("test_result", run_id=31)
+
+    def test_a_select_pattern_passes_a_python_module_and_refuses_the_rest(self):
+        head = self.make_test(test={"workflow": "tests.yml", "input": "only",
+                                    "select_pattern": PYTHON_SELECT})
+        for select in ("tests.test_bench_test", "tests.test_bench_test.TestTrain"):
+            self.serve(head, "completed", "success")
+            self.ok("test", branch="work", select=select)
+            self.assertEqual(self.dispatches(),
+                             [{"ref": "bench-test/work", "inputs": {"only": select}}])
+            self.ok("test_result", run_id=31)
+        self.calls = []
+        for select in ("test-factory", "factory10.merge-line-test"):
+            answer = self.refused("test", branch="work", select=select)
+            self.assertEqual(answer["refused"], "input")
+            self.assertEqual(answer["field"], "select")
+            self.assertEqual(answer["select_pattern"], PYTHON_SELECT)
+            self.assertEqual(self.calls, [])
+
+    def test_without_a_select_pattern_the_clojure_shape_applies(self):
+        self.make_test()
+        self.serve(None, "completed", "success")
+        answer = self.refused("test", branch="work", select="tests.test_bench_test")
+        self.assertEqual(answer["refused"], "input")
+        self.assertIn("factory10.merge-line-test", answer["reason"])
+        self.assertEqual(self.calls, [])
+
+    def test_a_select_pattern_that_is_not_a_regex_is_a_config_error(self):
+        with self.assertRaises(config_module.ConfigError):
+            config_module.test_from_dict("demo", {"workflow": "tests.yml", "input": "only",
+                                                  "select_pattern": "("})
 
     def test_a_repository_with_no_test_block_refuses(self):
         self.make_test(test=None)

@@ -72,8 +72,9 @@ class RepoConfig:
         self.default_branch = default_branch or "main"
         self.deny = list(deny) if deny is not None else list(DEFAULT_DENY)
         self.land = land
-        # {workflow, input}: the CI workflow the test tool dispatches, and
-        # the name of its input that narrows the run to one selection
+        # {workflow, input[, select_pattern]}: the CI workflow the test tool
+        # dispatches, the name of its input that narrows the run to one
+        # selection, and the regex a selection must match
         self.test = test
 
     def to_dict(self):
@@ -204,7 +205,7 @@ def load(path):
 
 
 def test_from_dict(repo_name, data):
-    """Makes the test block of one repository, {workflow, input}, or None."""
+    """Makes the test block of one repository, {workflow, input[, select_pattern]}, or None."""
     if data is None or data is False:
         return None
     if not isinstance(data, dict):
@@ -215,6 +216,16 @@ def test_from_dict(repo_name, data):
         if not isinstance(value, str) or not value.strip():
             raise ConfigError("repo %s: test needs a %s" % (repo_name, key))
         block[key] = value.strip()
+    pattern = data.get("select_pattern")
+    if pattern is not None:
+        # a regex the whole selection must match; without it the Clojure shape applies
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise ConfigError("repo %s: test select_pattern must be a string" % repo_name)
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ConfigError("repo %s: test select_pattern is not a regex: %s" % (repo_name, exc))
+        block["select_pattern"] = pattern
     return block
 
 

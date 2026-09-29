@@ -2139,7 +2139,12 @@ def _dispatch_test(bench, repo, spec, client, args):
     with run_id null when no run showed within about fifteen seconds."""
     branch = check_branch(_text(args, "branch", required=True))
     select = _text(args, "select", required=True)
-    if not TEST_SELECT.match(select):
+    pattern = spec.get("select_pattern")
+    if pattern is not None:
+        if not re.fullmatch(pattern, select):
+            raise Refusal("input", field="select", select=select, select_pattern=pattern,
+                          reason="select must match this repository's select_pattern %s" % pattern)
+    elif not TEST_SELECT.match(select):
         # a job or make target is not a namespace: the workflow would run no suite
         raise Refusal("input", field="select", select=select,
                       reason="select must be a test namespace (dotted, ending in -test) "
@@ -3282,10 +3287,12 @@ TOOL_SPECS = [
                 "repo": _REPO,
                 "branch": _BRANCH,
                 "select": {"type": "string",
-                           "description": "The test selection: a test namespace, dotted and "
-                                          "ending in -test (factory10.merge-line-test), or "
-                                          "namespace/test-name. Anything else is refused "
-                                          "before dispatch."},
+                           "description": "The test selection. It must match the test block's "
+                                          "select_pattern when bench.json gives one (a Python "
+                                          "module such as tests.test_bench_test); without it, "
+                                          "a test namespace, dotted and ending in -test "
+                                          "(factory10.merge-line-test), or namespace/test-name. "
+                                          "Anything else is refused before dispatch."},
                 "seat": _SEAT, "sitting": _SITTING,
             },
             "required": ["repo"],
@@ -3349,8 +3356,9 @@ TOOL_SPECS = [
                 "test": {"type": "object",
                          "description": "The test block, as bench.json spells it: workflow, "
                                         "the CI workflow the test tool dispatches, and input, "
-                                        "the name of its input that takes the selection. "
-                                        "Without it the test tool refuses no_test_workflow."},
+                                        "the name of its input that takes the selection, and "
+                                        "select_pattern (optional), the regex a selection must "
+                                        "match. Without it the test tool refuses no_test_workflow."},
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },
