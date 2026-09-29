@@ -2654,7 +2654,9 @@ def train_status(bench, args):
             skip = None
             if args.get("skip_run_id") is not None:
                 skip = _int(args, "skip_run_id", 0, 1, 2 ** 63)
-            runs = [run for run in client.workflow_runs(_train_workflow(repo, args), branch)
+            # every event: the train's pull_request run counts as a dispatched one does
+            runs = [run for run in client.workflow_runs(_train_workflow(repo, args), branch,
+                                                        event=None)
                     if run.get("commit") == head and (skip is None or run.get("id") != skip)]
             if not runs:
                 return {"repo": repo.name, "run_id": None, "state": "pending",
@@ -2671,6 +2673,51 @@ def train_status(bench, args):
 
 # the subject train_build gives each merge commit; train_land reads the riders from it
 TRAIN_MERGE = re.compile(r"^Merge pull request #(\d+) into ")
+
+
+def _train_riders(bare, since, head):
+    """Names the pull requests train_build merged between since and head."""
+    subjects = git.run(["log", "--merges", "--reverse", "--format=%s", since + ".." + head],
+                       cwd=bare, check=False)[1]
+    return [int(found.group(1)) for found in map(TRAIN_MERGE.match, subjects.splitlines())
+            if found]
+
+
+def _train_pull_request(client, branch, base, riders):
+    """Finds the train's one pull request, or opens it: a retry finds the one it
+    opened. Answers the pull request and whether this call opened it."""
+    pr = client.find_pull_request(branch, base)
+    if pr is not None:
+        return pr, False
+    return client.create_pull_request(
+        branch, base, "Merge train: " + (" ".join("#%d" % n for n in riders) or branch),
+        "\n".join("- #%d" % n for n in riders) or "A merge train of " + branch + "."), True
+
+
+def train_open(bench, args):
+    """Finds or opens the train's one pull request from its branch into the base,
+    with the branch at head, and never merges it."""
+    repo = bench.repo(args.get("repo"))
+    base = _train_base(repo, args)
+    branch = _train_branch(args)
+    head = _text(args, "head", required=True)
+    with bench.lock(repo.name):
+        bare = bench.fetch(repo)
+        remote = "refs/remotes/origin/" + branch
+        if not git.ref_exists(remote, cwd=bare):
+            raise Refusal("not_pushed", repo=repo.name, branch=branch,
+                          reason="the train branch is not on the remote: call train_build")
+        train = git.rev_parse(remote, cwd=bare)
+        if train != head:
+            raise Refusal("head_moved", repo=repo.name, branch=branch, head=train,
+                          reason="the train branch is not at head")
+        riders = _train_riders(bare, "refs/remotes/origin/" + base, head)
+    try:
+        pr, opened = _train_pull_request(forge.client(repo), branch, base, riders)
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=git.scrub(str(exc)))
+    return {"repo": repo.name, "base": base, "branch": branch, "head": head,
+            "number": pr.get("number"), "opened": opened}
 
 
 def train_land(bench, args):
@@ -2701,20 +2748,13 @@ def train_land(bench, args):
             raise Refusal("not_fast_forward", repo=repo.name, base=base,
                           reason="the head does not hold the base")
         # the riders, from the merge commits train_build made
-        subjects = git.run(["log", "--merges", "--reverse", "--format=%s", expect + ".." + head],
-                           cwd=bare, check=False)[1]
-    riders = [int(found.group(1)) for found in map(TRAIN_MERGE.match, subjects.splitlines())
-              if found]
+        riders = _train_riders(bare, expect, head)
     answer = {"repo": repo.name, "base": base, "branch": branch, "head": head}
     client = None
     try:
         client = forge.client(repo)
         # one pull request per train: a retry finds the one it opened
-        pr = client.find_pull_request(branch, base)
-        if pr is None:
-            pr = client.create_pull_request(
-                branch, base, "Merge train: " + (" ".join("#%d" % n for n in riders) or branch),
-                "\n".join("- #%d" % n for n in riders) or "A merge train of " + branch + ".")
+        pr, _ = _train_pull_request(client, branch, base, riders)
         answer["number"] = pr.get("number")
         # a merge commit, never squash or rebase: every rider stays reachable and merged
         landed = client.land_pull_request(pr.get("number"), head)
@@ -3548,14 +3588,38 @@ TOOL_SPECS = [
         },
     },
     {
+        "name": "train_open",
+        "function": train_open,
+        "description": (
+            "Finds the train's one open pull request from branch into the base, or opens "
+            "it, with the pushed train branch at head, and never merges it: its "
+            "pull_request run is the train's check, which train_status reads. Answers "
+            "{number, opened, head}; opened is false when the pull request was there. The "
+            "refusals are not_train, input, not_pushed, head_moved and forge."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO, "branch": _BRANCH,
+                "base": {"type": "string", "description": "The base branch. Default the repo's."},
+                "head": {"type": "string", "description": "The head train_build answered."},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
+            "required": ["repo", "branch", "head"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "train_status",
         "function": train_status,
         "description": (
             "Reads one train check run, once, and answers {run_id, state: pending, success, "
             "failure or cancelled, head, url}. Give run_id, or with a null run_id the "
-            "branch and head (and workflow) train_checks answered; by branch, skip_run_id "
-            "passes over that run (a cancelled run a retry left behind). The answer always "
-            "names run_id, null only while no run has the head. The refusals are "
+            "branch and head (and workflow): the rig then reads the newest run of the "
+            "workflow on the branch at head, of any event, so the pull_request run of "
+            "train_open counts as a train_checks run does; by branch, skip_run_id passes "
+            "over that run (a cancelled run a retry left behind). The answer always names "
+            "run_id, null only while no run has the head. The refusals are "
             "not_train and forge."
         ),
         "schema": {

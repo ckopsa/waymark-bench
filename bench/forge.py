@@ -253,7 +253,7 @@ class Bitbucket(Client):
     def dispatch_workflow(self, workflow, ref, inputs):
         raise ForgeError("the rig dispatches a test workflow only on github")
 
-    def workflow_runs(self, workflow, branch, limit=10):
+    def workflow_runs(self, workflow, branch, limit=10, event="workflow_dispatch"):
         raise ForgeError("the rig dispatches a test workflow only on github")
 
     def pipeline(self, run_id):
@@ -550,10 +550,13 @@ class GitHub(Client):
         """Gives one workflow run, shaped as pipelines gives it."""
         return self._run(self.request("GET", self.url("/actions/runs/%s" % run_id)))
 
-    def workflow_runs(self, workflow, branch, limit=10):
-        """Gives the dispatched runs of one workflow on one branch, newest first."""
-        data = self.request("GET", self.url("/actions/workflows/%s/runs" % workflow, branch=branch,
-                                            event="workflow_dispatch", per_page=limit))
+    def workflow_runs(self, workflow, branch, limit=10, event="workflow_dispatch"):
+        """Gives the runs of one workflow on one branch, newest first: the dispatched
+        ones, or those of event, or with event None the runs of every event."""
+        query = {"branch": branch, "per_page": limit}
+        if event:
+            query["event"] = event
+        data = self.request("GET", self.url("/actions/workflows/%s/runs" % workflow, **query))
         return [self._run(item) for item in data.get("workflow_runs") or []]
 
     def dispatch_workflow(self, workflow, ref, inputs):
