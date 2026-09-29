@@ -378,10 +378,11 @@ branch is refused `not_train`. None of them force-pushes a base.
   merge commit, skips one that does not merge cleanly (the merge is
   aborted), and pushes the branch. It answers
   `{branch, base_head, head, merged: [n...], conflicted: [n...]}`.
-- `train_checks {branch, workflow, input}` dispatches the check workflow
-  (default the `test` block's) on the pushed branch, with no narrowing,
-  and answers `{run_id, head}`; `run_id` is `null` when no run showed
-  within about 15 seconds.
+- `train_checks {branch, workflow, input}` dispatches `workflow` (default
+  the `test` block's) on the pushed branch, with no narrowing, and answers
+  `{workflow, run_id, head}`: `workflow` names the one it dispatched, also
+  when `run_id` is `null` because no run showed within about 15 seconds.
+  Give that `workflow` to `train_status` with the branch and head.
 - `train_status {run_id}` (or `{branch, head, workflow}`) reads the run
   once and answers `{state: pending|success|failure|cancelled, head, url}`.
 - `train_land {base, branch, expect_base_head, head}` fast-forwards the
