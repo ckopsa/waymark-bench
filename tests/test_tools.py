@@ -1037,6 +1037,25 @@ class TestCheck(BenchCase):
         self.assertEqual(answer["skipped"], ["notes.txt"])
         self.assertEqual(self.ok("status", branch="work")["dirty"], 2)
 
+    def test_a_shell_syntax_error_is_found(self):
+        path = self.prepared()
+        util.write(os.path.join(path, ".claude/hooks/close.sh"),
+                   "#!/bin/bash\nif true; then\n  echo hi\n")
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        finding = answer["findings"][0]
+        self.assertEqual(finding["path"], ".claude/hooks/close.sh")
+        self.assertIn("syntax error", finding["message"])
+        self.assertGreaterEqual(finding["line"], 1)
+
+    def test_a_clean_shell_script_answers_ok(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "scripts/run.sh"), "#!/bin/bash\nif true; then\n  echo hi\nfi\n")
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["findings"], [])
+        self.assertEqual(answer["skipped"], [])
+
     def test_paths_limit_the_check(self):
         path = self.prepared()
         util.write(os.path.join(path, "src/app.py"), "def broken(:\n")
