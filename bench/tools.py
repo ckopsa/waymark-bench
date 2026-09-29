@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-from . import config as config_module, forge, git, landing as landing_module, symbols
+from . import config as config_module, forge, git, landing as landing_module, settings, symbols
 
 
 DEFAULT_MAX_BYTES = 16384
@@ -37,10 +37,9 @@ CEILING_DEPTH = 12
 DEFAULT_WAIT = 0
 CEILING_WAIT = 3600
 # test answers at once with the run it dispatched, and test_result reads that
-# run for a bounded wait. A seat's call crosses its own timeout, the connector,
-# the engine's proxy and Traefik, so no call holds the line past 45 seconds.
-DEFAULT_TEST_WAIT = 40
-CEILING_TEST_WAIT = 45
+# run for a bounded wait. The engine's gate gives every tools/call 30 seconds,
+# so the wait is the setting BENCH_TEST_WAIT (25 by default) and never past 28.
+CEILING_TEST_WAIT = 28
 TEST_POLL_SECONDS = 5
 # test looks for the run it started about fifteen seconds: 8 reads, 2 s apart.
 TEST_FIND_TRIES = 8
@@ -2100,7 +2099,8 @@ def test_result(bench, args):
     dispatches, so asking again for the same run is always safe."""
     repo = bench.repo(args.get("repo"))
     spec = _test_spec(repo)
-    wait = _int(args, "wait_seconds", DEFAULT_TEST_WAIT, 0, CEILING_TEST_WAIT)
+    default = max(0, min(settings.load().test_wait, CEILING_TEST_WAIT))
+    wait = _int(args, "wait_seconds", default, 0, CEILING_TEST_WAIT)
     deadline = _clock() + wait
     try:
         client = forge.client(repo)
@@ -3172,8 +3172,8 @@ TOOL_SPECS = [
         "name": "test_result",
         "function": test_result,
         "description": (
-            "Reads one run that test started, every 5 s for up to wait_seconds (default 40, "
-            "at most 45), and answers {conclusion: success or cancelled, run_url, duration_s}, "
+            "Reads one run that test started, every 5 s for up to wait_seconds (default 25, "
+            "at most 28), and answers {conclusion: success or cancelled, run_url, duration_s}, "
             "{conclusion: failure, run_url, duration_s, failures: [{test, job, lines}]} or "
             "{conclusion: pending, run_url, elapsed_s}. It never dispatches: ask again while "
             "it answers pending. It deletes the scratch ref when the run is done. The "
@@ -3185,7 +3185,7 @@ TOOL_SPECS = [
                 "repo": _REPO,
                 "run_id": {"type": "integer", "description": "The run test answered."},
                 "wait_seconds": {"type": "integer", "minimum": 0, "maximum": CEILING_TEST_WAIT,
-                                 "description": "Seconds to wait for the run. Default 40."},
+                                 "description": "Seconds to wait for the run. Default 25."},
                 "branch": _BRANCH,
                 "head": {"type": "string",
                          "description": "With no run_id: the head test answered."},

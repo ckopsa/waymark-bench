@@ -188,9 +188,10 @@ so one time per head (`already_rerun` after), and refuses `not_pushed`,
 `test` dispatches one test selection of a branch on the repository's
 own CI and answers at once `{run_id, run_url, conclusion: pending}`.
 `test_result {run_id, wait_seconds}` reads that run every 5 seconds for
-up to `wait_seconds` (40 by default, 45 at most) and answers `success`,
-`cancelled`, `failure` with `failures: [{test, job, lines}]` (4 KB in
-all), or `pending`: ask again. No call holds the line past 45 seconds,
+up to `wait_seconds` (25 by default, the setting `BENCH_TEST_WAIT`; 28 at
+most) and answers `success`, `cancelled`, `failure` with
+`failures: [{test, job, lines}]` (4 KB in all), or `pending`: ask again.
+It waits up to 25 s, under the engine's 30 s limit on a call,
 and `test_result` never dispatches. When the run did not show within
 about 15 seconds, `test` answers `run_id: null` with `head` and
 `dispatched_at`, and `test_result` finds the run by them.
