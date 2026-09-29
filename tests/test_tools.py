@@ -579,6 +579,30 @@ class TestPull(BenchCase):
         self.assertEqual(answer["conflicts"], ["docs/a.txt"])
         with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
             self.assertIn("<<<<<<<", handle.read())
+        self.assertTrue(answer["merge_in_progress"])
+        util.git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=path)
+        self.assertTrue(self.ok("status", branch="work")["merge_in_progress"])
+
+    def test_pull_again_commits_a_resolved_merge(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")
+        self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/a.txt", "alpha\ntheirs\ncharlie\n")
+        self.assertFalse(self.ok("pull", branch="work", **{"from": "base"})["merged"])
+        still = self.ok("pull", branch="work", **{"from": "base"})
+        self.assertEqual(still["conflicts"], ["docs/a.txt"])
+        self.assertTrue(still["merge_in_progress"])
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nboth\ncharlie\n")
+        answer = self.ok("pull", branch="work", **{"from": "base"})
+        self.assertTrue(answer["merged"])
+        self.assertEqual(answer["conflicts"], [])
+        parents = util.git(["log", "-1", "--format=%P", "HEAD"], cwd=path).split()
+        self.assertEqual(len(parents), 2)
+        status = self.ok("status", branch="work")
+        self.assertFalse(status["merge_in_progress"])
+        self.assertEqual(status["behind"], 0)
+        self.assertEqual(status["dirty"], 0)
 
     def test_pull_from_head_moves_to_the_remote_branch(self):
         self.prepared()
