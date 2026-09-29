@@ -52,6 +52,9 @@ TEST_FAILURE_BYTES = 4096
 TEST_LINE_CHARS = 300
 FAILED_TEST = re.compile(r"(?:FAIL|ERROR) in \(([^)]+)\)")
 TEST_PREFIX = "bench-test/"
+# a Clojure test namespace (dotted, its last segment ending in -test), or ns/test-name
+TEST_SELECT = re.compile(r"^(?:[A-Za-z_][\w-]*\.)+[A-Za-z_][\w-]*-test"
+                         r"(?:/[A-Za-z_*+!?<>=-][\w*+!?<>='-]*)?$")
 _sleep = time.sleep
 _clock = time.monotonic
 PROTECTED_PREFIXES = (".github/", ".claude/")
@@ -2102,6 +2105,12 @@ def _dispatch_test(bench, repo, spec, client, args):
     with run_id null when no run showed within about fifteen seconds."""
     branch = check_branch(_text(args, "branch", required=True))
     select = _text(args, "select", required=True)
+    if not TEST_SELECT.match(select):
+        # a job or make target is not a namespace: the workflow would run no suite
+        raise Refusal("input", field="select", select=select,
+                      reason="select must be a test namespace (dotted, ending in -test) "
+                             "or namespace/test-name, such as factory10.merge-line-test "
+                             "or factory10.merge-line-test/merges-a-line")
     scratch = TEST_PREFIX + branch
     runs = client.workflow_runs(spec["workflow"], scratch)
     before = {run["id"] for run in runs}
@@ -3239,7 +3248,10 @@ TOOL_SPECS = [
                 "repo": _REPO,
                 "branch": _BRANCH,
                 "select": {"type": "string",
-                           "description": "The test selection: a namespace or a test id."},
+                           "description": "The test selection: a test namespace, dotted and "
+                                          "ending in -test (factory10.merge-line-test), or "
+                                          "namespace/test-name. Anything else is refused "
+                                          "before dispatch."},
                 "seat": _SEAT, "sitting": _SITTING,
             },
             "required": ["repo"],
