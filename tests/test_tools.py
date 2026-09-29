@@ -111,6 +111,35 @@ class TestPrepare(BenchCase):
         answer = self.refused("prepare", branch="../escape")
         self.assertEqual(answer["refused"], "branch")
 
+    def test_prepare_drops_stray_paths_when_the_head_is_pushed(self):
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "work", "docs/head.txt", "from the remote branch\n")
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "stray\n")
+        util.write(os.path.join(path, "docs/stray.txt"), "stray\n")
+        util.write(os.path.join(path, "keys/kept.pem"), "denied\n")
+        again = self.ok("prepare", branch="work")
+        self.assertEqual(sorted(again["dropped"]), ["docs/a.txt", "docs/stray.txt"])
+        self.assertEqual(again["dirty_paths"], ["keys/kept.pem"])
+        self.assertFalse(os.path.exists(os.path.join(path, "docs/stray.txt")))
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "alpha\nbravo\ncharlie\n")
+
+    def test_prepare_keeps_dirty_paths_when_commits_are_not_pushed(self):
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "work", "docs/head.txt", "from the remote branch\n")
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/local.txt"), "a local commit\n")
+        util.git(["add", "-A"], cwd=path)
+        util.git(["commit", "-m", "not pushed"], cwd=path)
+        util.write(os.path.join(path, "docs/a.txt"), "work in progress\n")
+        again = self.ok("prepare", branch="work")
+        self.assertEqual(again["dropped"], [])
+        self.assertEqual(again["dirty"], 1)
+        self.assertEqual(again["dirty_paths"], ["docs/a.txt"])
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "work in progress\n")
+
 
 class TestStatus(BenchCase):
 
@@ -618,6 +647,29 @@ class TestPull(BenchCase):
         self.assertFalse(status["merge_in_progress"])
         self.assertEqual(status["behind"], 0)
         self.assertEqual(status["dirty"], 0)
+
+    def test_pull_that_fails_leaves_the_worktree_as_it_was(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/mine.txt"), "my edit\n")
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/new.txt", "from the other person\n")
+        real = tools.git.run
+
+        def half_failed(argv, cwd=None, **kwargs):
+            if list(argv[:2]) == ["merge", "--no-edit"]:
+                # a merge that wrote files and then stopped without a conflict
+                util.write(os.path.join(cwd, "docs/a.txt"), "half\n")
+                util.write(os.path.join(cwd, "docs/half.txt"), "half\n")
+                return 1, "", "error: the merge stopped"
+            return real(argv, cwd=cwd, **kwargs)
+
+        with mock.patch.object(tools.git, "run", side_effect=half_failed):
+            answer = self.refused("pull", branch="work", **{"from": "base"})
+        self.assertEqual(answer["refused"], "merge_failed")
+        self.assertEqual(sorted(answer["reset"]), ["docs/a.txt", "docs/half.txt"])
+        self.assertEqual(tools.status_paths(path), ["docs/mine.txt"])
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "alpha\nbravo\ncharlie\n")
 
     def test_pull_from_head_moves_to_the_remote_branch(self):
         self.prepared()

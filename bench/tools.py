@@ -461,6 +461,53 @@ def finish_merge(worktree):
     return []
 
 
+def undo_merge(worktree, before):
+    """Puts a worktree back as it was before a merge that failed. Gives the paths it reset.
+
+    It aborts the merge, then resets each path the merge left changed. A path
+    that was dirty before the merge (in before) is left as it is.
+    """
+    git.run(["merge", "--abort"], cwd=worktree, check=False)
+    wrote = [name for name in status_paths(worktree) if name not in before]
+    for name in wrote:
+        if git.run(["cat-file", "-e", "HEAD:" + name], cwd=worktree, check=False)[0] == 0:
+            git.run(["checkout", "HEAD", "--", name], cwd=worktree, check=False)
+            continue
+        git.run(["rm", "--cached", "-q", "-r", "--ignore-unmatch", "--", name],
+                cwd=worktree, check=False)
+        full = os.path.join(worktree, name)
+        if os.path.isdir(full) and not os.path.islink(full):
+            shutil.rmtree(full, ignore_errors=True)
+        elif os.path.lexists(full):
+            os.remove(full)
+    return wrote
+
+
+def drop_stray(repo, bare, worktree, branch):
+    """Resets a dirty worktree whose head is already pushed. Gives the paths it dropped.
+
+    The head is pushed when it is origin/<branch> or an ancestor of it, so
+    the uncommitted paths are no seat's work: a failed pull left them. It
+    drops nothing when the branch is not on the remote, when the branch has
+    commits the remote does not, or while a merge is in progress. An
+    untracked path that matches a deny glob is kept.
+    """
+    dirty = status_paths(worktree)
+    if not dirty or git.ref_exists("MERGE_HEAD", cwd=worktree):
+        return []
+    remote = "refs/remotes/origin/" + branch
+    if not git.ref_exists(remote, cwd=bare):
+        return []
+    code = git.run(["merge-base", "--is-ancestor", "HEAD", remote], cwd=worktree, check=False)[0]
+    if code != 0:
+        return []
+    git.run(["reset", "--hard", "HEAD"], cwd=worktree)
+    keep = [arg for pattern in repo.deny for arg in ("-e", pattern)]
+    git.run(["clean", "-fd"] + keep, cwd=worktree)
+    left = set(status_paths(worktree))
+    return [name for name in dirty if name not in left]
+
+
 # ------------------------------------------------------------------ tools
 
 
@@ -491,15 +538,19 @@ def prepare(bench, args):
             bench.meta_write(repo.name, meta)
         else:
             base = bench.base_of(repo, branch)
+        dropped = [] if created else drop_stray(repo, bare, path, branch)
         base_head = git.rev_parse(base_ref_of(bare, base), cwd=bare)
         behind, behind_remote = lag_of(bare, path, branch, base_head)
+        dirty = status_paths(path)
         return {
             "repo": repo.name,
             "branch": branch,
             "base": base,
             "head": head_of(path),
             "base_head": base_head,
-            "dirty": len(status_paths(path)),
+            "dirty": len(dirty),
+            "dirty_paths": dirty[:100],
+            "dropped": dropped[:100],
             "created": created,
             "default_branch": repo.default_branch,
             "behind": behind,
@@ -1383,22 +1434,27 @@ def pull(bench, args):
                 return {"repo": repo.name, "branch": branch, "head": head_of(worktree),
                         "merged": False, "conflicts": [],
                         "reason": "the branch is not on the remote"}
+            before = status_paths(worktree)
             code, text, err = git.run(["merge", "--ff-only", remote], cwd=worktree, check=False)
             if code != 0:
+                reset = undo_merge(worktree, before)
                 raise Refusal("not_fast_forward", branch=branch,
-                              reason=(err or text).strip()[:400],
+                              reason=(err or text).strip()[:400], reset=reset[:100],
                               remedy="use pull from base, or discard")
             return {"repo": repo.name, "branch": branch, "head": head_of(worktree),
                     "merged": True, "conflicts": []}
         base = bench.base_of(repo, branch)
         remote = base_ref_of(bare, base)
+        before = status_paths(worktree)
         code, text, err = git.run(["merge", "--no-edit", remote], cwd=worktree, check=False)
         conflicts = []
         if code != 0:
             conflicts = unmerged_paths(worktree)
             if not conflicts:
+                # A merge that failed leaves the worktree as it was before it.
+                reset = undo_merge(worktree, before)
                 raise Refusal("merge_failed", branch=branch, base=base,
-                              reason=(err or text).strip()[:400])
+                              reason=(err or text).strip()[:400], reset=reset[:100])
         return {
             "repo": repo.name,
             "branch": branch,
