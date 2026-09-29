@@ -212,6 +212,26 @@ class TestTheTestTool(LandingCase):
         self.assertEqual(again["conclusion"], "success")
         self.assertEqual(len(self.dispatches()), 1)
 
+    def test_a_select_that_is_not_a_test_namespace_refuses_before_dispatch(self):
+        self.make_test()
+        for select in ("test-factory", "core-test", "waymark.core", "waymark.core-test/"):
+            self.serve(None, "completed", "success")
+            answer = self.refused("test", branch="work", select=select)
+            self.assertEqual(answer["refused"], "input")
+            self.assertEqual(answer["field"], "select")
+            self.assertIn("factory10.merge-line-test", answer["reason"])
+            self.assertEqual(self.calls, [])
+        self.assertEqual(self.scratch(), "")
+
+    def test_a_namespace_or_a_test_id_dispatches(self):
+        head = self.make_test()
+        for select in ("factory10.merge-line-test", "factory10.merge-line-test/merges-a-line?"):
+            self.serve(head, "completed", "success")
+            self.ok("test", branch="work", select=select)
+            self.assertEqual(self.dispatches(),
+                             [{"ref": "bench-test/work", "inputs": {"only": select}}])
+            self.ok("test_result", run_id=31)
+
     def test_a_repository_with_no_test_block_refuses(self):
         self.make_test(test=None)
         self.calls = []
