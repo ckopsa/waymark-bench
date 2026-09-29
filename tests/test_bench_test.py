@@ -100,9 +100,11 @@ class TestTheTestTool(LandingCase):
         self.assertEqual(answer["run_id"], 31)
         self.assertEqual(answer["run_url"], "https://github.com/o/r/actions/runs/31")
         self.assertEqual(answer["conclusion"], "pending")
+        self.assertFalse(answer["dirty_included"])
         self.assertEqual(self.slept, [])
         result = self.ok("test_result", run_id=31)
         self.assertEqual(result["conclusion"], "success")
+        self.assertFalse(result["dirty_included"])
         self.assertEqual(result["duration_s"], 180)
         self.assertNotIn("failures", result)
         self.assertTrue(result["scratch_deleted"])
@@ -116,6 +118,24 @@ class TestTheTestTool(LandingCase):
         self.assertEqual(answer["conclusion"], "failure")
         self.assertEqual(answer["failures"], [{"test": "factory-test", "job": "unit",
                                                "lines": ["FAIL in (factory-test)", "expected: 1"]}])
+
+    def test_a_dirty_worktree_is_tested_on_a_scratch_commit_and_the_branch_stays(self):
+        head = self.make_test()
+        path = self.bench.worktree(self.bench.repo("demo"), "work")
+        with open(os.path.join(path, "dirty.txt"), "w") as handle:
+            handle.write("an edit not yet committed\n")
+        self.serve(head, "completed", "success")
+        answer = self.ok("test", branch="work", select="waymark.core-test")
+        self.assertTrue(answer["dirty_included"])
+        self.assertEqual(answer["paths"], ["dirty.txt"])
+        self.assertNotEqual(answer["head"], head)
+        self.assertEqual(self.scratch().split()[0], answer["head"])
+        self.assertEqual(util.git(["show", answer["head"] + ":dirty.txt"], cwd=path),
+                         "an edit not yet committed\n")
+        self.assertEqual(util.git(["rev-parse", "HEAD"], cwd=path).strip(), head)
+        self.assertIn("dirty.txt", util.git(["status", "--porcelain"], cwd=path))
+        self.serve(answer["head"], "completed", "success")
+        self.assertTrue(self.ok("test_result", run_id=31)["dirty_included"])
 
     def test_a_run_still_going_answers_pending_and_a_second_call_answers_the_result(self):
         head = self.make_test()
