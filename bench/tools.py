@@ -33,9 +33,10 @@ CEILING_DEPTH = 12
 # wait. A landing runs a repo's whole test suite, and the engine that
 # brokers a seat's calls gives up on any call after 30 seconds and marks
 # the server dark - so a default that waited cut every seat off the
-# rig. The way to follow a landing is status or feedback.
+# rig. The way to follow a landing is status or feedback. A wait asked
+# for is cut to 28 seconds, under the gate's 30, as test_result's is.
 DEFAULT_WAIT = 0
-CEILING_WAIT = 3600
+CEILING_WAIT = 28
 # test answers at once with the run it dispatched, and test_result reads that
 # run for a bounded wait. The engine's gate gives every tools/call 30 seconds,
 # so the wait is the setting BENCH_TEST_WAIT (25 by default) and never past 28.
@@ -2963,7 +2964,8 @@ TOOL_SPECS = [
                                              "a merge of the base the change carries does not count."},
                 "wait": {"type": "integer",
                          "description": "The seconds to wait for the landing. The default is 0: it answers at once, and status gives the landing's state. "
-                                        "The ceiling is 3600. Zero gives the answer at once."},
+                                        "The ceiling is 28, under the engine's 30 s limit on a call: a larger wait is cut to it. "
+                                        "Zero gives the answer at once."},
                 "pull_request": {"type": "boolean",
                                  "description": "False to land without opening the pull request. "
                                                 "The default is true."},
