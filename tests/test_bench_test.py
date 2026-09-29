@@ -593,6 +593,37 @@ class TestTrain(LandingCase):
         self.assertEqual(answer["run_id"], 31)
         self.assertEqual(answer["state"], "failure")
 
+    def test_status_reads_the_runs_of_every_event(self):
+        self.answers[WORKFLOW + "/runs"] = ("GET", {"workflow_runs": [self.train_run(33, "abc")]})
+        answer = self.ok("train_status", branch="train/one", head="abc", workflow="tests.yml")
+        self.assertEqual((answer["run_id"], answer["state"]), (33, "success"))
+        [read] = [path for method, path, _ in self.calls if path.startswith(WORKFLOW + "/runs")]
+        self.assertIn("branch=train%2Fone", read)
+        self.assertNotIn("event=", read)
+
+    def test_open_opens_the_pull_request_once_and_never_merges(self):
+        head = self.build([1])["head"]
+        pr = self.train_pr()
+        answer = self.ok("train_open", base="main", branch="train/one", head=head)
+        self.assertEqual((answer["number"], answer["opened"], answer["head"]), (9, True, head))
+        [opened] = self.opened()
+        self.assertEqual((opened["title"], opened["head"], opened["base"]),
+                         ("Merge train: #1", "train/one", "main"))
+        self.answers["/pulls?"] = ("GET", [pr])
+        answer = self.ok("train_open", base="main", branch="train/one", head=head)
+        self.assertEqual((answer["number"], answer["opened"]), (9, False))
+        self.assertEqual(len(self.opened()), 1)
+        self.assertEqual(self.merges(), [])
+
+    def test_open_refuses_a_head_the_train_branch_is_not_at(self):
+        self.build([1])
+        self.train_pr()
+        self.refused("train_open", base="main", branch="train/one", head="0" * 40)
+        self.assertEqual(self.opened(), [])
+
+    def test_open_refuses_a_train_branch_that_is_not_pushed(self):
+        self.refused("train_open", base="main", branch="train/none", head="0" * 40)
+
     def test_status_is_pending_when_no_run_has_the_head(self):
         self.answers[WORKFLOW + "/runs"] = ("GET", {"workflow_runs": [self.train_run(32, "other")]})
         answer = self.ok("train_status", branch="train/one", head="abc", workflow="tests.yml")
