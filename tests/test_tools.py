@@ -155,6 +155,19 @@ class TestPrepare(BenchCase):
         with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "alpha\ndelta\ncharlie\n")
 
+    def test_prepare_keeps_an_untracked_directory_the_edit_tools_wrote_into(self):
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "work", "docs/head.txt", "from the remote branch\n")
+        path = self.prepared()
+        self.ok("edit", branch="work", path="docs/new-dir/x.txt", new="made\n", create=True)
+        util.write(os.path.join(path, "docs/stray.txt"), "stray\n")
+        again = self.ok("prepare", branch="work")
+        self.assertEqual(again["dropped"], ["docs/stray.txt"])
+        self.assertEqual(again["dirty_paths"], ["docs/new-dir/"])
+        self.assertFalse(os.path.exists(os.path.join(path, "docs/stray.txt")))
+        with open(os.path.join(path, "docs/new-dir/x.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "made\n")
+
     def test_prepare_drops_a_path_written_outside_the_edit_tools(self):
         other = util.clone(self.root, self.clone_url)
         util.push_change(other, "work", "docs/head.txt", "from the remote branch\n")
