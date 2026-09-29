@@ -267,6 +267,10 @@ class TestTrain(LandingCase):
 
     def setUp(self):
         LandingCase.setUp(self)
+        self.slept = []
+        self.after_dispatch = {}
+        self.addCleanup(setattr, tools, "_sleep", tools._sleep)
+        tools._sleep = self.slept.append
         self.make({"stages": [], "pull_request": PULL_REQUEST})
         # pull requests 1 and 2 change the same line: 2 conflicts once 1 is in
         for number, word in ((1, "delta"), (2, "echo")):
@@ -277,8 +281,19 @@ class TestTrain(LandingCase):
                 "number": number, "state": "open", "base": {"ref": "main"},
                 "head": {"ref": "pr%d" % number, "sha": sha}})
 
+    def fake_http(self, method, url, headers, body=None):
+        answer = LandingCase.fake_http(self, method, url, headers, body)
+        if method == "POST" and "/dispatches" in url:
+            self.answers.update(self.after_dispatch)
+        return answer
+
     def base_head(self):
         return util.git(["ls-remote", self.clone_url, "refs/heads/main"], cwd=self.root).split()[0]
+
+    def train_run(self, run_id, head, status="completed", conclusion="success"):
+        return {"id": run_id, "run_number": run_id, "status": status, "conclusion": conclusion,
+                "head_sha": head, "head_branch": "train/one",
+                "html_url": "https://github.com/o/r/actions/runs/%d" % run_id, "name": "tests"}
 
     def build(self, prs):
         return self.ok("train_build", base="main", branch="train/one", prs=prs)
@@ -324,3 +339,61 @@ class TestTrain(LandingCase):
         self.ok("train_delete", branch="train/one")
         self.assertEqual(util.git(["ls-remote", self.clone_url, "refs/heads/train/one"],
                                   cwd=self.root), "")
+
+    def test_checks_dispatches_on_the_train_branch_and_finds_the_new_run(self):
+        head = self.build([1])["head"]
+        old = self.train_run(30, head)
+        self.answers[WORKFLOW + "/dispatches"] = ("POST", {})
+        self.answers[WORKFLOW + "/runs"] = ("GET", {"workflow_runs": [old]})
+        self.after_dispatch = {WORKFLOW + "/runs": ("GET", {"workflow_runs": [
+            self.train_run(31, head, "queued", None), old]})}
+        answer = self.ok("train_checks", branch="train/one", workflow="tests.yml")
+        self.assertEqual(answer["run_id"], 31)
+        self.assertEqual(answer["head"], head)
+        self.assertEqual(answer["branch"], "train/one")
+        dispatched = [body if isinstance(body, dict) else json.loads(body)
+                      for method, path, body in self.calls if method == "POST"]
+        self.assertEqual(dispatched, [{"ref": "train/one", "inputs": {}}])
+        self.assertEqual(self.slept, [])
+
+    def test_checks_answers_no_run_id_when_no_new_run_shows(self):
+        head = self.build([1])["head"]
+        self.answers[WORKFLOW + "/dispatches"] = ("POST", {})
+        self.answers[WORKFLOW + "/runs"] = ("GET", {"workflow_runs": [self.train_run(30, head)]})
+        answer = self.ok("train_checks", branch="train/one", workflow="tests.yml")
+        self.assertIsNone(answer["run_id"])
+        self.assertEqual(answer["head"], head)
+        self.assertEqual(len(self.slept), tools.TEST_FIND_TRIES - 1)
+
+    def test_checks_refuses_a_train_branch_that_is_not_pushed(self):
+        answer = self.refused("train_checks", branch="train/none", workflow="tests.yml")
+        self.assertEqual(answer["refused"], "not_pushed")
+
+    def test_status_maps_the_run_state(self):
+        for status, conclusion, state in (("queued", None, "pending"),
+                                          ("in_progress", None, "pending"),
+                                          ("completed", "success", "success"),
+                                          ("completed", "failure", "failure"),
+                                          ("completed", "timed_out", "failure"),
+                                          ("completed", "cancelled", "cancelled")):
+            with self.subTest(status=status, conclusion=conclusion):
+                self.answers["/actions/runs/31"] = ("GET", self.train_run(31, "abc", status, conclusion))
+                answer = self.ok("train_status", run_id=31)
+                self.assertEqual(answer["state"], state)
+                self.assertEqual(answer["run_id"], 31)
+                self.assertEqual(answer["head"], "abc")
+                self.assertEqual(answer["url"], "https://github.com/o/r/actions/runs/31")
+
+    def test_status_finds_the_run_by_branch_and_head(self):
+        self.answers[WORKFLOW + "/runs"] = ("GET", {"workflow_runs": [
+            self.train_run(32, "other", "in_progress", None),
+            self.train_run(31, "abc", "completed", "failure")]})
+        answer = self.ok("train_status", branch="train/one", head="abc", workflow="tests.yml")
+        self.assertEqual(answer["run_id"], 31)
+        self.assertEqual(answer["state"], "failure")
+
+    def test_status_is_pending_when_no_run_has_the_head(self):
+        self.answers[WORKFLOW + "/runs"] = ("GET", {"workflow_runs": [self.train_run(32, "other")]})
+        answer = self.ok("train_status", branch="train/one", head="abc", workflow="tests.yml")
+        self.assertEqual(answer, {"repo": "demo", "run_id": None, "state": "pending",
+                                  "head": "abc", "url": None})
