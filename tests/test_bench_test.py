@@ -137,6 +137,27 @@ class TestTheTestTool(LandingCase):
         self.serve(answer["head"], "completed", "success")
         self.assertTrue(self.ok("test_result", run_id=31)["dirty_included"])
 
+    def test_a_conflicted_pull_keeps_its_merge_through_a_test_of_the_dirty_worktree(self):
+        self.make_test()
+        path = self.bench.worktree(self.bench.repo("demo"), "work")
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")
+        util.git(["commit", "-q", "-am", "our line"], cwd=path)
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/a.txt", "alpha\ntheirs\ncharlie\n")
+        pulled = self.ok("pull", branch="work", **{"from": "base"})
+        self.assertEqual(pulled["conflicts"], ["docs/a.txt"])
+        self.serve(util.git(["rev-parse", "HEAD"], cwd=path).strip(), "completed", "success")
+        self.assertTrue(self.ok("test", branch="work", select="waymark.core-test")["dirty_included"])
+        util.git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=path)
+        self.assertTrue(self.ok("status", branch="work")["merge_in_progress"])
+        still = self.ok("pull", branch="work", **{"from": "base"})
+        self.assertEqual(still["conflicts"], ["docs/a.txt"])
+        self.assertTrue(still["merge_in_progress"])
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nboth\ncharlie\n")
+        self.assertTrue(self.ok("pull", branch="work", **{"from": "base"})["merged"])
+        parents = util.git(["log", "-1", "--format=%P", "HEAD"], cwd=path).split()
+        self.assertEqual(len(parents), 2)
+
     def test_a_run_still_going_answers_pending_and_a_second_call_answers_the_result(self):
         head = self.make_test()
         self.serve(head, "in_progress")

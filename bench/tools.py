@@ -2217,12 +2217,17 @@ def _scratch_commit(worktree, head):
     paths = status_paths(worktree)
     if not paths or not head:
         return head, []
-    git.run(["add", "-A"], cwd=worktree)
+    # The index is put back byte for byte, not reset: a reset drops a merge's
+    # MERGE_HEAD and its unmerged entries, and no pull could then conclude it.
+    index = os.path.join(worktree, git.line(["rev-parse", "--git-path", "index"], cwd=worktree))
+    saved = index + ".bench-scratch"
+    shutil.copyfile(index, saved)
     try:
+        git.run(["add", "-A"], cwd=worktree)
         tree = git.line(["write-tree"], cwd=worktree)
     finally:
-        # the edits stay in the worktree, unstaged as they were
-        git.run(["reset", "-q"], cwd=worktree)
+        # the edits stay in the worktree, staged or unstaged as they were
+        os.replace(saved, index)
     commit = git.line(["commit-tree", tree, "-p", head, "-m",
                        "bench test: the worktree's uncommitted edits"], cwd=worktree)
     return commit, paths
