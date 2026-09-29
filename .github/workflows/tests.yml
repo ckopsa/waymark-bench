@@ -3,6 +3,13 @@ name: tests
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "A unittest module or test id to run; empty runs the whole suite"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   tests:
@@ -21,4 +28,11 @@ jobs:
           git config --global user.email "bench@waymark.invalid"
           git config --global init.defaultBranch main
       - name: Run the tests
-        run: uv run python -m unittest -v
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          if [ -n "$ONLY" ]; then
+            uv run python -m unittest -v "$ONLY"
+          else
+            uv run python -m unittest -v
+          fi
