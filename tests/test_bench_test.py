@@ -134,6 +134,26 @@ class TestTheTestTool(LandingCase):
             "lines": [".github/workflows/image.yml:12:9: shellcheck reported issue SC2086 [shellcheck]",
                       "##[error]Process completed with exit code 1."]}])
 
+    def test_an_execution_error_keeps_its_exception_message(self):
+        log = ["Compiling waymark10.checks-assembly",
+               "Execution error (ExceptionInfo) at waymark10.checks-assembly/check-unref'd-ids (checks_assembly.clj:40).",
+               "kind :ticket field :repo names no id",
+               "{:kind :ticket, :field :repo}",
+               "",
+               "Full report at: /tmp/clojure-1.edn"]
+        self.assertEqual(tools._failing_tests("unit", log), [{
+            "test": None, "job": "unit",
+            "lines": ["Execution error (ExceptionInfo) at waymark10.checks-assembly/check-unref'd-ids (checks_assembly.clj:40).",
+                      "kind :ticket field :repo names no id",
+                      "{:kind :ticket, :field :repo}"]}])
+
+    def test_an_execution_error_message_stops_at_a_stack_frame(self):
+        log = ["Execution error (IllegalArgumentException) at waymark10.core/f (core.clj:3).",
+               "no such field :repo", "\tat clojure.lang.RT.f(RT.java:1)", "more"]
+        self.assertEqual(tools._failing_tests("unit", log)[0]["lines"],
+                         ["Execution error (IllegalArgumentException) at waymark10.core/f (core.clj:3).",
+                          "no such field :repo"])
+
     def test_an_over_long_failure_keeps_its_head_and_its_error_line(self):
         self.make_test()
         wide = "x" * 400
