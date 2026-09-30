@@ -499,3 +499,8 @@ branch is refused `not_train`. None of them force-pushes a base.
 ## The tests
 
 `python -m unittest -v`. The tests use a git origin on the disk.
+
+## License
+
+Copyright (C) 2026 Colton Kopsa. Licensed under the GNU Affero General Public
+License v3.0 or later; see [LICENSE](LICENSE).
