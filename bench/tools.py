@@ -1231,6 +1231,26 @@ def check_command_findings(result):
     return findings
 
 
+def check_step_findings(repo, branch, worktree, step):
+    """Runs the repository's check step and gives its findings. Its prepare
+    command runs first, when it has one, and the command gets what is left of
+    the one timeout. A failed prepare is one finding that carries the tail of
+    its output, and the command does not run."""
+    budget = step.timeout
+    if step.prepare:
+        started = time.monotonic()
+        result = run_step(repo, branch, worktree,
+                          config_module.StageConfig("prepare", step.prepare, timeout=budget))
+        if not result["ok"]:
+            return [{"path": None, "kind": None, "field": None,
+                     "sentence": "the check prepare exited %s" % result["exit_code"],
+                     "message": "check: the prepare exited %s" % result["exit_code"],
+                     "output": result["output"][-2000:]}]
+        budget = max(1, budget - int(time.monotonic() - started))
+    command = config_module.StageConfig(step.name, step.command, timeout=budget)
+    return check_command_findings(run_step(repo, branch, worktree, command))
+
+
 def shell_errors(program, worktree, rel):
     """Runs `bash -n` on one script. Gives its syntax errors as findings."""
     run = subprocess.run([program, "-n", rel], cwd=worktree, capture_output=True,
@@ -1317,7 +1337,7 @@ def check(bench, args):
                 except (OSError, ValueError, subprocess.SubprocessError) as exc:
                     unavailable.append("clj-kondo did not answer: %s" % exc)
         if repo.check is not None:
-            findings.extend(check_command_findings(run_step(repo, branch, worktree, repo.check)))
+            findings.extend(check_step_findings(repo, branch, worktree, repo.check))
     return {
         "repo": repo.name,
         "branch": branch,
@@ -4030,8 +4050,10 @@ TOOL_SPECS = [
                 "check": {"type": "object",
                           "description": "The check step, as bench.json spells it: command, "
                                          "the command the check tool runs in the worktree "
-                                         "after its lint, and timeout (optional), in "
-                                         "seconds. Without it the check tool runs lint only."},
+                                         "after its lint, prepare (optional), a command run "
+                                         "before it, and timeout (optional), in seconds, "
+                                         "the budget both share. Without it the check tool "
+                                         "runs lint only."},
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },

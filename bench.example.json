@@ -5,7 +5,8 @@
       "clone_url": "https://github.com/ckopsa/waymark",
       "default_branch": "main",
       "deny": ["*.pem", "*.key", ".env*", "**/secrets/**"],
-      "check": {"command": "cd workqueue10 && clojure -M:check"}
+      "check": {"prepare": "cd workqueue10 && clojure -P -M:check",
+                "command": "cd workqueue10 && clojure -M:check"}
     },
     "ckopsa/waymark-bench": {
       "clone_url": "https://github.com/ckopsa/waymark-bench",

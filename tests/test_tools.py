@@ -1348,6 +1348,34 @@ class TestCheck(BenchCase):
         self.assertEqual(len(answer["findings"]), 1)
         self.assertIn("could not start", answer["findings"][0]["output"])
 
+    def test_the_check_prepare_runs_before_the_command(self):
+        self.prepared()
+        self.config.repo("demo").check = config_module.check_from_dict(
+            "demo", {"prepare": "echo '✗ [prep] order: prepare ran first' > check.out",
+                     "command": "cat check.out; exit 1"})
+        answer = self.ok("check", branch="work")
+        self.assertEqual([(f["kind"], f["field"], f["sentence"]) for f in answer["findings"]],
+                         [("prep", "order", "prepare ran first")])
+
+    def test_a_failed_check_prepare_is_one_finding_and_the_command_does_not_run(self):
+        path = self.prepared()
+        self.config.repo("demo").check = config_module.check_from_dict(
+            "demo", {"prepare": "echo no dependencies; exit 4",
+                     "command": "touch command.ran; echo '✗ [cmd] x: ran'; exit 1"})
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        self.assertEqual(len(answer["findings"]), 1)
+        self.assertIn("prepare", answer["findings"][0]["sentence"])
+        self.assertIn("no dependencies", answer["findings"][0]["output"])
+        self.assertFalse(os.path.exists(os.path.join(path, "command.ran")))
+
+    def test_the_check_prepare_survives_the_round_trip(self):
+        step = config_module.check_from_dict("demo", {"prepare": "make deps", "command": "make check"})
+        again = config_module.check_from_dict("demo", step.to_dict())
+        self.assertEqual((again.prepare, again.command), ("make deps", "make check"))
+        with self.assertRaises(config_module.ConfigError):
+            config_module.check_from_dict("demo", {"prepare": 3, "command": "make check"})
+
     def test_a_passing_check_step_answers_ok(self):
         self.prepared()
         self.config.repo("demo").check = config_module.check_from_dict(
