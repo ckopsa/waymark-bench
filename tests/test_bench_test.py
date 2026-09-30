@@ -154,6 +154,34 @@ class TestTheTestTool(LandingCase):
                          ["Execution error (IllegalArgumentException) at waymark10.core/f (core.clj:3).",
                           "no such field :repo"])
 
+    def test_a_kaocha_failure_keeps_its_message_expected_and_actual(self):
+        log = ["--- unit (clojure.test) ---",
+               "FAIL in waymark10.decision-sugar-test/the-canonical-hash (decision_sugar_test.clj:42)",
+               "the canonical hash moved; pin \"b2c9\"",
+               "expected: (= \"a1f0\" (hash-of decision))",
+               "  actual: (not (= \"a1f0\" \"b2c9\"))",
+               "",
+               "ERROR in waymark10.core-test/boom (core_test.clj:7)",
+               "expected: nil",
+               "  actual: java.lang.Exception: boom",
+               "FAIL in (factory-test) (core_test.clj:9)",
+               "expected: 1",
+               "",
+               "3 tests, 3 assertions, 1 error, 2 failures."]
+        self.assertEqual(tools._failing_tests("unit", log), [
+            {"test": "waymark10.decision-sugar-test/the-canonical-hash", "job": "unit",
+             "lines": [log[1], log[2], log[3], log[4]]},
+            {"test": "waymark10.core-test/boom", "job": "unit", "lines": [log[6], log[7], log[8]]},
+            {"test": "factory-test", "job": "unit", "lines": [log[9], log[10]]}])
+
+    def test_a_failure_keeps_twenty_lines_and_two_thousand_characters_at_most(self):
+        many = ["FAIL in waymark10.core-test/long (core_test.clj:1)"] + ["line %d" % i for i in range(40)]
+        self.assertEqual(tools._failing_tests("unit", many)[0]["lines"], many[:tools.TEST_FAILURE_LINES])
+        wide = ["FAIL in waymark10.core-test/wide (core_test.clj:1)"] + ["y" * 250] * 19
+        lines = tools._failing_tests("unit", wide)[0]["lines"]
+        self.assertLessEqual(sum(len(line) for line in lines), tools.TEST_FAILURE_CHARS)
+        self.assertEqual(lines[:2], wide[:2])
+
     def test_an_over_long_failure_keeps_its_head_and_its_error_line(self):
         self.make_test()
         wide = "x" * 400
