@@ -2049,6 +2049,10 @@ LOG_MARKERS = re.compile(
     r"|\d+ tests?, \d+ assertions?, \d+ errors?, \d+ failures?|Uncaught exception|Exception: |ExceptionInfo")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 LOG_AFTER_MARK = 8
+# A thrown error prints `Execution error (Class) at ...`, then its message on the
+# lines after it, up to a blank line or a stack frame.
+EXECUTION_ERROR = "Execution error ("
+EXECUTION_ERROR_LINES = 20
 # GitHub marks a failed step ##[error], and opens each step with ##[group]Run and
 # its header's ##[endgroup]. A job log's tail is the post-job cleanup, so a
 # failure with no test marker takes the failed step's last lines instead.
@@ -2720,11 +2724,30 @@ def _failing_tests(job, lines):
         found.append({"test": match.group(1), "job": job,
                       "lines": [text[:TEST_LINE_CHARS] for text in block]})
     if not found:
-        marked = [line for line in lines if LOG_MARKERS.search(line)][-LOG_AFTER_MARK:]
-        chosen = marked or _failed_step_lines(lines) or lines[-LOG_AFTER_MARK:]
+        chosen = _marked_lines(lines) or _failed_step_lines(lines) or lines[-LOG_AFTER_MARK:]
         found.append({"test": None, "job": job,
                       "lines": [text[:TEST_LINE_CHARS] for text in chosen]})
     return found
+
+
+def _marked_lines(lines):
+    """Gives a log's last LOG_AFTER_MARK marked lines. An Execution error line keeps
+    its message: the lines after it up to a blank line or a stack frame, in
+    EXECUTION_ERROR_LINES lines at most."""
+    marked = [index for index, line in enumerate(lines)
+              if LOG_MARKERS.search(line) or EXECUTION_ERROR in line][-LOG_AFTER_MARK:]
+    kept = []
+    for index in marked:
+        if kept and index <= kept[-1]:
+            continue
+        kept.append(index)
+        if not lines[index].lstrip().startswith(EXECUTION_ERROR):
+            continue
+        for after in range(index + 1, min(len(lines), index + EXECUTION_ERROR_LINES)):
+            if not lines[after].strip() or lines[after].startswith(("at ", "\tat ")):
+                break
+            kept.append(after)
+    return [lines[index] for index in kept]
 
 
 def _failed_step_lines(lines):
