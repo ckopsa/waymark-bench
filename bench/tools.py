@@ -2004,7 +2004,9 @@ def log_tail(text, size):
 
     The colors come off first. The marked lines lead: each marker, then the
     lines around it (a few after, for an exception's first frames), and the
-    rest of the room goes to the last lines. A gap is "...".
+    rest of the room goes to the last lines. A gap is "...". A log with no
+    marker gives the failed step's lines up to its ##[error], not the post-job
+    cleanup; the plain tail only when neither is found.
     """
     text = ANSI_ESCAPE.sub("", text or "")
     if not text or len(text.encode("utf-8", "replace")) <= size:
@@ -2012,6 +2014,9 @@ def log_tail(text, size):
     lines = text.splitlines()
     marks = [i for i, line in enumerate(lines) if LOG_MARKERS.search(line)]
     if not marks:
+        step = _failed_step_lines(clean_log(text))
+        if step:
+            return landing_module.tail("\n".join(step), size)
         return landing_module.tail(text, size)
 
     def cost(index):
@@ -2559,12 +2564,29 @@ def _failures(bench, repo, client, run_id):
         for failure in _failing_tests(job.get("name"), lines):
             size = sum(len(line) + 1 for line in failure["lines"]) + len(failure["test"] or "")
             if used + size > TEST_FAILURE_BYTES:
+                room = TEST_FAILURE_BYTES - used - len(failure["test"] or "")
+                failures.append(_cut_failure(failure, room))
                 failures.append({"test": None, "job": job.get("name"),
                                  "lines": [(LOG_HINT % job["id"]).strip()]})
                 return failures
             failures.append(failure)
             used += size
     return failures
+
+
+def _cut_failure(failure, room):
+    """Gives a failure cut to room bytes: its first lines, a gap \"...\", then its
+    ##[error] lines, which stay whatever the room."""
+    errors = [line for line in failure["lines"] if line.startswith(LOG_ERROR)]
+    room -= sum(len(line) + 1 for line in errors) + 4
+    head = []
+    for line in failure["lines"]:
+        if line.startswith(LOG_ERROR) or len(line) + 1 > room:
+            break
+        head.append(line)
+        room -= len(line) + 1
+    gap = ["..."] if len(head) + len(errors) < len(failure["lines"]) else []
+    return dict(failure, lines=head + gap + errors)
 
 
 def _failing_tests(job, lines):

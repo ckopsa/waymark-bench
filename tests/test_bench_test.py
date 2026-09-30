@@ -134,6 +134,30 @@ class TestTheTestTool(LandingCase):
             "lines": [".github/workflows/image.yml:12:9: shellcheck reported issue SC2086 [shellcheck]",
                       "##[error]Process completed with exit code 1."]}])
 
+    def test_an_over_long_failure_keeps_its_head_and_its_error_line(self):
+        self.make_test()
+        wide = "x" * 400
+        logs = {1: "FAIL in (factory-test)\n" + "\n".join("expected: %d %s" % (i, wide) for i in range(8)),
+                2: "##[group]Run actionlint\n##[endgroup]\n"
+                   + "\n".join("lint finding %d %s" % (i, wide) for i in range(11))
+                   + "\n##[error]Process completed with exit code 1.\nPost job cleanup."}
+
+        class Client:
+            def steps(self, run_id):
+                return [{"id": 1, "name": "unit", "result": "failure"},
+                        {"id": 2, "name": "actionlint", "result": "failure"}]
+
+            def step_log(self, run_id, job_id):
+                return logs[job_id]
+
+        failures = tools._failures(self.bench, self.bench.repo("demo"), Client(), 31)
+        lint = failures[1]
+        self.assertEqual(lint["job"], "actionlint")
+        self.assertTrue(lint["lines"][0].startswith("lint finding 0"))
+        self.assertEqual(lint["lines"][-1], "##[error]Process completed with exit code 1.")
+        self.assertLessEqual(sum(len(line) + 1 for failure in failures[:2] for line in failure["lines"])
+                             + len("factory-test"), tools.TEST_FAILURE_BYTES)
+
     def test_a_dirty_worktree_is_tested_on_a_scratch_commit_and_the_branch_stays(self):
         head = self.make_test()
         path = self.bench.worktree(self.bench.repo("demo"), "work")
