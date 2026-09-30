@@ -30,15 +30,20 @@ class ConfigError(Exception):
 class StageConfig:
     """One step of a landing: a shell command in the worktree."""
 
-    def __init__(self, name, command, commit=None, timeout=DEFAULT_STEP_TIMEOUT):
+    def __init__(self, name, command, commit=None, timeout=DEFAULT_STEP_TIMEOUT, prepare=None):
         self.name = name
         self.command = command
         self.commit = commit
         self.timeout = timeout
+        # the check step only: a command run before command, under the same timeout
+        self.prepare = prepare
 
     def to_dict(self):
-        return {"name": self.name, "command": self.command, "commit": self.commit,
+        data = {"name": self.name, "command": self.command, "commit": self.commit,
                 "timeout": self.timeout}
+        if self.prepare:
+            data["prepare"] = self.prepare
+        return data
 
 
 class LandConfig:
@@ -250,9 +255,18 @@ def setup_from_dict(repo_name, data):
 
 
 def check_from_dict(repo_name, data):
-    """Makes the check step of one repository, {command[, timeout]}, or None:
-    the command the check tool runs in the worktree after its lint."""
-    return step_from_dict(repo_name, data, "check")
+    """Makes the check step of one repository, {command[, prepare][, timeout]}, or
+    None: the command the check tool runs in the worktree after its lint, and the
+    prepare command it runs before that one."""
+    step = step_from_dict(repo_name, data, "check")
+    if step is None:
+        return None
+    prepare = data.get("prepare")
+    if prepare is not None:
+        if not isinstance(prepare, str) or not prepare.strip():
+            raise ConfigError("repo %s: check prepare must be a command" % repo_name)
+        step.prepare = prepare
+    return step
 
 
 def step_from_dict(repo_name, data, name):
