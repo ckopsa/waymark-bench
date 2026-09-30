@@ -368,6 +368,13 @@ volume at `/data`: it holds the clones, the worktrees and the landings.
 A container that loses it clones again on the next `enroll` or
 `prepare`.
 
+The image carries a JDK 21 and the Clojure CLI, pinned by the
+Dockerfile's `CLOJURE_CLI_VERSION` to the version ckopsa/waymark's CI
+uses, so a `check` step can run `clojure`. The deps cache lives on the
+volume: at each start the entrypoint (`entrypoint.sh`) makes `/data/m2`
+and `/data/gitlibs` when they are missing and links `/root/.m2` and
+`/root/.gitlibs` to them, so the deps persist across restarts.
+
 The job gives the container these things:
 
 | what | how |
