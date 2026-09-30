@@ -121,6 +121,19 @@ class TestTheTestTool(LandingCase):
         self.assertEqual(answer["failures"], [{"test": "factory-test", "job": "unit",
                                                "lines": ["FAIL in (factory-test)", "expected: 1"]}])
 
+    def test_a_failed_lint_step_answers_its_own_lines_not_the_cleanup(self):
+        log = ["##[group]Run actions/checkout@v4", "##[endgroup]",
+               "##[group]Run actionlint", "actionlint", "shell: /usr/bin/bash -e {0}",
+               "##[endgroup]",
+               ".github/workflows/image.yml:12:9: shellcheck reported issue SC2086 [shellcheck]",
+               "##[error]Process completed with exit code 1.",
+               "Post job cleanup.", "[command]/usr/bin/git version",
+               "##[warning]Node.js 20 actions are deprecated."]
+        self.assertEqual(tools._failing_tests("actionlint", log), [{
+            "test": None, "job": "actionlint",
+            "lines": [".github/workflows/image.yml:12:9: shellcheck reported issue SC2086 [shellcheck]",
+                      "##[error]Process completed with exit code 1."]}])
+
     def test_a_dirty_worktree_is_tested_on_a_scratch_commit_and_the_branch_stays(self):
         head = self.make_test()
         path = self.bench.worktree(self.bench.repo("demo"), "work")
