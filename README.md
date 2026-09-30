@@ -56,6 +56,15 @@ its `[tag]` and `field` the word before its colon, when the line has
 them. A command that exits non-zero with no `✗` line is one finding that
 carries the tail of its output.
 
+The check step runs in the background, so a slow one does not pass the
+engine's 30 s limit on a call. `check` waits for it up to `wait` seconds
+(5 by default, 20 at most). A step that has not ended answers the lint's
+findings with `pending: true`, `ok: null` and a `check_id`. Call `check`
+again with that `check_id` until it is not pending: the answer then
+carries `state` (`finished`, or `timed_out` when the step passed its
+`timeout`), `exit_code`, and the step's findings after the lint's. A
+repository with no check step answers in one call, as before.
+
 ## A worktree that is old
 
 `prepare` fetches, but it does not move a worktree that exists. Its
