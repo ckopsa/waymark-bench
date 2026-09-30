@@ -43,6 +43,15 @@ engine: it calls `enroll` for each one. The rig holds those entries in
 bench.json first, and it reads `repos.json` after it. An entry of
 `repos.json` wins over an entry of bench.json with the same name.
 
+An entry can give a `check` step, `{command[, timeout]}`, in bench.json
+or to `enroll`. After its lint, `check` runs that command in the
+worktree. For ckopsa/waymark it is `cd workqueue10 && clojure -M:check`,
+which assembles every module's kinds and checks them. Each output line
+that opens with `✗` is one finding, `{kind, field, sentence}`: `kind` is
+its `[tag]` and `field` the word before its colon, when the line has
+them. A command that exits non-zero with no `✗` line is one finding that
+carries the tail of its output.
+
 ## A worktree that is old
 
 `prepare` fetches, but it does not move a worktree that exists. Its

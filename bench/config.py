@@ -65,7 +65,7 @@ class RepoConfig:
     """One repository on the bench."""
 
     def __init__(self, name, clone_url, default_branch="main", deny=None, land=None,
-                 source="config", test=None, setup=None):
+                 source="config", test=None, setup=None, check=None):
         self.name = name
         self.source = source
         self.clone_url = clone_url
@@ -78,6 +78,8 @@ class RepoConfig:
         self.test = test
         # the step prepare runs in a new worktree (npm ci), until it succeeds once
         self.setup = setup
+        # the step check runs in the worktree after its lint; its ✗ lines are findings
+        self.check = check
 
     def to_dict(self):
         return {
@@ -88,6 +90,7 @@ class RepoConfig:
             "land": self.land.to_dict() if self.land else None,
             "test": dict(self.test) if self.test else None,
             "setup": self.setup.to_dict() if self.setup else None,
+            "check": self.check.to_dict() if self.check else None,
         }
 
 
@@ -192,6 +195,7 @@ def repos_from_dict(data, source="config"):
             source=source,
             test=test_from_dict(name, spec.get("test")),
             setup=setup_from_dict(name, spec.get("setup")),
+            check=check_from_dict(name, spec.get("check")),
         )
     return repos
 
@@ -242,18 +246,29 @@ def test_from_dict(repo_name, data):
 
 def setup_from_dict(repo_name, data):
     """Makes the setup step of one repository, {command[, timeout]}, or None."""
+    return step_from_dict(repo_name, data, "setup")
+
+
+def check_from_dict(repo_name, data):
+    """Makes the check step of one repository, {command[, timeout]}, or None:
+    the command the check tool runs in the worktree after its lint."""
+    return step_from_dict(repo_name, data, "check")
+
+
+def step_from_dict(repo_name, data, name):
+    """Makes one named step of one repository, {command[, timeout]}, or None."""
     if data is None or data is False:
         return None
     if not isinstance(data, dict):
-        raise ConfigError("repo %s: setup must be a JSON object" % repo_name)
+        raise ConfigError("repo %s: %s must be a JSON object" % (repo_name, name))
     command = data.get("command")
     if not command or not isinstance(command, str):
-        raise ConfigError("repo %s: setup needs a command" % repo_name)
+        raise ConfigError("repo %s: %s needs a command" % (repo_name, name))
     try:
         timeout = min(max(int(data.get("timeout", DEFAULT_STEP_TIMEOUT)), 1), CEILING_STEP_TIMEOUT)
     except (TypeError, ValueError):
-        raise ConfigError("repo %s: setup has a bad timeout" % repo_name)
-    return StageConfig("setup", command, timeout=timeout)
+        raise ConfigError("repo %s: %s has a bad timeout" % (repo_name, name))
+    return StageConfig(name, command, timeout=timeout)
 
 
 def land_from_dict(repo_name, data, default_branch):

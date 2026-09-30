@@ -626,7 +626,14 @@ def prepare(bench, args):
 def run_setup(repo, branch, path):
     """Runs the repository's setup step in a worktree, with the land env.
     Gives {ran, ok, exit_code, output}; a failure is reported, never raised."""
-    step = repo.setup
+    result = run_step(repo, branch, path, repo.setup)
+    result["output"] = result["output"][-2000:]
+    return result
+
+
+def run_step(repo, branch, path, step):
+    """Runs one configured step in a worktree, with the land env. Gives
+    {ran, ok, exit_code, output} with the whole scrubbed output."""
     env = dict(os.environ)
     if repo.land is not None:
         env.update(repo.land.env)
@@ -636,7 +643,8 @@ def run_setup(repo, branch, path):
     try:
         proc = subprocess.Popen(step.command, shell=True, cwd=path, env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, errors="replace", start_new_session=True)
+                                text=True, encoding="utf-8", errors="replace",
+                                start_new_session=True)
     except OSError as exc:
         return {"ran": True, "ok": False, "exit_code": 127, "output": str(exc)}
     try:
@@ -651,7 +659,7 @@ def run_setup(repo, branch, path):
         output = (output or "") + "\n(killed after %s seconds)" % step.timeout
         code = -1
     return {"ran": True, "ok": code == 0, "exit_code": code,
-            "output": git.scrub(output or "")[-2000:]}
+            "output": git.scrub(output or "")}
 
 
 def status(bench, args):
@@ -1152,6 +1160,37 @@ def yaml_errors(places, unavailable):
 
 
 BASH_ERROR = re.compile(r"^.*?: line (\d+): (.*)$")
+CHECK_MARK = "✗"
+CHECK_KIND = re.compile(r"\[([^\]]+)\]\s*")
+CHECK_FIELD = re.compile(r"(\S+?):(?:\s+|$)")
+
+
+def check_command_findings(result):
+    """Turns the answer of the repository's check step into findings: one for
+    each line that opens with ✗, as {kind, field, sentence}, where kind is
+    its [tag] and field the word before its colon, when it has them. A failed
+    step with no ✗ line is one finding that carries the tail of its output."""
+    findings = []
+    for line in result["output"].splitlines():
+        text = line.strip()
+        if not text.startswith(CHECK_MARK):
+            continue
+        text = text[len(CHECK_MARK):].strip()
+        kind = field = None
+        match = CHECK_KIND.match(text)
+        if match:
+            kind, text = match.group(1), text[match.end():]
+        match = CHECK_FIELD.match(text)
+        if match:
+            field, text = match.group(1), text[match.end():]
+        findings.append({"path": None, "kind": kind, "field": field, "sentence": text.strip(),
+                         "message": "check: %s" % line.strip()})
+    if not findings and not result["ok"]:
+        findings.append({"path": None, "kind": None, "field": None,
+                         "sentence": "the check step exited %s" % result["exit_code"],
+                         "message": "check: the step exited %s" % result["exit_code"],
+                         "output": result["output"][-2000:]})
+    return findings
 
 
 def shell_errors(program, worktree, rel):
@@ -1175,7 +1214,8 @@ def shell_errors(program, worktree, rel):
 
 def check(bench, args):
     """Lints the files a change touched: Clojure forms, Python compiles, shell parses,
-    .github YAML parses. It never writes."""
+    .github YAML parses. Then it runs the repository's check step, when it has one.
+    It never writes."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     given = args.get("paths")
@@ -1238,6 +1278,8 @@ def check(bench, args):
                     findings.extend(kondo_errors(program, worktree, clojure))
                 except (OSError, ValueError, subprocess.SubprocessError) as exc:
                     unavailable.append("clj-kondo did not answer: %s" % exc)
+        if repo.check is not None:
+            findings.extend(check_command_findings(run_step(repo, branch, worktree, repo.check)))
     return {
         "repo": repo.name,
         "branch": branch,
@@ -2829,9 +2871,13 @@ def enroll(bench, args):
         test = config_module.test_from_dict(name, args.get("test"))
     except config_module.ConfigError as exc:
         raise Refusal("input", field="test", reason=str(exc))
+    try:
+        check = config_module.check_from_dict(name, args.get("check"))
+    except config_module.ConfigError as exc:
+        raise Refusal("input", field="check", reason=str(exc))
     entry = config_module.RepoConfig(
         name=name, clone_url=clone_url, default_branch=default_branch,
-        deny=deny, land=land, source="file", test=test)
+        deny=deny, land=land, source="file", test=test, check=check)
     with bench.lock(name):
         cloned = not bench.bare_exists(name)
         try:

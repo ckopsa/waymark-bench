@@ -1280,6 +1280,39 @@ class TestCheck(BenchCase):
         self.assertTrue(answer["ok"])
         self.assertEqual(answer["skipped"], ["README.md"])
 
+    CHECK_OUTPUT = ("checking 3 kinds\n"
+                    "✗ [unref'd-ids] ticket.parent: names an id no kind defines\n"
+                    "  ✗ [missing-label] task: has no label\n"
+                    "done\n")
+
+    def test_the_check_step_gives_a_finding_for_each_cross_line(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "check.out"), self.CHECK_OUTPUT)
+        self.config.repo("demo").check = config_module.check_from_dict(
+            "demo", {"command": "cat check.out; exit 1"})
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        self.assertEqual([(f["kind"], f["field"], f["sentence"]) for f in answer["findings"]],
+                         [("unref'd-ids", "ticket.parent", "names an id no kind defines"),
+                          ("missing-label", "task", "has no label")])
+
+    def test_a_failed_check_step_with_no_cross_line_gives_its_tail(self):
+        self.prepared()
+        self.config.repo("demo").check = config_module.check_from_dict(
+            "demo", {"command": "echo could not start; exit 3"})
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        self.assertEqual(len(answer["findings"]), 1)
+        self.assertIn("could not start", answer["findings"][0]["output"])
+
+    def test_a_passing_check_step_answers_ok(self):
+        self.prepared()
+        self.config.repo("demo").check = config_module.check_from_dict(
+            "demo", {"command": "echo all kinds assemble"})
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["findings"], [])
+
     ODD_LET = "(ns demo.core)\n\n(defn f []\n  (let [x] x))\n"
 
     def test_check_says_when_clj_kondo_is_not_installed(self):
