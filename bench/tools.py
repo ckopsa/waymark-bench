@@ -52,7 +52,11 @@ TEST_SKEW_SECONDS = 10
 # the failing tests of a red run, in this many bytes at most
 TEST_FAILURE_BYTES = 4096
 TEST_LINE_CHARS = 300
-FAILED_TEST = re.compile(r"(?:FAIL|ERROR) in \(([^)]+)\)")
+# a failure keeps its header and the lines after it, in this many lines and characters
+TEST_FAILURE_LINES = 20
+TEST_FAILURE_CHARS = 2000
+# clojure.test's FAIL in (test) (file:line), or kaocha's FAIL in ns/test (file:line)
+FAILED_TEST = re.compile(r"(?:FAIL|ERROR) in (?:\(([^)]+)\)|([^\s(]+))")
 TEST_PREFIX = "bench-test/"
 # a Clojure test namespace (dotted, its last segment ending in -test), or ns/test-name
 TEST_SELECT = re.compile(r"^(?:[A-Za-z_][\w-]*\.)+[A-Za-z_][\w-]*-test"
@@ -2809,20 +2813,25 @@ def _cut_failure(failure, room):
 
 def _failing_tests(job, lines):
     """Gives each test a job's clean log names as failed, with its lines up to the
-    next failure or a blank line. A log that names none gives its marked lines,
+    next failure or a blank line, in TEST_FAILURE_LINES lines and TEST_FAILURE_CHARS
+    characters at most. A log that names none gives its marked lines,
     or the failed step's lines up to its ##[error], or its last lines, under test null."""
     found = []
     for index, line in enumerate(lines):
         match = FAILED_TEST.search(line)
         if not match:
             continue
-        block = [line]
-        for after in lines[index + 1:index + 1 + LOG_AFTER_MARK]:
+        block = [line[:TEST_LINE_CHARS]]
+        used = len(block[0])
+        for after in lines[index + 1:index + TEST_FAILURE_LINES]:
             if not after.strip() or FAILED_TEST.search(after):
                 break
+            after = after[:TEST_LINE_CHARS]
+            if used + len(after) > TEST_FAILURE_CHARS:
+                break
             block.append(after)
-        found.append({"test": match.group(1), "job": job,
-                      "lines": [text[:TEST_LINE_CHARS] for text in block]})
+            used += len(after)
+        found.append({"test": match.group(1) or match.group(2), "job": job, "lines": block})
     if not found:
         chosen = _marked_lines(lines) or _failed_step_lines(lines) or lines[-LOG_AFTER_MARK:]
         found.append({"test": None, "job": job,
