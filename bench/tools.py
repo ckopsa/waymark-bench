@@ -451,6 +451,27 @@ def marked_paths(worktree, paths):
     return marked
 
 
+def conflict_ranges(worktree, paths):
+    """Gives each path with the line ranges of its conflict markers, <<<<<<< to >>>>>>>."""
+    found = []
+    for name in paths:
+        try:
+            with open(os.path.join(worktree, name), encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            continue
+        ranges, start = [], None
+        for number, line in enumerate(lines, 1):
+            if line.startswith("<<<<<<<"):
+                start = number
+            elif line.startswith(">>>>>>>") and start is not None:
+                ranges.append({"start": start, "end": number})
+                start = None
+        if ranges:
+            found.append({"path": name, "ranges": ranges})
+    return found
+
+
 def finish_merge(worktree):
     """Commits a merge in progress whose markers are gone. Gives the marked paths."""
     marked = marked_paths(worktree, unmerged_paths(worktree))
@@ -678,9 +699,10 @@ def status(bench, args):
         counts = git.line(["rev-list", "--left-right", "--count", "%s...HEAD" % base_head], cwd=path)
         behind, ahead = (counts.split() + ["0", "0"])[:2]
         merging = git.ref_exists("MERGE_HEAD", cwd=path)
+        markers = conflict_ranges(path, unmerged_paths(path)) if merging else None
     item = bench.landings.get(repo, branch)
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 1024, CEILING_MAX_BYTES)
-    return {
+    answer = {
         "repo": repo.name,
         "branch": branch,
         "head": head,
@@ -693,12 +715,18 @@ def status(bench, args):
         "merge_in_progress": merging,
         "landing": item.view(max_bytes) if item else None,
     }
+    if markers is not None:
+        answer["markers"] = markers
+    return answer
 
 
 def _find_tree(bench, repo, worktree, args, max_bytes, allow=None):
     start_rel = clean_path(_text(args, "path", default=".") or ".")
     start, rel = bench.resolve(repo, worktree, start_rel, allow=allow)
     depth = _int(args, "depth", DEFAULT_DEPTH, 1, CEILING_DEPTH)
+    if os.path.isfile(start):
+        raise Refusal("is_file", path=rel, reason="this is a file, not a directory",
+                      remedy="read it with the read tool: {\"path\": \"%s\"}" % rel)
     if not os.path.isdir(start):
         raise Refusal("not_found", path=rel, reason="the path is not a directory")
     entries = []
@@ -912,6 +940,10 @@ def find(bench, args):
     mode = _text(args, "mode", default="tree")
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
     allow = _globs(args, "allow")
+    if mode in ("glob", "grep") and not args.get("pattern"):
+        raise Refusal("input", field="pattern",
+                      reason="mode %s needs pattern: %s" % (
+                          mode, "a glob, e.g. *.py" if mode == "glob" else "a Perl regular expression"))
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
         if mode == "tree":
@@ -975,6 +1007,10 @@ def _read_symbol(answer, content, symbol, max_bytes):
     return answer
 
 
+_DIRECTORY_REMEDY = ("list it with the find tool: {\"mode\": \"tree\", \"path\": \"%s\"}, "
+                     "or its definitions with the symbols tool")
+
+
 def _load(bench, repo, worktree, branch, args, allow):
     """Gives (rel, ref, hash, content) of one file, from the worktree or from a ref."""
     ref = _text(args, "ref")
@@ -987,7 +1023,13 @@ def _load(bench, repo, worktree, branch, args, allow):
                                   check=False)
         if code != 0:
             raise Refusal("not_found", path=rel, ref=ref)
+        if git.line(["cat-file", "-t", blob.strip()], cwd=worktree) == "tree":
+            raise Refusal("is_directory", path=rel, ref=ref, reason="this is a directory, not a file",
+                          remedy=_DIRECTORY_REMEDY % rel)
         return rel, ref, blob.strip(), git.out(["show", spec], cwd=worktree)
+    if os.path.isdir(full):
+        raise Refusal("is_directory", path=rel, reason="this is a directory, not a file",
+                      remedy=_DIRECTORY_REMEDY % rel)
     if not os.path.isfile(full):
         raise Refusal("not_found", path=rel)
     file_hash = git.line(["hash-object", "--", full], cwd=worktree)
@@ -1436,6 +1478,23 @@ def _nearest(content, old):
     return best
 
 
+def _nearest_block(content, old, nearest):
+    """Gives the file's lines that stand where old would, around the nearest line, verbatim."""
+    wanted = old.split("\n")
+    first = max(nearest["line"] - wanted.index(nearest["old"]), 1)
+    lines = content.split("\n")
+    return {"line": first, "text": "\n".join(lines[first - 1: first - 1 + len(wanted)])}
+
+
+def _lines_of(content, old):
+    """Gives the line on which each copy of old starts, at most 20."""
+    lines, start = [], content.find(old)
+    while start != -1 and len(lines) < 20:
+        lines.append(content.count("\n", 0, start) + 1)
+        start = content.find(old, start + max(len(old), 1))
+    return lines
+
+
 def _plan_edit(bench, repo, worktree, plan, item, allow_protected, allow):
     """Judges one edit against the plan and adds its steps. Gives its answer."""
     operation, old, new = _operation_of(item)
@@ -1449,15 +1508,18 @@ def _plan_edit(bench, repo, worktree, plan, item, allow_protected, allow):
         content = plan.text(full)
         found = content.count(old)
         if found > 1:
-            raise Refusal("found", path=rel, found=found,
-                          remedy="give more of the file in old, so it is unique")
+            raise Refusal("found", path=rel, found=found, lines=_lines_of(content, old),
+                          remedy="old is in the file %d times, starting on lines: give more of the "
+                                 "file around the one you mean in old, so it is unique" % found)
         if not found:
             nearest = _nearest(content, old)
             if nearest is None:
                 raise Refusal("found", path=rel, found=0, remedy="old is not in the file: copy it from a read")
             raise Refusal("found", path=rel, found=0, nearest=nearest,
+                          block=_nearest_block(content, old, nearest),
                           remedy="old is not in the file: nearest is the file's line near its line "
-                                 "nearest.old, so copy nearest.text into old")
+                                 "nearest.old, and block.text is the file's lines where old would "
+                                 "stand, from block.line, so copy block.text into old")
         content = content.replace(old, new, 1)
         plan.state[full] = content
         plan.steps.append(("write", full, content))
@@ -1700,7 +1762,7 @@ def _merge_in(worktree, branch, base, remote):
             reset = undo_merge(worktree, before)
             raise Refusal("merge_failed", branch=branch, base=base,
                           reason=(err or text).strip()[:400], reset=reset[:100])
-    return {
+    answer = {
         "base": base,
         "head": head_of(worktree),
         "merged": code == 0,
@@ -1709,6 +1771,9 @@ def _merge_in(worktree, branch, base, remote):
         "note": ("the markers stay in the files and the merge stays in progress: "
                  "remove them, then pull or submit") if conflicts else "",
     }
+    if conflicts:
+        answer["markers"] = conflict_ranges(worktree, conflicts)
+    return answer
 
 
 def pull(bench, args):
@@ -1732,6 +1797,7 @@ def pull(bench, args):
             if marked:
                 return {"repo": repo.name, "branch": branch, "head": head_of(worktree),
                         "merged": False, "conflicts": marked, "merge_in_progress": True,
+                        "markers": conflict_ranges(worktree, marked),
                         "note": "the merge is in progress: remove the markers, then pull or submit"}
         bare = bench.fetch(repo)
         base = None
@@ -3309,7 +3375,8 @@ TOOL_SPECS = [
         "description": (
             "Gives the state of the worktree: the head, the base, the count of changed "
             "paths, the changed paths, and the commits ahead of and behind the base. "
-            "It does no fetch."
+            "During a merge, markers gives each conflicted path with the line ranges "
+            "{start, end} of its conflict markers. It does no fetch."
         ),
         "schema": {
             "type": "object",
@@ -3326,7 +3393,8 @@ TOOL_SPECS = [
             "with their sizes. Mode glob gives the paths that match a pattern. Mode grep "
             "gives the count of matches for each file first, then the lines. Mode diff "
             "gives the change of the worktree against the base. The symbols tool gives the "
-            "definitions. Every answer has a cap. "
+            "definitions. Modes glob and grep require pattern. Mode tree takes a directory: "
+            "a file is refused with the way to read it. Every answer has a cap. "
             "With allow, the answer holds only the paths that a glob of the list matches."
         ),
         "schema": {
@@ -3368,7 +3436,8 @@ TOOL_SPECS = [
             "as the last fetch left it; prepare and pull fetch. Give if_hash "
             "with the hash of your last read: if the file did not change, the answer is "
             "unchanged and the hash, and not the bytes. To read one definition by its name, "
-            "use read_symbol. With allow, a path that no glob of the list matches is refused."
+            "use read_symbol. A directory is refused with the way to list it. "
+            "With allow, a path that no glob of the list matches is refused."
         ),
         "schema": {
             "type": "object",
@@ -3398,8 +3467,10 @@ TOOL_SPECS = [
         "function": list_symbols,
         "description": (
             "Gives the top-level definitions of the Clojure and Python files under a path, "
-            "each with its name, kind, path, line and end_line, e.g. {\"path\": \"lib/core.clj\"} "
-            "or {\"path\": \"lib\", \"pattern\": \"^(area|top)$\"}. Read one with read_symbol. "
+            "each with its name, kind, path, line and end_line, e.g. "
+            "{\"path\": \"lib/core.clj\", \"pattern\": \"\"} or "
+            "{\"path\": \"lib\", \"pattern\": \"^(area|top)$\"}. pattern is required: the empty "
+            "pattern gives every definition. Read one with read_symbol. "
             "The answer has a cap. With allow, the answer holds only the paths that a glob of "
             "the list matches."
         ),
@@ -3411,7 +3482,7 @@ TOOL_SPECS = [
                 "path": {"type": "string",
                          "description": "A file or a directory. The default is the whole worktree."},
                 "pattern": {"type": "string",
-                            "description": "A Python regular expression over the names."},
+                            "description": "A Python regular expression over the names; \"\" for all."},
                 "max_matches": {"type": "integer",
                                 "description": "The cap on the definitions. The default is 200."},
                 "max_bytes": _MAX_BYTES,
@@ -3419,7 +3490,7 @@ TOOL_SPECS = [
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },
-            "required": ["repo", "branch"],
+            "required": ["repo", "branch", "pattern"],
             "additionalProperties": False,
         },
     },
@@ -3566,7 +3637,11 @@ TOOL_SPECS = [
             "delete: true, or move_to. They apply in order and together or not at all, e.g. "
             "{\"edits\": [{\"path\": \"a.py\", \"old\": \"x = 1\", \"new\": \"x = 2\"}, "
             "{\"path\": \"c.py\", \"delete\": true}]}; a refusal names the edit by its number, "
-            "from 1, in item. The answer gives each edit's path and hash. A write under .github/ "
+            "from 1, in item. To create a file give path, new and create: true, and no old. "
+            "An old that is not in the file is refused with nearest and block: block.text is "
+            "the file's lines where old would stand, verbatim, to copy into old. An old found "
+            "more than once is refused with found and the lines each copy starts on. "
+            "The answer gives each edit's path and hash. A write under .github/ "
             "or .claude/ is refused when the scope does not name the path. With allow, a path "
             "that no glob of the list matches is refused."
         ),
@@ -3638,7 +3713,9 @@ TOOL_SPECS = [
             "remote branch. From base merges the base branch in. On a conflict the markers "
             "stay in the files and the answer gives the paths. A dirty worktree's edits are "
             "put aside and put back after; reapplied gives each path restored, conflicted "
-            "(the markers stay in the file) or held (kept aside until a later pull)."
+            "(the markers stay in the file) or held (kept aside until a later pull). "
+            "A conflicted pull gives markers: each conflicted path with the line ranges "
+            "{start, end} of its conflict markers."
         ),
         "schema": {
             "type": "object",

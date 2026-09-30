@@ -451,6 +451,29 @@ class TestSymbols(BenchCase):
         self.assertEqual(answer["field"], "mode")
         self.assertIn("symbols tool", answer["reason"])
 
+    def test_find_tree_of_a_file_says_to_read_it(self):
+        self.with_fixtures()
+        answer = self.refused("find", branch="work", mode="tree", path="lib/core.clj")
+        self.assertEqual(answer["refused"], "is_file")
+        self.assertIn("read tool", answer["remedy"])
+
+    def test_read_of_a_directory_says_to_list_it(self):
+        self.with_fixtures()
+        answer = self.refused("read", branch="work", path="lib")
+        self.assertEqual(answer["refused"], "is_directory")
+        self.assertIn("tree", answer["remedy"])
+        answer = self.refused("read", branch="work", path="docs", ref="base")
+        self.assertEqual(answer["refused"], "is_directory")
+
+    def test_find_glob_and_grep_need_pattern(self):
+        self.with_fixtures()
+        for mode in ("glob", "grep"):
+            answer = self.refused("find", branch="work", mode=mode, path="lib")
+            self.assertEqual(answer["field"], "pattern")
+            self.assertIn(mode, answer["reason"])
+        self.assertIn("pattern", tools.TOOLS["symbols"]["schema"]["required"])
+        self.assertIn("require pattern", tools.TOOLS["find"]["description"])
+
     def test_read_refuses_symbol(self):
         self.with_fixtures()
         answer = self.refused("read", branch="work", path="lib/core.clj", symbol="greet")
@@ -689,6 +712,20 @@ class TestEdit(BenchCase):
         answer = self.refused("edit", branch="work", path="docs/a.txt", old="charlee", new="C")
         self.assertEqual(answer["nearest"]["line"], 3)
 
+    def test_a_missed_old_gives_the_block_to_paste(self):
+        self.prepared()
+        answer = self.refused("edit_many", branch="work", edits=[
+            {"path": "docs/a.txt", "old": "alpha\n  bravo", "new": "ALPHA\nBRAVO"}])
+        self.assertEqual(answer["block"], {"line": 1, "text": "alpha\nbravo"})
+        self.assertIn("create: true, and no old", tools.TOOLS["edit_many"]["description"])
+
+    def test_an_old_found_twice_names_its_lines(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nbravo\nalpha\n")
+        answer = self.refused("edit", branch="work", path="docs/a.txt", old="alpha", new="A")
+        self.assertEqual((answer["found"], answer["lines"]), (2, [1, 3]))
+        self.assertIn("2 times", answer["remedy"])
+
     def test_edit_list_names_every_bad_item(self):
         path = self.prepared()
         answer = self.refused("edit_many", branch="work", edits=[
@@ -737,6 +774,18 @@ class TestPull(BenchCase):
         self.assertTrue(answer["merge_in_progress"])
         util.git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=path)
         self.assertTrue(self.ok("status", branch="work")["merge_in_progress"])
+
+    def test_a_conflicted_pull_gives_the_lines_of_its_markers(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")
+        self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/a.txt", "alpha\ntheirs\ncharlie\n")
+        answer = self.ok("pull", branch="work", **{"from": "base"})
+        expected = [{"path": "docs/a.txt", "ranges": [{"start": 2, "end": 6}]}]
+        self.assertEqual(answer["markers"], expected)
+        self.assertEqual(self.ok("status", branch="work")["markers"], expected)
+        self.assertEqual(self.ok("pull", branch="work", **{"from": "base"})["markers"], expected)
 
     def test_pull_again_commits_a_resolved_merge(self):
         path = self.prepared()
