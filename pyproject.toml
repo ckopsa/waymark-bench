@@ -3,6 +3,7 @@ name = "waymark-bench"
 version = "0.1.0"
 description = "The bench rig: git worktrees, landings and feedback over MCP."
 readme = "README.md"
+license = "AGPL-3.0-or-later"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic-settings>=2.0",
