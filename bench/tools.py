@@ -3957,6 +3957,11 @@ TOOL_SPECS = [
                                         "match, and order_input (optional, default order), the "
                                         "input that takes an ordered namespace list. Without it "
                                         "the test tool refuses no_test_workflow."},
+                "check": {"type": "object",
+                          "description": "The check step, as bench.json spells it: command, "
+                                         "the command the check tool runs in the worktree "
+                                         "after its lint, and timeout (optional), in "
+                                         "seconds. Without it the check tool runs lint only."},
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },
