@@ -1,8 +1,8 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives thirty
-tools: `prepare`, `status`, `diff`, `find`, `read`, `symbols`, `read_symbol`, `check`, `edit`,
+for each repository and a git worktree for each branch. It gives thirty-one
+tools: `prepare`, `status`, `diff`, `find`, `read`, `symbols`, `read_symbol`, `history`, `check`, `edit`,
 `edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
 `test_result`, `enroll`, `repos`, `unenroll`, `train_build`, `train_checks`,
 `train_open`, `train_status`, `train_land` and `train_delete`. It
@@ -114,6 +114,22 @@ method one level in, named `Class.method`. A `read_symbol` of several matches
 (the `defmethod`s of one multi) gives each, up to 20, under `max_bytes`.
 A name the file does not define is refused `not_found` with `close`,
 the names that look like it.
+
+## History and content search
+
+| Tool | Input | Answer |
+| --- | --- | --- |
+| `history` | `path`, `pickaxe`, `all`, `limit` (default 20, at most 100) | `commits`: each `{sha, date, subject}`, newest first |
+
+`history` runs `git log --format='%H %ad %s' --date=short` in the
+worktree. `path` adds `-- <path>`, `pickaxe` adds `-S <pickaxe>`, and
+`all` adds `--all`, so a file that is gone, a name that left the code or
+a commit on another branch can still be found. A denied path is refused,
+and with `allow` a `path` is necessary. Its token is `bench.history`,
+gated as `bench.read` is.
+
+For a search of the content, use `find` mode `grep`: it runs
+`git grep -P` under a path.
 
 ## The enrollment
 

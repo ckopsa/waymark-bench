@@ -1,4 +1,4 @@
-"""The thirty tools of the bench.
+"""The thirty-one tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -29,6 +29,8 @@ CEILING_LIMIT = 1000000
 READ_NOTE = "for a definition use bench__read_symbol; for more, page with offset"
 DEFAULT_DEPTH = 2
 CEILING_DEPTH = 12
+DEFAULT_HISTORY = 20
+CEILING_HISTORY = 100
 # submit starts the landing and answers at once unless it is asked to
 # wait. A landing runs a repo's whole test suite, and the engine that
 # brokers a seat's calls gives up on any call after 30 seconds and marks
@@ -1001,6 +1003,42 @@ def read_symbol(bench, args):
         rel, ref, file_hash, content = _load(bench, repo, worktree, branch, args, allow)
         return _read_symbol({"repo": repo.name, "branch": branch, "path": rel, "ref": ref,
                              "hash": file_hash}, content, symbol, max_bytes)
+
+
+def history(bench, args):
+    """Gives the commits that touched a path or added or removed a text: git log."""
+    repo = bench.repo(args.get("repo"))
+    branch = check_branch(_text(args, "branch", required=True))
+    pickaxe = _text(args, "pickaxe")
+    every = bool(args.get("all"))
+    limit = _int(args, "limit", DEFAULT_HISTORY, 1, CEILING_HISTORY)
+    allow = _globs(args, "allow")
+    with bench.lock(repo.name):
+        worktree = bench.worktree(repo, branch)
+        rel = None
+        scope = []
+        if args.get("path"):
+            _, rel = bench.resolve(repo, worktree, _text(args, "path"), allow=allow)
+            scope = ["--", rel]
+        elif allow is not None:
+            # without a path the subjects of every commit would pass the allow list
+            raise Refusal("denied", allow=list(allow), reason="with allow, history needs a path")
+        log_args = ["log", "--format=%H %ad %s", "--date=short", "-n", str(limit)]
+        if pickaxe:
+            # one word, so a text that starts with a dash is not read as an option
+            log_args.append("-S" + pickaxe)
+        if every:
+            log_args.append("--all")
+        code, text, err = git.run(log_args + scope, cwd=worktree, check=False)
+    if code != 0:
+        raise Refusal("history", reason=(err or text).strip()[:400])
+    commits = []
+    for row in text.splitlines():
+        sha, _, rest = row.partition(" ")
+        date, _, subject = rest.partition(" ")
+        commits.append({"sha": sha, "date": date, "subject": subject[:400]})
+    return {"repo": repo.name, "branch": branch, "path": rel, "pickaxe": pickaxe,
+            "all": every, "limit": limit, "commits": commits}
 
 
 def read(bench, args):
@@ -3367,6 +3405,38 @@ TOOL_SPECS = [
                 "sitting": _SITTING,
             },
             "required": ["repo", "branch", "path", "symbol"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "history",
+        "function": history,
+        "description": (
+            "Gives the commits of the branch, newest first, each with its sha, date and subject: "
+            "git log. path keeps the commits that touched it, pickaxe the commits that added or "
+            "removed that text (git log -S), and all reads every branch instead of this one, e.g. "
+            "{\"path\": \"src/app.py\", \"all\": true} or {\"pickaxe\": \"MARKER\"}. For a search "
+            "of the content use find mode grep. With allow, a path is necessary, and a path that "
+            "no glob of the list matches is refused."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "branch": _BRANCH,
+                "path": {"type": "string",
+                         "description": "A file or a directory, which may be gone from the worktree."},
+                "pickaxe": {"type": "string",
+                            "description": "A text: the commits that changed how many times it occurs."},
+                "all": {"type": "boolean",
+                        "description": "Read every branch and remote branch, not only this one."},
+                "limit": {"type": "integer",
+                          "description": "The count of commits. The default is 20, and 100 at most."},
+                "allow": _ALLOW,
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "branch"],
             "additionalProperties": False,
         },
     },

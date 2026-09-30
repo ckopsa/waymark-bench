@@ -57,14 +57,14 @@ class TestHttp(TransportCase):
         self.assertEqual(status, 202)
         self.assertIsNone(body)
 
-    def test_tools_list_gives_the_thirty_tools_with_schemas(self):
+    def test_tools_list_gives_the_thirty_one_tools_with_schemas(self):
         status, answer = self.post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual(status, 200)
         tools = answer["result"]["tools"]
-        self.assertEqual(len(tools), 30)
+        self.assertEqual(len(tools), 31)
         names = [tool["name"] for tool in tools]
         self.assertEqual(sorted(names), sorted([
-            "prepare", "status", "diff", "find", "read", "symbols", "read_symbol", "check", "edit",
+            "prepare", "status", "diff", "find", "read", "symbols", "read_symbol", "history", "check", "edit",
             "edit_many", "pull", "conflicts", "submit", "feedback", "log", "discard", "merge", "update_branch", "rerun",
             "test", "test_result", "enroll", "repos", "unenroll", "train_build", "train_checks",
             "train_open", "train_status", "train_land", "train_delete"]))
@@ -89,7 +89,7 @@ class TestHttp(TransportCase):
                 self.assertIn("number", schema["required"])
                 continue
             self.assertIn("branch", schema["properties"])
-            if tool["name"] in ("find", "read", "symbols", "read_symbol", "edit", "edit_many"):
+            if tool["name"] in ("find", "read", "symbols", "read_symbol", "history", "edit", "edit_many"):
                 self.assertIn("allow", schema["properties"])
 
     def test_tools_call_gives_text_and_structured_content(self):
@@ -142,7 +142,7 @@ class TestStdio(unittest.TestCase):
         mcp.serve_stdio(self.bench, io.StringIO("\n".join(lines) + "\n"), output)
         answers = [json.loads(row) for row in output.getvalue().splitlines()]
         self.assertEqual([answer["id"] for answer in answers], [1, 2, 3])
-        self.assertEqual(len(answers[1]["result"]["tools"]), 30)
+        self.assertEqual(len(answers[1]["result"]["tools"]), 31)
         self.assertTrue(answers[2]["result"]["structuredContent"]["result"]["created"])
 
 

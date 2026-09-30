@@ -293,6 +293,49 @@ class TestFind(BenchCase):
         self.assertEqual(answer["files"], 2)
 
 
+class TestHistory(BenchCase):
+
+    def subjects(self, answer):
+        return [commit["subject"] for commit in answer["commits"]]
+
+    def test_history_by_path(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nbravo\ndelta\n")
+        util.git(["commit", "-am", "change a"], cwd=path)
+        util.write(os.path.join(path, "README.md"), "# demo\n")
+        util.git(["commit", "-am", "change the readme"], cwd=path)
+        answer = self.ok("history", branch="work", path="docs/a.txt")
+        self.assertEqual(self.subjects(answer), ["change a", "the first commit"])
+        self.assertEqual(len(answer["commits"][0]["sha"]), 40)
+        self.assertRegex(answer["commits"][0]["date"], r"^\d{4}-\d{2}-\d{2}$")
+        self.assertEqual(self.subjects(self.ok("history", branch="work", limit=1)),
+                         ["change the readme"])
+
+    def test_history_by_pickaxe(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "src/app.py"), "def main():\n    return 2\n")
+        util.git(["commit", "-am", "drop the marker"], cwd=path)
+        answer = self.ok("history", branch="work", pickaxe="MARKER_ONE")
+        self.assertEqual(self.subjects(answer), ["drop the marker", "the first commit"])
+        self.assertEqual(self.ok("history", branch="work", pickaxe="no such text")["commits"], [])
+
+    def test_history_all_reads_the_other_branches(self):
+        self.prepared()
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "side", "docs/side.txt", "side\n", message="a side change")
+        self.ok("prepare", branch="work")
+        self.assertEqual(self.ok("history", branch="work", path="docs/side.txt")["commits"], [])
+        answer = self.ok("history", branch="work", path="docs/side.txt", all=True)
+        self.assertEqual(self.subjects(answer), ["a side change"])
+
+    def test_history_refuses_a_denied_path(self):
+        self.prepared()
+        self.assertEqual(self.refused("history", branch="work", path="keys/server.pem")["refused"],
+                         "denied")
+        self.assertEqual(self.refused("history", branch="work", allow=["src/**"])["refused"],
+                         "denied")
+
+
 CLOJURE_FIXTURE = r'''(ns demo.core
   (:require [clojure.string :as str]))
 
