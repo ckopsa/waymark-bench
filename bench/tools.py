@@ -1935,6 +1935,12 @@ LOG_MARKERS = re.compile(
     r"|\d+ tests?, \d+ assertions?, \d+ errors?, \d+ failures?|Uncaught exception|Exception: |ExceptionInfo")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 LOG_AFTER_MARK = 8
+# GitHub marks a failed step ##[error], and opens each step with ##[group]Run and
+# its header's ##[endgroup]. A job log's tail is the post-job cleanup, so a
+# failure with no test marker takes the failed step's last lines instead.
+LOG_ERROR = "##[error]"
+LOG_STEP_BOUNDS = ("##[endgroup]", "##[group]Run ")
+LOG_STEP_LINES = 12
 # GitHub starts each line of a job log with the time it was written.
 LOG_STAMP = re.compile(r"^﻿?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
 LOG_CACHE_SECONDS = 3600
@@ -2537,7 +2543,7 @@ def _failures(bench, repo, client, run_id):
 def _failing_tests(job, lines):
     """Gives each test a job's clean log names as failed, with its lines up to the
     next failure or a blank line. A log that names none gives its marked lines,
-    or its last lines, under test null."""
+    or the failed step's lines up to its ##[error], or its last lines, under test null."""
     found = []
     for index, line in enumerate(lines):
         match = FAILED_TEST.search(line)
@@ -2551,10 +2557,28 @@ def _failing_tests(job, lines):
         found.append({"test": match.group(1), "job": job,
                       "lines": [text[:TEST_LINE_CHARS] for text in block]})
     if not found:
-        marked = [line for line in lines if LOG_MARKERS.search(line)]
+        marked = [line for line in lines if LOG_MARKERS.search(line)][-LOG_AFTER_MARK:]
+        chosen = marked or _failed_step_lines(lines) or lines[-LOG_AFTER_MARK:]
         found.append({"test": None, "job": job,
-                      "lines": [text[:TEST_LINE_CHARS] for text in (marked or lines)[-LOG_AFTER_MARK:]]})
+                      "lines": [text[:TEST_LINE_CHARS] for text in chosen]})
     return found
+
+
+def _failed_step_lines(lines):
+    """Gives the output of the step a clean job log first marks ##[error], through
+    its error lines, in LOG_STEP_LINES at most; [] when no line is so marked."""
+    errors = [i for i, line in enumerate(lines) if line.startswith(LOG_ERROR)]
+    if not errors:
+        return []
+    end = errors[0]
+    while end + 1 < len(lines) and lines[end + 1].startswith(LOG_ERROR):
+        end += 1
+    start = 0
+    for index in range(errors[0] - 1, -1, -1):
+        if lines[index].startswith(LOG_STEP_BOUNDS):
+            start = index + 1
+            break
+    return lines[start:end + 1][-LOG_STEP_LINES:]
 
 
 def _wait_for_run(client, run_id, wait):
