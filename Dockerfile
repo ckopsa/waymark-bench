@@ -2,10 +2,26 @@
 # over MCP. Build: make image (buildx arm64 → ghcr.io/ckopsa/waymark-bench:<tag>).
 FROM python:3.11-slim-bookworm
 
-# git is the rig's one tool; ca-certificates lets it clone over https.
+# git is the rig's one tool; ca-certificates lets it clone over https;
+# curl fetches the Clojure CLI's installer and its tarball.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates \
+ && apt-get install -y --no-install-recommends git ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
+
+# A JDK 21, the Temurin ckopsa/waymark's CI uses, for the check step's
+# `clojure -M:check`.
+COPY --from=eclipse-temurin:21-jdk /opt/java/openjdk /opt/java/openjdk
+ENV JAVA_HOME=/opt/java/openjdk \
+    PATH=/opt/java/openjdk/bin:$PATH
+
+# The Clojure CLI, pinned to the version ckopsa/waymark's CI pins: a bump
+# is this one line. The build fails when `clojure --version` names another.
+ARG CLOJURE_CLI_VERSION=1.12.5.1664
+RUN curl -fsSLO "https://github.com/clojure/brew-install/releases/download/${CLOJURE_CLI_VERSION}/linux-install.sh" \
+ && bash linux-install.sh \
+ && rm linux-install.sh \
+ && clojure --version | grep -F "$CLOJURE_CLI_VERSION" \
+ && rm -rf /root/.m2 /root/.gitlibs
 
 # clj-kondo lets check name the errors a balance walk misses.
 ARG CLJ_KONDO_VERSION=2025.01.16
@@ -35,6 +51,12 @@ RUN pip install --no-cache-dir --no-deps .
 RUN mkdir -p /etc/bench /data \
  && printf '{"data_dir": "/data"}\n' > /etc/bench/bench.json
 VOLUME /data
+
+# The entrypoint links /root/.m2 and /root/.gitlibs to /data/m2 and
+# /data/gitlibs, so the deps `clojure` fetches persist across restarts.
+COPY entrypoint.sh /usr/local/bin/bench-entrypoint
+RUN chmod +x /usr/local/bin/bench-entrypoint
+ENTRYPOINT ["/usr/local/bin/bench-entrypoint"]
 
 # The rig binds every interface inside the container; the job publishes
 # the port. The credentials arrive from the job's environment:
