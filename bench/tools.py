@@ -2337,24 +2337,51 @@ def _test_spec(repo):
     return repo.test
 
 
+def _test_inputs(spec, args):
+    """Gives the dispatch inputs: select under the block's input, or the order
+    list joined with spaces under its order_input. Refuses input when both or
+    neither are given, or when one selection does not have the repo's shape."""
+    order = args.get("order")
+    if order is None:
+        select = _text(args, "select", required=True)
+        _check_selection(spec, "select", select)
+        return {spec["input"]: select}
+    if args.get("select") is not None:
+        raise Refusal("input", field="order",
+                      reason="give select or order, not both")
+    if (not isinstance(order, list) or not order
+            or not all(isinstance(name, str) and name.strip() for name in order)):
+        raise Refusal("input", field="order",
+                      reason="order must be a non-empty list of test namespaces")
+    order = [name.strip() for name in order]
+    for name in order:
+        _check_selection(spec, "order", name)
+    return {spec.get("order_input") or "order": " ".join(order)}
+
+
+def _check_selection(spec, field, select):
+    """Refuses input unless select has the shape of this repository's tests."""
+    pattern = spec.get("select_pattern")
+    if pattern is not None:
+        if not re.fullmatch(pattern, select):
+            raise Refusal("input", field=field, select=select, select_pattern=pattern,
+                          reason="%s must match this repository's select_pattern %s"
+                                 % (field, pattern))
+    elif not TEST_SELECT.match(select):
+        # a job or make target is not a namespace: the workflow would run no suite
+        raise Refusal("input", field=field, select=select,
+                      reason="%s must be a test namespace (dotted, ending in -test) "
+                             "or namespace/test-name, such as factory10.merge-line-test "
+                             "or factory10.merge-line-test/merges-a-line" % field)
+
+
 def _dispatch_test(bench, repo, spec, client, args):
     """Pushes the worktree to the scratch ref and dispatches the test workflow
     on it: a dirty worktree rides a scratch commit on the head, and the work
     branch never moves. Answers pending with the run that dispatch started, or
     with run_id null when no run showed within about fifteen seconds."""
     branch = check_branch(_text(args, "branch", required=True))
-    select = _text(args, "select", required=True)
-    pattern = spec.get("select_pattern")
-    if pattern is not None:
-        if not re.fullmatch(pattern, select):
-            raise Refusal("input", field="select", select=select, select_pattern=pattern,
-                          reason="select must match this repository's select_pattern %s" % pattern)
-    elif not TEST_SELECT.match(select):
-        # a job or make target is not a namespace: the workflow would run no suite
-        raise Refusal("input", field="select", select=select,
-                      reason="select must be a test namespace (dotted, ending in -test) "
-                             "or namespace/test-name, such as factory10.merge-line-test "
-                             "or factory10.merge-line-test/merges-a-line")
+    inputs = _test_inputs(spec, args)
     scratch = TEST_PREFIX + branch
     runs = client.workflow_runs(spec["workflow"], scratch)
     before = {run["id"] for run in runs}
@@ -2387,7 +2414,7 @@ def _dispatch_test(bench, repo, spec, client, args):
             entry["dirty_heads"] = (entry.get("dirty_heads") or [])[-9:] + [head]
         bench.meta_write(repo.name, meta)
     dispatched_at = _utc_stamp(time.time() - TEST_SKEW_SECONDS)
-    client.dispatch_workflow(spec["workflow"], scratch, {spec["input"]: select})
+    client.dispatch_workflow(spec["workflow"], scratch, inputs)
     answer = {"repo": repo.name, "branch": branch, "head": head, "conclusion": "pending",
               "run_id": None, "run_url": None, "dispatched_at": dispatched_at,
               "dirty_included": bool(paths), "paths": paths}
@@ -3623,6 +3650,12 @@ TOOL_SPECS = [
                                           "a test namespace, dotted and ending in -test "
                                           "(factory10.merge-line-test), or namespace/test-name. "
                                           "Anything else is refused before dispatch."},
+                "order": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                          "description": "Instead of select: namespaces to run in this order "
+                                         "in one run. Each must pass the select check; they "
+                                         "are joined with spaces and dispatched as the test "
+                                         "block's order_input (default order). Giving both "
+                                         "select and order is refused."},
                 "seat": _SEAT, "sitting": _SITTING,
             },
             "required": ["repo"],
@@ -3688,7 +3721,9 @@ TOOL_SPECS = [
                                         "the CI workflow the test tool dispatches, and input, "
                                         "the name of its input that takes the selection, and "
                                         "select_pattern (optional), the regex a selection must "
-                                        "match. Without it the test tool refuses no_test_workflow."},
+                                        "match, and order_input (optional, default order), the "
+                                        "input that takes an ordered namespace list. Without it "
+                                        "the test tool refuses no_test_workflow."},
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },

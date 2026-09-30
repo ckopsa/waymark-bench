@@ -233,6 +233,14 @@ Python repository names its unittest shape, as waymark-bench does:
 It passes `tests.test_bench_test` and `tests.test_bench_test.TestTrain`,
 and it refuses `test-factory`.
 
+`test` takes `order` instead of `select`: a list of namespaces to run in
+that order in one run, for a failure that depends on the order. Each
+namespace must pass the same check as `select`; the rig joins them with
+spaces and dispatches them as the input the test block's optional
+`order_input` names (`order` by default). `order: ["a.x-test",
+"a.y-test"]` sends `order="a.x-test a.y-test"`. Giving both `select`
+and `order` is refused `input`, and `select` alone works as before.
+
 The landing runs in the background, and `submit` answers at once with
 the landing running: follow it with `status` or `feedback`. Give `wait`
 to have `submit` wait up to that many seconds instead (the ceiling is
