@@ -1041,6 +1041,18 @@ class TestPullRequestAndFeedback(LandingCase):
             self.assertIn(marker, cut)
         self.assertEqual(tools.log_tail("\x1b[31mshort\x1b[m\n", 1024), "short\n")
 
+    def test_the_log_tail_of_a_failed_lint_step_is_its_findings_not_the_cleanup(self):
+        stamp = "2026-09-30T10:00:01.0000000Z "
+        step = "".join(stamp + line + "\n" for line in (
+            "##[group]Run actionlint", "actionlint", "##[endgroup]",
+            ".github/workflows/image.yml:12:9: shellcheck reported issue SC2086 [shellcheck]",
+            "##[error]Process completed with exit code 1."))
+        cleanup = "".join(stamp + "Post job cleanup: removing file %d\n" % i for i in range(200))
+        cut = tools.log_tail("setup\n" + step + cleanup, 1024)
+        self.assertIn(".github/workflows/image.yml:12:9: shellcheck reported issue SC2086", cut)
+        self.assertTrue(cut.endswith("##[error]Process completed with exit code 1."))
+        self.assertNotIn("Post job cleanup", cut)
+
 
 class TestLog(LandingCase):
     """The log tool reads one job's log a small answer at a time."""
