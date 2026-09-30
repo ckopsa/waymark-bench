@@ -1433,6 +1433,39 @@ class TestCheck(BenchCase):
         self.assertTrue(answer["ok"], answer)
         self.assertEqual(answer["findings"], [])
 
+    def test_a_slow_check_step_answers_pending_then_finished(self):
+        self.prepared()
+        self.config.repo("demo").check = config_module.check_from_dict(
+            "demo", {"command": "sleep 1; echo '✗ [slow] step: took its time'; exit 1"})
+        first = self.ok("check", branch="work", wait=0)
+        self.assertTrue(first["pending"], first)
+        self.assertIsNone(first["ok"])
+        answer = self.ok("check", branch="work", check_id=first["check_id"], wait=20)
+        self.assertFalse(answer["pending"], answer)
+        self.assertEqual((answer["state"], answer["exit_code"]), ("finished", 1))
+        self.assertEqual([f["kind"] for f in answer["findings"]], ["slow"])
+
+    def test_a_check_step_past_its_timeout_answers_timed_out(self):
+        self.prepared()
+        self.config.repo("demo").check = config_module.check_from_dict(
+            "demo", {"command": "sleep 30", "timeout": 1})
+        answer = self.ok("check", branch="work", wait=20)
+        self.assertFalse(answer["pending"], answer)
+        self.assertEqual(answer["state"], "timed_out")
+        self.assertFalse(answer["ok"])
+
+    def test_a_repo_with_no_check_step_answers_in_one_call(self):
+        self.prepared()
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        self.assertNotIn("check_id", answer)
+        self.assertNotIn("pending", answer)
+
+    def test_an_unknown_check_id_is_refused(self):
+        self.prepared()
+        answer = self.refused("check", branch="work", check_id="nope")
+        self.assertEqual(answer["refused"], "unknown_check")
+
     ODD_LET = "(ns demo.core)\n\n(defn f []\n  (let [x] x))\n"
 
     def test_check_says_when_clj_kondo_is_not_installed(self):

@@ -246,6 +246,8 @@ class Bench:
         # The cleaned lines of the job logs read in the last hour, by
         # (repository, run, job): (the time they came, the lines).
         self.logs = {}
+        # The check steps that run in the background, by check_id.
+        self.checks = {}
 
     def check_credentials(self):
         """Checks the forge credential of every repository. The rig runs it
@@ -1277,24 +1279,83 @@ def check_command_findings(result):
     return findings
 
 
+def step_timed_out(result):
+    """True when run_step killed the step at its timeout."""
+    return result["exit_code"] == -1 and "(killed after " in result["output"][-200:]
+
+
 def check_step_findings(repo, branch, worktree, step):
-    """Runs the repository's check step and gives its findings. Its prepare
-    command runs first, when it has one, and the command gets what is left of
-    the one timeout. A failed prepare is one finding that carries the tail of
-    its output, and the command does not run."""
+    """Runs the repository's check step. Gives {findings, exit_code, timed_out}.
+    Its prepare command runs first, when it has one, and the command gets what
+    is left of the one timeout. A failed prepare is one finding that carries
+    the tail of its output, and the command does not run."""
     budget = step.timeout
     if step.prepare:
         started = time.monotonic()
         result = run_step(repo, branch, worktree,
                           config_module.StageConfig("prepare", step.prepare, timeout=budget))
         if not result["ok"]:
-            return [{"path": None, "kind": None, "field": None,
-                     "sentence": "the check prepare exited %s" % result["exit_code"],
-                     "message": "check: the prepare exited %s" % result["exit_code"],
-                     "output": result["output"][-2000:]}]
+            return {"findings": [{"path": None, "kind": None, "field": None,
+                                  "sentence": "the check prepare exited %s" % result["exit_code"],
+                                  "message": "check: the prepare exited %s" % result["exit_code"],
+                                  "output": result["output"][-2000:]}],
+                    "exit_code": result["exit_code"], "timed_out": step_timed_out(result)}
         budget = max(1, budget - int(time.monotonic() - started))
     command = config_module.StageConfig(step.name, step.command, timeout=budget)
-    return check_command_findings(run_step(repo, branch, worktree, command))
+    result = run_step(repo, branch, worktree, command)
+    return {"findings": check_command_findings(result), "exit_code": result["exit_code"],
+            "timed_out": step_timed_out(result)}
+
+
+CHECK_WAIT = 5
+CEILING_CHECK_WAIT = 20
+CHECK_KEEP = 3600
+
+
+def start_check_step(bench, repo, branch, worktree, lint):
+    """Starts the repository's check step on a thread. Gives its check_id and
+    its entry, which holds the lint answer and, when the step ends, its result.
+    A finished entry older than an hour is dropped."""
+    check_id = os.urandom(8).hex()
+    entry = {"repo": repo.name, "branch": branch, "started": time.time(), "lint": lint,
+             "result": None, "done": threading.Event()}
+
+    def work():
+        try:
+            entry["result"] = check_step_findings(repo, branch, worktree, repo.check)
+        except Exception as exc:  # the poll reports it; a thread has no caller
+            entry["result"] = {"findings": [{"path": None, "kind": None, "field": None,
+                                             "sentence": "the check step did not run: %s" % exc,
+                                             "message": "check: the step did not run: %s" % exc}],
+                               "exit_code": None, "timed_out": False}
+        finally:
+            entry["done"].set()
+
+    with bench._guard:
+        old = time.time() - CHECK_KEEP
+        for key in [key for key, item in bench.checks.items()
+                    if item["done"].is_set() and item["started"] < old]:
+            del bench.checks[key]
+        bench.checks[check_id] = entry
+    threading.Thread(target=work, name="check-" + check_id, daemon=True).start()
+    return check_id, entry
+
+
+def check_answer(check_id, entry, wait):
+    """Waits up to `wait` seconds for a check step. Gives the lint answer with
+    check_id and pending; when the step ended, its state (finished or
+    timed_out), its exit code and its findings after the lint's."""
+    entry["done"].wait(wait)
+    answer = dict(entry["lint"], check_id=check_id)
+    if not entry["done"].is_set():
+        answer.update(pending=True, state="pending", ok=None,
+                      remedy="call check again with this check_id until it is not pending")
+        return answer
+    result = entry["result"]
+    findings = list(answer["findings"]) + result["findings"]
+    answer.update(pending=False, state="timed_out" if result["timed_out"] else "finished",
+                  exit_code=result["exit_code"], ok=not findings, findings=findings)
+    return answer
 
 
 def shell_errors(program, worktree, rel):
@@ -1318,10 +1379,20 @@ def shell_errors(program, worktree, rel):
 
 def check(bench, args):
     """Lints the files a change touched: Clojure forms, Python compiles, shell parses,
-    .github YAML parses. Then it runs the repository's check step, when it has one.
-    It never writes."""
+    .github YAML parses. Then it starts the repository's check step, when it has one,
+    and waits for it a while: a step that has not ended answers pending with a
+    check_id, and check with that check_id answers it later. It never writes."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
+    wait = _int(args, "wait", CHECK_WAIT, 0, CEILING_CHECK_WAIT)
+    check_id = _text(args, "check_id")
+    if check_id is not None:
+        with bench._guard:
+            entry = bench.checks.get(check_id)
+        if entry is None or entry["repo"] != repo.name or entry["branch"] != branch:
+            raise Refusal("unknown_check", check_id=check_id, repo=repo.name, branch=branch,
+                          remedy="call check with no check_id to start the check again")
+        return check_answer(check_id, entry, wait)
     given = args.get("paths")
     if given is not None and (not isinstance(given, list)
                               or not all(isinstance(item, str) and item for item in given)):
@@ -1382,9 +1453,7 @@ def check(bench, args):
                     findings.extend(kondo_errors(program, worktree, clojure))
                 except (OSError, ValueError, subprocess.SubprocessError) as exc:
                     unavailable.append("clj-kondo did not answer: %s" % exc)
-        if repo.check is not None:
-            findings.extend(check_step_findings(repo, branch, worktree, repo.check))
-    return {
+    answer = {
         "repo": repo.name,
         "branch": branch,
         "ok": not findings,
@@ -1392,6 +1461,10 @@ def check(bench, args):
         "skipped": skipped,
         "unavailable": unavailable,
     }
+    if repo.check is None:
+        return answer
+    check_id, entry = start_check_step(bench, repo, branch, worktree, answer)
+    return check_answer(check_id, entry, wait)
 
 
 EDIT_FIELDS = ("path", "old", "new", "content", "create", "delete", "move_to")
@@ -3595,7 +3668,11 @@ TOOL_SPECS = [
             "get a balance check of their forms, and clj-kondo's errors when the rig has it; "
             "Python files get a compile check. Other files are listed as skipped. The answer "
             "is ok, the findings with path, line, col and message, skipped and unavailable. "
-            "It never writes."
+            "When the repository has a check step, check starts it and waits up to `wait` "
+            "seconds: a step that has not ended answers pending: true, ok: null and a check_id. "
+            "Call check again with that check_id until it is not pending; the finished answer "
+            "carries state (finished, or timed_out past the step's timeout), exit_code and "
+            "the step's findings. It never writes."
         ),
         "schema": {
             "type": "object",
@@ -3605,6 +3682,12 @@ TOOL_SPECS = [
                 "paths": {"type": "array", "items": {"type": "string"},
                           "description": "The paths to check. The default is every file the "
                                          "branch changed."},
+                "check_id": {"type": "string",
+                             "description": "The check_id a pending answer gave: answers that "
+                                            "check step, pending or ended. It lints nothing again."},
+                "wait": {"type": "integer",
+                         "description": "The seconds to wait for the check step. The default is 5; "
+                                        "the ceiling is 20, under the engine's 30 s limit on a call."},
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },
