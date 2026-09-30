@@ -135,6 +135,7 @@ class TestTheTestTool(LandingCase):
                       "##[error]Process completed with exit code 1."]}])
 
     def test_an_over_long_failure_keeps_its_head_and_its_error_line(self):
+        self.make_test()
         wide = "x" * 400
         logs = {1: "FAIL in (factory-test)\n" + "\n".join("expected: %d %s" % (i, wide) for i in range(8)),
                 2: "##[group]Run actionlint\n##[endgroup]\n"
