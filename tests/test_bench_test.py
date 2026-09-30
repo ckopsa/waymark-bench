@@ -302,6 +302,46 @@ class TestTheTestTool(LandingCase):
             config_module.test_from_dict("demo", {"workflow": "tests.yml", "input": "only",
                                                   "select_pattern": "("})
 
+    def test_an_order_dispatches_its_namespaces_joined_by_spaces(self):
+        head = self.make_test()
+        self.serve(head, "completed", "success")
+        self.ok("test", branch="work", order=["waymark.a-test", "waymark.b-test"])
+        self.assertEqual(self.dispatches(),
+                         [{"ref": "bench-test/work",
+                           "inputs": {"order": "waymark.a-test waymark.b-test"}}])
+
+    def test_an_order_rides_the_order_input_the_block_names(self):
+        head = self.make_test(test={"workflow": "tests.yml", "input": "only",
+                                    "order_input": "sequence"})
+        self.serve(head, "completed", "success")
+        self.ok("test", branch="work", order=["waymark.a-test"])
+        self.assertEqual(self.dispatches(),
+                         [{"ref": "bench-test/work", "inputs": {"sequence": "waymark.a-test"}}])
+
+    def test_an_order_with_an_invalid_namespace_refuses_before_dispatch(self):
+        self.make_test()
+        self.serve(None, "completed", "success")
+        answer = self.refused("test", branch="work", order=["waymark.a-test", "test-factory"])
+        self.assertEqual(answer["refused"], "input")
+        self.assertEqual(answer["field"], "order")
+        self.assertEqual(answer["select"], "test-factory")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.scratch(), "")
+
+    def test_select_and_order_together_refuse(self):
+        self.make_test()
+        self.serve(None, "completed", "success")
+        answer = self.refused("test", branch="work", select="waymark.a-test",
+                              order=["waymark.b-test"])
+        self.assertEqual(answer["refused"], "input")
+        self.assertEqual(answer["field"], "order")
+        self.assertEqual(self.calls, [])
+
+    def test_an_order_input_that_is_not_a_string_is_a_config_error(self):
+        with self.assertRaises(config_module.ConfigError):
+            config_module.test_from_dict("demo", {"workflow": "tests.yml", "input": "only",
+                                                  "order_input": 3})
+
     def test_a_repository_with_no_test_block_refuses(self):
         self.make_test(test=None)
         self.calls = []

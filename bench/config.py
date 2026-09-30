@@ -205,7 +205,8 @@ def load(path):
 
 
 def test_from_dict(repo_name, data):
-    """Makes the test block of one repository, {workflow, input[, select_pattern]}, or None."""
+    """Makes the test block of one repository,
+    {workflow, input[, select_pattern][, order_input]}, or None."""
     if data is None or data is False:
         return None
     if not isinstance(data, dict):
@@ -226,6 +227,12 @@ def test_from_dict(repo_name, data):
         except re.error as exc:
             raise ConfigError("repo %s: test select_pattern is not a regex: %s" % (repo_name, exc))
         block["select_pattern"] = pattern
+    order_input = data.get("order_input")
+    if order_input is not None:
+        # the dispatch input that takes an ordered, space-joined namespace list
+        if not isinstance(order_input, str) or not order_input.strip():
+            raise ConfigError("repo %s: test order_input must be a string" % repo_name)
+        block["order_input"] = order_input.strip()
     return block
 
 
