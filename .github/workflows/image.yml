@@ -27,6 +27,7 @@ on:
       - 'uv.lock'
       - 'Dockerfile'
       - '.dockerignore'
+      - 'entrypoint.sh'
       - '.github/workflows/image.yml'
   pull_request:
     paths:
@@ -35,6 +36,7 @@ on:
       - 'uv.lock'
       - 'Dockerfile'
       - '.dockerignore'
+      - 'entrypoint.sh'
       - '.github/workflows/image.yml'
   workflow_dispatch:
 
