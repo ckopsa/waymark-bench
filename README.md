@@ -1,8 +1,8 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives twenty-nine
-tools: `prepare`, `status`, `find`, `read`, `symbols`, `read_symbol`, `check`, `edit`,
+for each repository and a git worktree for each branch. It gives thirty
+tools: `prepare`, `status`, `diff`, `find`, `read`, `symbols`, `read_symbol`, `check`, `edit`,
 `edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
 `test_result`, `enroll`, `repos`, `unenroll`, `train_build`, `train_checks`,
 `train_open`, `train_status`, `train_land` and `train_delete`. It
@@ -68,6 +68,24 @@ A `pull` that fails puts the worktree back as it was before it. Its
 refusal, `not_fast_forward` (from `head`) or `merge_failed` (from
 `base`, with no conflicts), carries `reset`: the paths it put back, up
 to 100.
+
+`pull` keeps the uncommitted edits of a dirty worktree. It puts them
+aside (a stash under `refs/bench/stash/<branch>`), merges, then puts
+them back. `reapplied` gives each path with its status: `restored`, or
+`conflicted` when its edits meet the merge's changes (the markers stay
+in the file, the index is left plain, and no merge is in progress), or
+`held` when the merge stopped on a conflict or the stash could not be
+applied: the edits stay aside, and the pull that finishes the merge
+puts them back. A refused pull puts them back too. A clean worktree
+pulls as before, with `reapplied` `[]`.
+
+`diff` gives the uncommitted edits against `HEAD`, one entry per path
+in `files`: `path`, `status` (`changed` or `untracked`), `diff` (the
+text), `bytes` (the whole text's size) and `truncated`. `paths` keeps
+only the named paths (a path, a directory or a glob). Each text is cut
+at `max_bytes` (default 4096) and all of them together at `max_total`
+(default 16384); the answer's `truncated` is true when one was cut. A
+path that matches a `deny` glob is not served.
 
 `conflicts` trial-merges the base (`base`, default the repo's default
 branch) into a clean worktree, gives the unmerged `paths`, and aborts

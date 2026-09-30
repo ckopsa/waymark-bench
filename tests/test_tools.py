@@ -739,6 +739,39 @@ class TestPull(BenchCase):
         with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "alpha\nbravo\ncharlie\n")
 
+    def test_pull_puts_back_the_uncommitted_edits(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nmine\ncharlie\n")
+        util.write(os.path.join(path, "docs/mine.txt"), "my edit\n")
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/new.txt", "from the other person\n")
+        answer = self.ok("pull", branch="work", **{"from": "base"})
+        self.assertTrue(answer["merged"])
+        self.assertEqual(answer["reapplied"], [{"path": "docs/a.txt", "status": "restored"},
+                                               {"path": "docs/mine.txt", "status": "restored"}])
+        self.assertTrue(os.path.isfile(os.path.join(path, "docs/new.txt")))
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "alpha\nmine\ncharlie\n")
+        self.assertEqual(sorted(tools.status_paths(path)), ["docs/a.txt", "docs/mine.txt"])
+
+    def test_pull_names_the_edits_that_meet_the_merge(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nmine\ncharlie\n")
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/a.txt", "alpha\ntheirs\ncharlie\n")
+        answer = self.ok("pull", branch="work", **{"from": "base"})
+        self.assertTrue(answer["merged"])
+        self.assertEqual(answer["conflicts"], [])
+        self.assertEqual(answer["reapplied"], [{"path": "docs/a.txt", "status": "conflicted"}])
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("<<<<<<<", text)
+        self.assertIn("mine", text)
+        self.assertIn("theirs", text)
+        status = self.ok("status", branch="work")
+        self.assertFalse(status["merge_in_progress"])
+        self.assertEqual(status["paths"], ["docs/a.txt"])
+
     def test_pull_from_head_moves_to_the_remote_branch(self):
         self.prepared()
         other = util.clone(self.root, self.clone_url)
@@ -746,6 +779,39 @@ class TestPull(BenchCase):
         answer = self.ok("pull", branch="work", **{"from": "head"})
         self.assertTrue(answer["merged"])
         self.assertTrue(os.path.isfile(os.path.join(self.worktree(), "docs/head.txt")))
+
+
+class TestDiff(BenchCase):
+
+    def test_diff_gives_each_dirty_path_against_head(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nmine\ncharlie\n")
+        util.write(os.path.join(path, "docs/mine.txt"), "my edit\n")
+        answer = self.ok("diff", branch="work")
+        files = {item["path"]: item for item in answer["files"]}
+        self.assertEqual(sorted(files), ["docs/a.txt", "docs/mine.txt"])
+        self.assertEqual(files["docs/a.txt"]["status"], "changed")
+        self.assertIn("-bravo", files["docs/a.txt"]["diff"])
+        self.assertIn("+mine", files["docs/a.txt"]["diff"])
+        self.assertEqual(files["docs/mine.txt"]["status"], "untracked")
+        self.assertIn("+my edit", files["docs/mine.txt"]["diff"])
+        self.assertFalse(answer["truncated"])
+        only = self.ok("diff", branch="work", paths=["docs/mine.txt"])
+        self.assertEqual([item["path"] for item in only["files"]], ["docs/mine.txt"])
+
+    def test_diff_cuts_each_text_and_the_whole_and_says_so(self):
+        path = self.prepared()
+        long = "".join("line %d\n" % number for number in range(500))
+        util.write(os.path.join(path, "docs/a.txt"), long)
+        util.write(os.path.join(path, "docs/b.txt"), long)
+        answer = self.ok("diff", branch="work", max_bytes=512, max_total=700)
+        self.assertTrue(answer["truncated"])
+        first, second = answer["files"]
+        self.assertTrue(first["truncated"])
+        self.assertEqual(len(first["diff"].encode("utf-8")), 512)
+        self.assertGreater(first["bytes"], 512)
+        self.assertTrue(second["truncated"])
+        self.assertEqual(len(second["diff"].encode("utf-8")), 188)
 
 
 class TestConflicts(BenchCase):

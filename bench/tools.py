@@ -1,4 +1,4 @@
-"""The twenty-nine tools of the bench.
+"""The thirty tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -1507,8 +1507,137 @@ def _edit(bench, args, edits, problems=None):
         return {"repo": repo.name, "branch": branch, "edits": answers}
 
 
+def _wanted(name, patterns):
+    """Tells if a path is one the caller named: the path, a directory of it, or a glob."""
+    if patterns is None:
+        return True
+    for pattern in patterns:
+        stem = pattern.rstrip("/")
+        if name == stem or name.startswith(stem + "/") or fnmatch.fnmatch(name, pattern):
+            return True
+    return False
+
+
+def diff(bench, args):
+    """Gives the worktree's uncommitted edits against HEAD, one bounded text per path.
+
+    Each path's text is cut at max_bytes and the whole answer's at max_total;
+    a path cut short says truncated. A path a deny glob matches is not served.
+    """
+    repo = bench.repo(args.get("repo"))
+    branch = check_branch(_text(args, "branch", required=True))
+    wanted = _globs(args, "paths")
+    max_bytes = _int(args, "max_bytes", 4096, 256, CEILING_MAX_BYTES)
+    max_total = _int(args, "max_total", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
+    with bench.lock(repo.name):
+        worktree = bench.worktree(repo, branch)
+        tracked = set(name for name in git.out(["diff", "HEAD", "--name-only", "-z"],
+                                                 cwd=worktree).split("\0") if name)
+        untracked = set(name for name in git.out(["ls-files", "--others", "--exclude-standard", "-z"],
+                                                   cwd=worktree).split("\0") if name)
+        files = []
+        left = max_total
+        for name in sorted(tracked | untracked):
+            if deny_pattern(name, repo.deny) or not _wanted(name, wanted):
+                continue
+            if name in tracked:
+                status, argv = "changed", ["diff", "HEAD", "--", name]
+            else:
+                status, argv = "untracked", ["diff", "--no-index", "--", os.devnull, name]
+            data = git.run(argv, cwd=worktree, check=False)[1].encode("utf-8")
+            cut = data[:min(max_bytes, left)].decode("utf-8", errors="ignore")
+            left -= len(cut.encode("utf-8"))
+            files.append({"path": name, "status": status, "bytes": len(data),
+                          "truncated": len(cut.encode("utf-8")) < len(data), "diff": cut})
+        head = head_of(worktree)
+    return {"repo": repo.name, "branch": branch, "head": head, "files": files,
+            "truncated": any(item["truncated"] for item in files)}
+
+
+def stash_ref(branch):
+    """Names the ref that holds the edits a pull put aside for a branch."""
+    return "refs/bench/stash/" + branch
+
+
+def stash_dirty(worktree, branch):
+    """Puts a dirty worktree's edits aside before a pull. Gives the paths put aside.
+
+    The stash lives under stash_ref, not in the stash list the worktrees
+    share, so it outlives a pull that stops on a conflict. A stash a pull
+    already holds is kept as it is, and its paths are not named again.
+    """
+    ref = stash_ref(branch)
+    paths = status_paths(worktree)
+    if not paths or git.ref_exists(ref, cwd=worktree):
+        return []
+    code, text, err = git.run(["stash", "push", "-u", "-m", "bench pull " + branch],
+                              cwd=worktree, check=False)
+    if code != 0:
+        raise Refusal("stash_failed", branch=branch, reason=(err or text).strip()[:400])
+    git.run(["update-ref", ref, git.rev_parse("refs/stash", cwd=worktree)], cwd=worktree)
+    git.run(["stash", "drop", "-q"], cwd=worktree, check=False)
+    return paths
+
+
+def restore_stash(worktree, branch, paths):
+    """Puts the edits a pull put aside back. Gives each path with its status.
+
+    A path whose edits meet the pull's changes keeps the conflict markers in
+    the file and is conflicted; the index is left plain. When git cannot
+    apply the stash at all, the stash stays under its ref and each path is held.
+    """
+    ref = stash_ref(branch)
+    if not git.ref_exists(ref, cwd=worktree):
+        return []
+    code, _, _ = git.run(["stash", "apply", ref], cwd=worktree, check=False)
+    conflicted = unmerged_paths(worktree)
+    if code != 0 and not conflicted:
+        return [{"path": name, "status": "held"} for name in paths]
+    git.run(["reset", "-q"], cwd=worktree, check=False)
+    git.run(["update-ref", "-d", ref], cwd=worktree, check=False)
+    names = sorted(set(paths) | set(conflicted))
+    return [{"path": name, "status": "conflicted" if name in conflicted else "restored"}
+            for name in names]
+
+
+def _merge_in(worktree, branch, base, remote):
+    """Merges remote into the worktree: fast-forward only when base is None."""
+    before = status_paths(worktree)
+    if base is None:
+        code, text, err = git.run(["merge", "--ff-only", remote], cwd=worktree, check=False)
+        if code != 0:
+            reset = undo_merge(worktree, before)
+            raise Refusal("not_fast_forward", branch=branch,
+                          reason=(err or text).strip()[:400], reset=reset[:100],
+                          remedy="use pull from base, or discard")
+        return {"head": head_of(worktree), "merged": True, "conflicts": []}
+    code, text, err = git.run(["merge", "--no-edit", remote], cwd=worktree, check=False)
+    conflicts = []
+    if code != 0:
+        conflicts = unmerged_paths(worktree)
+        if not conflicts:
+            # A merge that failed leaves the worktree as it was before it.
+            reset = undo_merge(worktree, before)
+            raise Refusal("merge_failed", branch=branch, base=base,
+                          reason=(err or text).strip()[:400], reset=reset[:100])
+    return {
+        "base": base,
+        "head": head_of(worktree),
+        "merged": code == 0,
+        "conflicts": conflicts,
+        "merge_in_progress": bool(conflicts),
+        "note": ("the markers stay in the files and the merge stays in progress: "
+                 "remove them, then pull or submit") if conflicts else "",
+    }
+
+
 def pull(bench, args):
-    """Brings the worktree to the branch head, or merges the base in."""
+    """Brings the worktree to the branch head, or merges the base in.
+
+    A dirty worktree's edits are put aside first and put back after the
+    merge (reapplied). A merge that stops on a conflict holds them until a
+    later pull finishes it.
+    """
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     source = _text(args, "from", default="base")
@@ -1525,44 +1654,29 @@ def pull(bench, args):
                         "merged": False, "conflicts": marked, "merge_in_progress": True,
                         "note": "the merge is in progress: remove the markers, then pull or submit"}
         bare = bench.fetch(repo)
+        base = None
         if source == "head":
             remote = "refs/remotes/origin/" + branch
             if not git.ref_exists(remote, cwd=bare):
                 return {"repo": repo.name, "branch": branch, "head": head_of(worktree),
                         "merged": False, "conflicts": [],
                         "reason": "the branch is not on the remote"}
-            before = status_paths(worktree)
-            code, text, err = git.run(["merge", "--ff-only", remote], cwd=worktree, check=False)
-            if code != 0:
-                reset = undo_merge(worktree, before)
-                raise Refusal("not_fast_forward", branch=branch,
-                              reason=(err or text).strip()[:400], reset=reset[:100],
-                              remedy="use pull from base, or discard")
-            return {"repo": repo.name, "branch": branch, "head": head_of(worktree),
-                    "merged": True, "conflicts": []}
-        base = bench.base_of(repo, branch)
-        remote = base_ref_of(bare, base)
-        before = status_paths(worktree)
-        code, text, err = git.run(["merge", "--no-edit", remote], cwd=worktree, check=False)
-        conflicts = []
-        if code != 0:
-            conflicts = unmerged_paths(worktree)
-            if not conflicts:
-                # A merge that failed leaves the worktree as it was before it.
-                reset = undo_merge(worktree, before)
-                raise Refusal("merge_failed", branch=branch, base=base,
-                              reason=(err or text).strip()[:400], reset=reset[:100])
-        return {
-            "repo": repo.name,
-            "branch": branch,
-            "base": base,
-            "head": head_of(worktree),
-            "merged": code == 0,
-            "conflicts": conflicts,
-            "merge_in_progress": bool(conflicts),
-            "note": ("the markers stay in the files and the merge stays in progress: "
-                     "remove them, then pull or submit") if conflicts else "",
-        }
+        else:
+            base = bench.base_of(repo, branch)
+            remote = base_ref_of(bare, base)
+        stashed = stash_dirty(worktree, branch)
+        try:
+            merged = _merge_in(worktree, branch, base, remote)
+        except Refusal as exc:
+            exc.data["reapplied"] = restore_stash(worktree, branch, stashed)
+            raise
+        answer = {"repo": repo.name, "branch": branch}
+        answer.update(merged)
+        if merged.get("merge_in_progress"):
+            answer["reapplied"] = [{"path": name, "status": "held"} for name in stashed]
+        else:
+            answer["reapplied"] = restore_stash(worktree, branch, stashed)
+        return answer
 
 
 def conflicts(bench, args):
@@ -3352,12 +3466,40 @@ TOOL_SPECS = [
         },
     },
     {
+        "name": "diff",
+        "function": diff,
+        "description": (
+            "Gives the uncommitted edits of the worktree against HEAD, one entry per path: "
+            "its status (changed or untracked), its diff text, its size in bytes, and "
+            "truncated when the text was cut at max_bytes or at the answer's max_total. No fetch."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "branch": _BRANCH,
+                "paths": {"type": "array", "items": {"type": "string"},
+                          "description": "Only these paths: a path, a directory, or a glob."},
+                "max_bytes": {"type": "integer",
+                              "description": "The cap of one path's text (default 4096)."},
+                "max_total": {"type": "integer",
+                              "description": "The cap of all the texts together (default 16384)."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "branch"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "pull",
         "function": pull,
         "description": (
             "Fetches, then brings the worktree forward. From head moves the branch to the "
             "remote branch. From base merges the base branch in. On a conflict the markers "
-            "stay in the files and the answer gives the paths."
+            "stay in the files and the answer gives the paths. A dirty worktree's edits are "
+            "put aside and put back after; reapplied gives each path restored, conflicted "
+            "(the markers stay in the file) or held (kept aside until a later pull)."
         ),
         "schema": {
             "type": "object",
