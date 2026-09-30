@@ -592,6 +592,18 @@ def prepare(bench, args):
         dropped = [] if created else drop_stray(repo, bare, path, branch)
         base_head = git.rev_parse(base_ref_of(bare, base), cwd=bare)
         behind, behind_remote = lag_of(bare, path, branch, base_head)
+        set_up = (bench.meta_read(repo.name).get(branch) or {}).get("setup") == "ok"
+    # outside the lock: npm ci takes a minute, and the repository's other
+    # worktrees need not wait for it
+    setup = None
+    if repo.setup is not None:
+        setup = {"ran": False, "ok": True} if set_up else run_setup(repo, branch, path)
+        if setup["ran"]:
+            with bench.lock(repo.name):
+                meta = bench.meta_read(repo.name)
+                meta.setdefault(branch, {"base": base})["setup"] = "ok" if setup["ok"] else "failed"
+                bench.meta_write(repo.name, meta)
+    with bench.lock(repo.name):
         dirty = status_paths(path)
         return {
             "repo": repo.name,
@@ -607,7 +619,39 @@ def prepare(bench, args):
             "behind": behind,
             "behind_remote": behind_remote,
             "note": lag_note(branch, base, behind, behind_remote),
+            "setup": setup,
         }
+
+
+def run_setup(repo, branch, path):
+    """Runs the repository's setup step in a worktree, with the land env.
+    Gives {ran, ok, exit_code, output}; a failure is reported, never raised."""
+    step = repo.setup
+    env = dict(os.environ)
+    if repo.land is not None:
+        env.update(repo.land.env)
+    env["BENCH_REPO"] = repo.name
+    env["BENCH_BRANCH"] = branch
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        proc = subprocess.Popen(step.command, shell=True, cwd=path, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, errors="replace", start_new_session=True)
+    except OSError as exc:
+        return {"ran": True, "ok": False, "exit_code": 127, "output": str(exc)}
+    try:
+        output, _ = proc.communicate(timeout=step.timeout)
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, 9)
+        except OSError:
+            proc.kill()
+        output, _ = proc.communicate()
+        output = (output or "") + "\n(killed after %s seconds)" % step.timeout
+        code = -1
+    return {"ran": True, "ok": code == 0, "exit_code": code,
+            "output": git.scrub(output or "")[-2000:]}
 
 
 def status(bench, args):
@@ -2946,7 +2990,10 @@ TOOL_SPECS = [
             "Makes the clone and the worktree for one branch. Fetches first. "
             "Call prepare one time before the other tools. It is safe to call it again. "
             "It does not move a worktree that exists: behind and behind_remote give the "
-            "commits the worktree lacks, and note names the pull that brings it forward."
+            "commits the worktree lacks, and note names the pull that brings it forward. "
+            "When bench.json gives the repository a setup step (npm ci), prepare runs it in "
+            "the worktree until it succeeds once, and setup answers {ran, ok, exit_code, "
+            "output}; a failed setup is reported, and the next prepare tries it again."
         ),
         "schema": {
             "type": "object",

@@ -70,6 +70,27 @@ class TestPrepare(BenchCase):
         self.assertFalse(second["created"])
         self.assertEqual(second["head"], first["head"])
 
+    def test_prepare_runs_the_setup_step_until_it_succeeds_once(self):
+        self.assertIsNone(self.ok("prepare", branch="work")["setup"], "no setup, no step")
+        repo = self.config.repo("demo")
+        repo.setup = config_module.setup_from_dict(
+            "demo", {"command": "echo run >> setup.log; test -f ready"})
+        failed = self.ok("prepare", branch="fresh")["setup"]
+        self.assertTrue(failed["ran"])
+        self.assertFalse(failed["ok"], "a failed setup is reported, not raised")
+        util.write(os.path.join(self.worktree("fresh"), "ready"), "")
+        passed = self.ok("prepare", branch="fresh")["setup"]
+        self.assertEqual((passed["ran"], passed["ok"], passed["exit_code"]), (True, True, 0),
+                         "a failed setup runs again on the next prepare")
+        again = self.ok("prepare", branch="fresh")["setup"]
+        self.assertEqual(again, {"ran": False, "ok": True}, "once it succeeds, never again")
+        with open(os.path.join(self.worktree("fresh"), "setup.log")) as handle:
+            self.assertEqual(handle.read().split(), ["run", "run"])
+
+    def test_setup_needs_a_command(self):
+        with self.assertRaises(config_module.ConfigError):
+            config_module.setup_from_dict("demo", {"timeout": 5})
+
     def test_prepare_says_a_worktree_on_its_base_is_old(self):
         # The case that read old code: a worktree of the base branch itself,
         # prepared once, and the remote moved on.

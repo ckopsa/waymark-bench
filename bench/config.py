@@ -65,7 +65,7 @@ class RepoConfig:
     """One repository on the bench."""
 
     def __init__(self, name, clone_url, default_branch="main", deny=None, land=None,
-                 source="config", test=None):
+                 source="config", test=None, setup=None):
         self.name = name
         self.source = source
         self.clone_url = clone_url
@@ -76,6 +76,8 @@ class RepoConfig:
         # dispatches, the name of its input that narrows the run to one
         # selection, and the regex a selection must match
         self.test = test
+        # the step prepare runs in a new worktree (npm ci), until it succeeds once
+        self.setup = setup
 
     def to_dict(self):
         return {
@@ -85,6 +87,7 @@ class RepoConfig:
             "deny": list(self.deny),
             "land": self.land.to_dict() if self.land else None,
             "test": dict(self.test) if self.test else None,
+            "setup": self.setup.to_dict() if self.setup else None,
         }
 
 
@@ -188,6 +191,7 @@ def repos_from_dict(data, source="config"):
             land=land_from_dict(name, spec.get("land"), default_branch),
             source=source,
             test=test_from_dict(name, spec.get("test")),
+            setup=setup_from_dict(name, spec.get("setup")),
         )
     return repos
 
@@ -227,6 +231,22 @@ def test_from_dict(repo_name, data):
             raise ConfigError("repo %s: test select_pattern is not a regex: %s" % (repo_name, exc))
         block["select_pattern"] = pattern
     return block
+
+
+def setup_from_dict(repo_name, data):
+    """Makes the setup step of one repository, {command[, timeout]}, or None."""
+    if data is None or data is False:
+        return None
+    if not isinstance(data, dict):
+        raise ConfigError("repo %s: setup must be a JSON object" % repo_name)
+    command = data.get("command")
+    if not command or not isinstance(command, str):
+        raise ConfigError("repo %s: setup needs a command" % repo_name)
+    try:
+        timeout = min(max(int(data.get("timeout", DEFAULT_STEP_TIMEOUT)), 1), CEILING_STEP_TIMEOUT)
+    except (TypeError, ValueError):
+        raise ConfigError("repo %s: setup has a bad timeout" % repo_name)
+    return StageConfig("setup", command, timeout=timeout)
 
 
 def land_from_dict(repo_name, data, default_branch):
