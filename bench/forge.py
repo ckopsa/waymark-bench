@@ -15,10 +15,12 @@ feedback tool can turn Bitbucket and GitHub into the same findings.
 """
 
 import base64
+import datetime
 import json
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,15 +31,49 @@ from . import settings
 TIMEOUT = 60
 BITBUCKET = re.compile(r"bitbucket\.org[:/]([^/]+)/([^/]+?)(?:\.git)?/?$")
 GITHUB = re.compile(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?$")
+RATE_LIMIT = re.compile(r"rate limit", re.IGNORECASE)
+# A throttle that names no time: GitHub asks for a minute at least.
+THROTTLE_WAIT = 60
 
 
 class ForgeError(Exception):
     """The forge did not answer, or refused. `status` is the HTTP status of a
-    refusal, or None when nothing answered."""
+    refusal, or None when nothing answered. `reset` is the instant a spent
+    rate limit resets, and None when the refusal is not a throttle."""
 
-    def __init__(self, message, status=None):
+    def __init__(self, message, status=None, reset=None):
         Exception.__init__(self, message)
         self.status = status
+        self.reset = reset
+
+
+class Text(str):
+    """The text of an answer. `headers` has the answer's headers, the names
+    in lower case."""
+
+    headers = {}
+
+
+def throttle_reset(status, headers, text):
+    """Gives the instant a spent rate limit resets, or None when the answer
+    is not a throttle. GitHub answers a spent primary or secondary limit
+    with 403 or 429 and `x-ratelimit-remaining: 0`, a `retry-after`, or a
+    body that names the rate limit."""
+    if status not in (403, 429):
+        return None
+    headers = {str(name).lower(): str(value).strip() for name, value in (headers or {}).items()}
+    after = headers.get("retry-after", "")
+    spent = headers.get("x-ratelimit-remaining") == "0"
+    if not (status == 429 or after or spent or RATE_LIMIT.search(text or "")):
+        return None
+    if after.isdigit():
+        moment = time.time() + int(after)
+    elif spent and headers.get("x-ratelimit-reset", "").isdigit():
+        moment = int(headers["x-ratelimit-reset"])
+    else:
+        moment = time.time() + THROTTLE_WAIT
+    return datetime.datetime.fromtimestamp(moment, datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
 
 
 def scrub(text):
@@ -75,7 +111,8 @@ class _KeepCredentialOnHost(urllib.request.HTTPRedirectHandler):
 
 # The one HTTP call. The tests replace it.
 def http(method, url, headers, body=None):
-    """Gives (status, text). Raises ForgeError when nothing answers."""
+    """Gives (status, text); the text is a Text, so it carries the answer's
+    headers. Raises ForgeError when nothing answers."""
     data = None
     if body is not None:
         data = json.dumps(body).encode("utf-8")
@@ -84,11 +121,17 @@ def http(method, url, headers, body=None):
     opener = urllib.request.build_opener(_KeepCredentialOnHost)
     try:
         with opener.open(request, timeout=TIMEOUT) as answer:
-            return answer.status, answer.read().decode("utf-8", "replace")
+            return answer.status, _text(answer.read(), answer.headers)
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read().decode("utf-8", "replace")
+        return exc.code, _text(exc.read(), exc.headers)
     except (urllib.error.URLError, OSError) as exc:
         raise ForgeError("no answer from %s: %s" % (urllib.parse.urlsplit(url).netloc, exc))
+
+
+def _text(raw, headers):
+    text = Text(raw.decode("utf-8", "replace"))
+    text.headers = {name.lower(): value for name, value in (headers.items() if headers else ())}
+    return text
 
 
 # The scopes of a classic token ride a header of any answer. The tests replace it.
@@ -155,10 +198,15 @@ class Client:
 
     def request(self, method, url, body=None, accept_text=False):
         status, text = http(method, url, self.headers(), body)
-        return self.judge(status, scrub(text), url, accept_text)
+        return self.judge(status, scrub(text), url, accept_text, getattr(text, "headers", None))
 
-    def judge(self, status, text, url, accept_text=False):
-        """Gives the answer of a scrubbed response, or raises ForgeError."""
+    def judge(self, status, text, url, accept_text=False, headers=None):
+        """Gives the answer of a scrubbed response, or raises ForgeError. A
+        spent rate limit is a ForgeError with `reset`, not a refused credential."""
+        reset = throttle_reset(status, headers, text)
+        if reset:
+            raise ForgeError("%s's rate limit is spent until %s" % (self.provider, reset),
+                             status, reset=reset)
         if status == 401 or status == 403:
             raise ForgeError("%s refused the credential (%s)" % (self.provider, status), status)
         if status == 404:
@@ -720,9 +768,10 @@ class GitHub(Client):
         call names head_sha, so GitHub refuses it when the head moved."""
         url = self.url("/pulls/%s/update-branch" % number)
         status, text = http("PUT", url, self.headers(), {"expected_head_sha": head_sha})
+        headers = getattr(text, "headers", None)
         text = scrub(text)
         if status != 422:
-            self.judge(status, text, url)
+            self.judge(status, text, url, headers=headers)
             return {"state": "updated"}
         try:
             message = str(json.loads(text).get("message") or "")

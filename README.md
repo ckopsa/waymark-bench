@@ -306,7 +306,11 @@ and a client that brokers the call - a waymark engine gives up on any
 call after 30 seconds and marks the server dark - must not be held that
 long. `landing.steps` has one entry for each step, with its state,
 seconds, exit code and the tail of its output. A failed step is a
-refusal `landing_failed` that carries the same. While a landing
+refusal `landing_failed` that carries the same. A pull request step that
+meets the forge's spent rate limit does not fail the landing: its state
+is `waiting`, `reason` says `github's rate limit is spent until <time>`,
+`retry_at` is that time, and a `submit` after it lands what is left.
+While a landing
 runs, `edit`, `pull`, `discard` and `submit` are refused with
 `landing_running`; `status` and `feedback` give its state. The state is
 on disk under `<data_dir>/<repo>/landings/`, so it outlives a restart.

@@ -88,6 +88,7 @@ class Landing:
             "auto_merge": None,
             "failed_step": None,
             "reason": None,
+            "retry_at": None,
             "attempt": None,
             "seat": None,
             "sitting": None,
@@ -165,6 +166,19 @@ class Landing:
         self.save()
         return ok
 
+    def hold(self, item, reason, until):
+        """Ends a step that met the forge's spent rate limit. The landing is
+        waiting, not failed: a submit after `until` lands what is left."""
+        with self.lock:
+            item["state"] = "waiting"
+            item["seconds"] = round(time.time() - item.pop("started_at", time.time()), 1)
+            item["output"] = reason
+            self.state["state"] = "waiting"
+            self.state["reason"] = reason
+            self.state["retry_at"] = until
+            self.state["finished"] = now()
+        self.save()
+
     def skip(self, name, reason):
         with self.lock:
             item = self.step(name)
@@ -238,6 +252,7 @@ class Landing:
                 "auto_merge": None,
                 "failed_step": None,
                 "reason": None,
+                "retry_at": None,
                 "steps": [],
             })
         self.save()
@@ -368,6 +383,11 @@ class Landing:
                         close_source=land.pull_request.get("close_source_branch", True)),
                         created=True)
             except forge.ForgeError as exc:
+                if exc.reset:
+                    # Nothing is wrong with the change, and it is pushed: a
+                    # landing again before the reset meets the same refusal.
+                    self.hold(item, "the pull request waits: %s" % exc, exc.reset)
+                    return
                 self.finish(item, False, output=str(exc), reason="the pull request failed: %s" % exc)
                 return
             with self.lock:
