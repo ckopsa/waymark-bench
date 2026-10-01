@@ -103,6 +103,57 @@ class TestRedirect(unittest.TestCase):
         self.assertEqual(seen, ["Bearer fake-token", "Bearer fake-token"])
 
 
+class TestThrottle(unittest.TestCase):
+    """A spent rate limit is a throttle with its reset, not a refused credential."""
+
+    def setUp(self):
+        env = {name: "" for name in PROXIES}
+        env.update({"BENCH_GITHUB_TOKEN": "fake-token", "no_proxy": "*", "NO_PROXY": "*"})
+        patch = mock.patch.dict(os.environ, env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        for name in PROXIES:
+            os.environ.pop(name, None)
+
+    def refusal(self, status, headers, text):
+        server, url, _ = serve(lambda h: (status, headers, text))
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        client = forge.GitHub("o", "r")
+        client.api = url + "/repos"
+        with self.assertRaises(forge.ForgeError) as raised:
+            client.request("GET", client.url("/pulls"))
+        return raised.exception
+
+    def test_a_403_with_nothing_remaining_is_a_throttle_with_its_reset(self):
+        exc = self.refusal(403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1790888400"},
+                           '{"message":"API rate limit exceeded"}')
+        self.assertEqual(exc.reset, "2026-10-01T21:00:00Z")
+        self.assertEqual(str(exc), "github's rate limit is spent until 2026-10-01T21:00:00Z")
+        self.assertEqual(exc.status, 403)
+
+    def test_a_retry_after_or_a_body_that_names_the_limit_is_a_throttle(self):
+        with mock.patch.object(forge.time, "time", return_value=1790888400):
+            after = self.refusal(429, {"Retry-After": "30"}, "{}")
+            body = self.refusal(403, {}, '{"message":"You have exceeded a secondary rate limit"}')
+        self.assertEqual(after.reset, "2026-10-01T21:00:30Z")
+        self.assertEqual(body.reset, "2026-10-01T21:01:00Z")
+        self.assertNotIn("refused the credential", str(after) + str(body))
+
+    def test_a_plain_403_is_still_a_refused_credential(self):
+        exc = self.refusal(403, {"X-RateLimit-Remaining": "4999"}, '{"message":"no"}')
+        self.assertIsNone(exc.reset)
+        self.assertEqual(str(exc), "github refused the credential (403)")
+
+    def test_the_text_of_an_answer_carries_its_headers(self):
+        server, url, _ = serve(lambda h: (200, {"X-RateLimit-Remaining": "12"}, "ok"))
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        status, text = forge.http("GET", url, {})
+        self.assertEqual((status, text), (200, "ok"))
+        self.assertEqual(text.headers.get("x-ratelimit-remaining"), "12")
+
+
 def a_run(run_id, conclusion, completed_at, status="completed"):
     """Gives one run of the required job `tests`, as check-runs or jobs spell it."""
     return {"id": run_id, "name": "tests", "status": status, "conclusion": conclusion,

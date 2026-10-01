@@ -724,6 +724,30 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertIn("refused the credential", answer["reason"])
         self.assertTrue(answer["landing"]["pushed"])
 
+    def test_a_spent_rate_limit_leaves_the_landing_waiting(self):
+        self.github()
+        path = self.prepared()
+        self.change(path)
+        spent = forge.Text('{"message":"API rate limit exceeded for user ID 1."}')
+        spent.headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1790888400"}
+        forge.http = lambda method, url, headers, body=None: (403, spent)
+        answer = self.ok("submit", branch="work", message="x")
+        landing = answer["landing"]
+        self.assertEqual(landing["state"], "waiting")
+        self.assertIsNone(landing["failed_step"])
+        self.assertEqual(landing["steps"][-1]["state"], "waiting")
+        self.assertIn("github's rate limit is spent until 2026-10-01T21:00:00Z", landing["reason"])
+        self.assertNotIn("refused the credential", landing["reason"])
+        self.assertEqual(landing["retry_at"], "2026-10-01T21:00:00Z")
+        self.assertTrue(landing["pushed"])
+        # After the reset, a submit of the same commit opens the pull request.
+        forge.http = self.fake_http
+        self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR)}
+        again = self.ok("submit", branch="work", message="x")
+        self.assertEqual(again["landing"]["state"], "landed")
+        self.assertIsNone(again["landing"]["retry_at"])
+        self.assertEqual(again["landing"]["pull_request"]["number"], 7)
+
     def test_feedback_turns_the_github_answers_into_findings(self):
         self.github()
         path = self.prepared()
