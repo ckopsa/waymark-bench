@@ -613,6 +613,7 @@ class GitHub(Client):
                                                 per_page=100))
             for job in data.get("jobs") or []:
                 found.append({
+                    "id": job.get("id"),
                     "name": job.get("name"), "status": job.get("status"),
                     "conclusion": job.get("conclusion"), "html_url": job.get("html_url"),
                     "completed_at": job.get("completed_at"), "output": {},
@@ -636,6 +637,9 @@ class GitHub(Client):
         """Gives {name: success | failure | pending} for the check runs AND the
         commit statuses on one commit. A check run that has not completed is
         pending; one that completed with anything but success is a failure. A
+        name with several check runs (a job that ran again, or the jobs of
+        every Actions run on the commit) takes its newest run: one that has
+        not completed, else the latest completed_at, then the highest id. A
         name that is both a check run and a status takes the worse of the two."""
         rank = {"success": 0, "pending": 1, "failure": 2}
         states = {}
@@ -644,7 +648,16 @@ class GitHub(Client):
             if name and rank[state] >= rank.get(states.get(name), -1):
                 states[name] = state
 
+        def age(item):
+            return (item.get("status") != "completed", item.get("completed_at") or "",
+                    item.get("id") or 0)
+
+        newest = {}
         for item in self.check_runs(sha):
+            name = item.get("name")
+            if name not in newest or age(item) >= age(newest[name]):
+                newest[name] = item
+        for item in newest.values():
             if item.get("status") != "completed":
                 put(item.get("name"), "pending")
             else:
