@@ -8,6 +8,7 @@ store that GitHub redirects the log of a job to.
 import os
 import threading
 import unittest
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
@@ -100,6 +101,87 @@ class TestRedirect(unittest.TestCase):
         status, text = forge.http("GET", url + "/first", {"Authorization": "Bearer fake-token"})
         self.assertEqual((status, text), (200, "ok"))
         self.assertEqual(seen, ["Bearer fake-token", "Bearer fake-token"])
+
+
+def a_run(run_id, conclusion, completed_at, status="completed"):
+    """Gives one run of the required job `tests`, as check-runs or jobs spell it."""
+    return {"id": run_id, "name": "tests", "status": status, "conclusion": conclusion,
+            "completed_at": completed_at}
+
+
+FAILED_FIRST = [a_run(1, "failure", "2026-10-01T10:00:00Z"),
+                a_run(2, "success", "2026-10-01T10:05:00Z")]
+GREEN_FIRST = [a_run(1, "success", "2026-10-01T10:00:00Z"),
+               a_run(2, "failure", "2026-10-01T10:05:00Z")]
+
+
+class TestNewestRun(unittest.TestCase):
+    """A required check with several runs on one commit reads as its newest
+    run, on the check-runs path and on the Actions jobs that stand in for it."""
+
+    def setUp(self):
+        patch = mock.patch.dict(os.environ, {"BENCH_GITHUB_TOKEN": "fake-token"})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def client(self, check_runs=None, jobs=None):
+        """Gives a GitHub whose request answers from memory: the check runs of
+        the commit, or 403 on them and `jobs` ({run id: its jobs}) in their
+        place."""
+        client = forge.GitHub("o", "r")
+
+        def request(method, url, *args, **kwargs):
+            path = urllib.parse.urlsplit(url).path
+            if path.endswith("/check-runs"):
+                if check_runs is None:
+                    raise forge.ForgeError("github refused (403)", 403)
+                return {"check_runs": check_runs}
+            if path.endswith("/actions/runs"):
+                return {"workflow_runs": [{"id": run} for run in jobs]}
+            if path.endswith("/jobs"):
+                return {"jobs": jobs[int(path.split("/")[-2])]}
+            if path.endswith("/status"):
+                return {"statuses": []}
+            if path.endswith("/pulls/5"):
+                return {"head": {"sha": "abc"}, "mergeable": True}
+            raise AssertionError("no answer for %s %s" % (method, url))
+
+        client.request = request
+        return client
+
+    def test_a_failed_run_then_a_green_one_reads_green(self):
+        for runs in (FAILED_FIRST, FAILED_FIRST[::-1]):
+            self.assertEqual(self.client(runs).check_states("abc"), {"tests": "success"})
+
+    def test_a_green_run_then_a_failed_one_reads_red(self):
+        for runs in (GREEN_FIRST, GREEN_FIRST[::-1]):
+            self.assertEqual(self.client(runs).check_states("abc"), {"tests": "failure"})
+
+    def test_the_jobs_that_stand_in_read_the_newest_run_too(self):
+        failed, green = FAILED_FIRST
+        for jobs in ({1: [failed], 2: [green]}, {2: [green], 1: [failed]}):
+            self.assertEqual(self.client(jobs=jobs).check_states("abc"), {"tests": "success"})
+        green, failed = GREEN_FIRST
+        for jobs in ({1: [green], 2: [failed]}, {2: [failed], 1: [green]}):
+            self.assertEqual(self.client(jobs=jobs).check_states("abc"), {"tests": "failure"})
+
+    def test_the_same_completed_at_takes_the_highest_id(self):
+        runs = [a_run(2, "success", "2026-10-01T10:00:00Z"),
+                a_run(1, "failure", "2026-10-01T10:00:00Z")]
+        self.assertEqual(self.client(runs).check_states("abc"), {"tests": "success"})
+
+    def test_a_run_that_has_not_completed_is_the_newest(self):
+        runs = [a_run(2, None, None, status="in_progress"),
+                a_run(1, "failure", "2026-10-01T10:00:00Z")]
+        self.assertEqual(self.client(runs).check_states("abc"), {"tests": "pending"})
+
+    def test_the_merge_reads_red_only_from_the_newest_run(self):
+        answer = self.client(GREEN_FIRST).merge_when_green(5, "abc", ["tests"])
+        self.assertEqual(answer, {"state": "red", "failed": ["tests"]})
+        client = self.client(jobs={1: [FAILED_FIRST[0]], 2: [FAILED_FIRST[1]]})
+        client.merge_pull_request = lambda number, head_sha, method: {"sha": "m"}
+        answer = client.merge_when_green(5, "abc", ["tests"])
+        self.assertEqual(answer, {"state": "merged", "sha": "m"})
 
 
 if __name__ == "__main__":
