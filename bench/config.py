@@ -70,7 +70,7 @@ class RepoConfig:
     """One repository on the bench."""
 
     def __init__(self, name, clone_url, default_branch="main", deny=None, land=None,
-                 source="config", test=None, setup=None, check=None):
+                 source="config", test=None, setup=None, check=None, hosted_workflows=None):
         self.name = name
         self.source = source
         self.clone_url = clone_url
@@ -85,6 +85,8 @@ class RepoConfig:
         self.setup = setup
         # the step check runs in the worktree after its lint; its ✗ lines are findings
         self.check = check
+        # the workflow paths a person lets run on GitHub-hosted runners
+        self.hosted_workflows = list(hosted_workflows or [])
 
     def to_dict(self):
         return {
@@ -96,6 +98,7 @@ class RepoConfig:
             "test": dict(self.test) if self.test else None,
             "setup": self.setup.to_dict() if self.setup else None,
             "check": self.check.to_dict() if self.check else None,
+            "hosted_workflows": list(self.hosted_workflows),
         }
 
 
@@ -201,6 +204,7 @@ def repos_from_dict(data, source="config"):
             test=test_from_dict(name, spec.get("test")),
             setup=setup_from_dict(name, spec.get("setup")),
             check=check_from_dict(name, spec.get("check")),
+            hosted_workflows=hosted_workflows_from_dict(name, spec.get("hosted_workflows")),
         )
     return repos
 
@@ -267,6 +271,21 @@ def check_from_dict(repo_name, data):
             raise ConfigError("repo %s: check prepare must be a command" % repo_name)
         step.prepare = prepare
     return step
+
+
+def hosted_workflows_from_dict(repo_name, data):
+    """Makes the list of the workflow paths, relative to the repository, that may use a
+    GitHub-hosted runs-on. None is no path."""
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise ConfigError("repo %s: hosted_workflows must be a list of paths" % repo_name)
+    paths = []
+    for item in data:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError("repo %s: each hosted_workflows entry is a path" % repo_name)
+        paths.append(item.strip())
+    return paths
 
 
 def step_from_dict(repo_name, data, name):
