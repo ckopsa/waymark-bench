@@ -21,11 +21,14 @@ needs, so the token can be made whole, and no larger.
 | `feedback`, `merge` | read commit statuses | Commit statuses: read | `repo` |
 | `merge` | merge the pull request | Contents: read and write, Pull requests: read and write | `repo` |
 | `rerun` | re-run the failed jobs of an interrupted workflow run | Actions: read and write | `repo` |
+| `secret_list` | read the names of the repository's Actions secrets | Secrets: read | `repo` |
+| `secret_set` | read the Actions public key, write one Actions secret | Secrets: read and write | `repo` |
 
 In short: a classic token needs `repo` and `workflow`. A fine-grained token
 needs these repository permissions: Contents (read and write), Pull requests
 (read and write), Workflows (read and write), Commit statuses (read), Checks
-(read), Actions (read and write) and Metadata (read).
+(read), Actions (read and write), Secrets (read and write) and Metadata
+(read). Secrets is needed only where `secret_set` and `secret_list` are used.
 
 Use a fine-grained token, limited to the enrolled repositories. Add a
 repository to the token when you enroll it.
@@ -44,6 +47,11 @@ then:
   permission. What only a write could prove (Contents, Pull requests,
   Workflows, and the write half of Actions) is `unverified`, not missing.
   When GitHub refuses `rerun`, it answers `token_lacks_actions_write`.
+
+The check does not look at Secrets, for either kind of token: it is in neither
+`missing` nor `unverified`. A token without it passes the check, and
+`secret_set` and `secret_list` then refuse `forge` with GitHub's 403 in the
+reason.
 
 `repos` and `enroll` answer each repository's check as `credential`:
 
