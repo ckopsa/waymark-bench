@@ -665,6 +665,39 @@ class TestEdit(BenchCase):
         with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "ALPHA\nbravo\ncharlie\n")
 
+    def test_edit_list_with_an_empty_old_creates_a_protected_path(self):
+        path = self.prepared()
+        made = ".github/workflows/new.yml"
+        answer = self.refused("edit_many", branch="work", edits=[
+            {"path": made, "old": "", "new": "name: new\n"},
+        ])
+        self.assertEqual(answer["refused"], "protected")
+        self.assertFalse(os.path.exists(os.path.join(path, made)))
+        answer = self.ok("edit_many", branch="work", allow_protected=True, edits=[
+            {"path": made, "old": "", "new": "name: new\n"},
+        ])
+        self.assertEqual([item["path"] for item in answer["edits"]], [made])
+        self.assertTrue(answer["edits"][0]["hash"])
+        with open(os.path.join(path, made), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "name: new\n")
+        sibling = self.refused("edit_many", branch="work", edits=[
+            {"path": ".github/workflows/other.yml", "old": "", "new": "name: other\n"},
+        ])
+        self.assertEqual(sibling["refused"], "protected")
+        self.assertFalse(os.path.exists(os.path.join(path, ".github/workflows/other.yml")))
+
+    def test_edit_with_create_makes_a_protected_path(self):
+        path = self.prepared()
+        made = ".github/workflows/made.yml"
+        answer = self.ok("edit", branch="work", path=made, create=True,
+                         new="name: made\n", allow_protected=True)
+        self.assertTrue(answer["hash"])
+        self.assertTrue(os.path.isfile(os.path.join(path, made)))
+        missing = self.refused("edit", branch="work", path=".github/workflows/none.yml",
+                               old="name: ci", new="name: gate", allow_protected=True)
+        self.assertEqual(missing["refused"], "not_found")
+        self.assertIn("create: true", missing["remedy"])
+
     def test_edit_list_beside_the_fields_of_one_edit_is_refused(self):
         self.prepared()
         answer = self.refused("edit_many", branch="work", path="docs/a.txt", delete=True,
