@@ -47,6 +47,10 @@ class ForgeError(Exception):
         self.reset = reset
 
 
+class NoSecretsToken(ForgeError):
+    """BENCH_SECRETS_TOKEN is not set: secret_set and secret_list have no token."""
+
+
 class Text(str):
     """The text of an answer. `headers` has the answer's headers, the names
     in lower case."""
@@ -447,8 +451,16 @@ class GitHub(Client):
             raise ForgeError("no GitHub credential: set BENCH_GITHUB_TOKEN or BENCH_GIT_TOKEN")
         return token
 
-    def headers(self):
-        return {"Authorization": "Bearer " + self.credential(),
+    def secrets_credential(self):
+        """Gives the token of secret_set and secret_list. The main token never
+        stands in for it, and no other call uses it."""
+        token = settings.load().secret("secrets_token")
+        if not token:
+            raise NoSecretsToken("no secrets token: set BENCH_SECRETS_TOKEN")
+        return token
+
+    def headers(self, token=None):
+        return {"Authorization": "Bearer " + (token or self.credential()),
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
                 "User-Agent": "waymark-bench"}
@@ -493,6 +505,37 @@ class GitHub(Client):
                 missing.append(name)
         return {"ok": not missing, "token": "fine_grained", "missing": missing,
                 "unverified": list(WRITE_ONLY)}
+
+    def check_secrets(self):
+        """Checks the two tokens against the Secrets API of this repository,
+        each by one read of the secret names. Gives {secrets_token: {set, ok
+        [, reason]}, warnings}. The main token should be refused there: one
+        that reads the names is the warning main_token_reads_secrets."""
+        url = self.url("/actions/secrets", per_page=1)
+
+        def reads(token):
+            try:
+                status, _ = http("GET", url, self.headers(token))
+            except ForgeError as exc:
+                return {"ok": None, "reason": scrub(str(exc))}
+            if status == 200:
+                return {"ok": True}
+            return {"ok": False, "reason": "github answered %s" % status}
+
+        current = settings.load()
+        found = {"secrets_token": {"set": False, "ok": None}, "warnings": []}
+        token = current.secret("secrets_token")
+        if token:
+            found["secrets_token"] = dict(reads(token), set=True)
+        main = current.secret("github_token") or current.secret("git_token")
+        if main and reads(main)["ok"]:
+            found["warnings"].append("main_token_reads_secrets")
+        return found
+
+    def secrets_request(self, method, url, body=None):
+        """A request that carries the secrets token, never the main one."""
+        status, text = http(method, url, self.headers(self.secrets_credential()), body)
+        return self.judge(status, scrub(text), url, False, getattr(text, "headers", None))
 
     def find_pull_request(self, branch, target):
         values = self.request("GET", self.url("/pulls", head="%s:%s" % (self.owner, branch),
@@ -624,16 +667,16 @@ class GitHub(Client):
     def set_secret(self, name, value):
         """Seals value with the repository's Actions public key and PUTs it as
         the secret name. Gives the secret's updated_at. The value leaves sealed."""
-        key = self.request("GET", self.url("/actions/secrets/public-key"))
-        self.request("PUT", self.url("/actions/secrets/%s" % name),
-                     {"encrypted_value": seal(key["key"], value), "key_id": key["key_id"]})
-        return self.request("GET", self.url("/actions/secrets/%s" % name)).get("updated_at")
+        key = self.secrets_request("GET", self.url("/actions/secrets/public-key"))
+        self.secrets_request("PUT", self.url("/actions/secrets/%s" % name),
+                             {"encrypted_value": seal(key["key"], value), "key_id": key["key_id"]})
+        return self.secrets_request("GET", self.url("/actions/secrets/%s" % name)).get("updated_at")
 
     def secrets(self):
         """Gives the Actions secrets as [{name, updated_at}]; GitHub never answers a value."""
         found, page = [], 1
         while True:
-            data = self.request("GET", self.url("/actions/secrets", per_page=100, page=page))
+            data = self.secrets_request("GET", self.url("/actions/secrets", per_page=100, page=page))
             items = data.get("secrets") or []
             found.extend({"name": item.get("name"), "updated_at": item.get("updated_at")}
                          for item in items)

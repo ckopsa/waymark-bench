@@ -41,16 +41,27 @@ class SecretCase(unittest.TestCase):
         self.private = public.PrivateKey.generate()
         self.key = base64.b64encode(bytes(self.private.public_key)).decode("ascii")
         self.calls = []
+        self.tokens = []
+        self.main_reads = False
         self.put_status = 204
         original = forge.http
         forge.http = self.fake_http
         self.addCleanup(setattr, forge, "http", original)
         os.environ["BENCH_GITHUB_TOKEN"] = "fake-token"
         self.addCleanup(os.environ.pop, "BENCH_GITHUB_TOKEN", None)
+        os.environ["BENCH_SECRETS_TOKEN"] = "secrets-token"
+        self.addCleanup(os.environ.pop, "BENCH_SECRETS_TOKEN", None)
 
     def fake_http(self, method, url, headers, body=None):
         path = url.split("/repos/o/r", 1)[-1]
         self.calls.append((method, path, body))
+        self.tokens.append(headers.get("Authorization"))
+        if path == "":
+            return 200, "{}"
+        # The Secrets API answers the secrets token; the main one only when a test says so.
+        if (path.startswith("/actions/secrets") and not self.main_reads
+                and headers.get("Authorization") != "Bearer secrets-token"):
+            return 403, '{"message":"Resource not accessible by personal access token"}'
         if path == "/actions/secrets/public-key":
             return 200, json.dumps({"key_id": "k1", "key": self.key})
         if method == "PUT":
@@ -133,6 +144,70 @@ class TestSecretList(SecretCase):
         self.assertFalse(refused, answer)
         self.assertEqual(answer["secrets"], [{"name": "TS_OAUTH_SECRET",
                                               "updated_at": "2026-10-03T00:00:00Z"}])
+
+
+class TestSecretsToken(SecretCase):
+    """secret_set and secret_list use BENCH_SECRETS_TOKEN; all else uses the main token."""
+
+    def setUp(self):
+        super().setUp()
+        original = forge.token_scopes
+        forge.token_scopes = lambda url, headers: None
+        self.addCleanup(setattr, forge, "token_scopes", original)
+
+    def check(self):
+        found = tools.check_credential(self.bench, self.bench.config.repos["demo"])
+        self.assertNotIn("secrets-token", json.dumps(found))
+        self.assertNotIn("fake-token", json.dumps(found))
+        return found
+
+    def test_set_and_list_use_the_secrets_token(self):
+        self.assertFalse(self.set_secret()[1])
+        self.assertFalse(self.call("secret_list")[1])
+        self.assertEqual(len(self.tokens), 4)
+        self.assertEqual(set(self.tokens), {"Bearer secrets-token"})
+
+    def test_an_unset_secrets_token_refuses_by_name(self):
+        os.environ.pop("BENCH_SECRETS_TOKEN")
+        for answer, refused in (self.set_secret(), self.call("secret_list")):
+            self.assertTrue(refused)
+            self.assertEqual(answer["refused"], "no_secrets_token")
+        self.assertEqual(self.calls, [])
+
+    def test_every_other_call_uses_the_main_token(self):
+        client = forge.GitHub("o", "r")
+        for path in ("", "/pulls/1", "/actions/runs/1", "/commits/main/status"):
+            try:
+                client.request("GET", client.url(path))
+            except forge.ForgeError:
+                pass
+        self.assertEqual(len(self.tokens), 4)
+        self.assertEqual(set(self.tokens), {"Bearer fake-token"})
+        # Without the main token nothing falls back to the secrets token.
+        os.environ.pop("BENCH_GITHUB_TOKEN")
+        with self.assertRaises(forge.ForgeError):
+            client.request("GET", client.url(""))
+        self.assertEqual(len(self.tokens), 4)
+
+    def test_the_check_sends_the_secrets_token_to_the_secrets_api_only(self):
+        self.check()
+        sent = [path for (_, path, _), token in zip(self.calls, self.tokens)
+                if token == "Bearer secrets-token"]
+        self.assertEqual(sent, ["/actions/secrets?per_page=1"])
+
+    def test_the_check_reports_the_secrets_token_apart_from_the_main_one(self):
+        found = self.check()
+        self.assertEqual(found["token"], "fine_grained")
+        self.assertEqual(found["secrets_token"], {"set": True, "ok": True})
+        self.assertEqual(found["warnings"], [])
+
+    def test_the_check_warns_when_the_main_token_reads_secrets(self):
+        self.main_reads = True
+        self.assertEqual(self.check()["warnings"], ["main_token_reads_secrets"])
+
+    def test_the_check_reports_an_unset_secrets_token(self):
+        os.environ.pop("BENCH_SECRETS_TOKEN")
+        self.assertEqual(self.check()["secrets_token"], {"set": False, "ok": None})
 
 
 if __name__ == "__main__":

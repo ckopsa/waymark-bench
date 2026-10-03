@@ -2692,12 +2692,19 @@ def rerun(bench, args):
 
 
 def _secret_forge(repo):
-    """Gives the GitHub client of a repository: Actions secrets are GitHub's."""
+    """Gives the GitHub client of a repository: Actions secrets are GitHub's.
+    The secret tools use their own token, and refuse when it is not set."""
     client = forge.client(repo)
     if client.provider != "github":
         raise Refusal("not_github", repo=repo.name,
                       reason="Actions secrets are GitHub's; this repository's forge is %s"
                              % client.provider)
+    try:
+        client.secrets_credential()
+    except forge.NoSecretsToken:
+        raise Refusal("no_secrets_token", repo=repo.name,
+                      reason="secret_set and secret_list use their own token: "
+                             "set BENCH_SECRETS_TOKEN (docs/credential.md)")
     return client
 
 
@@ -3227,6 +3234,7 @@ def check_credential(bench, repo):
     else:
         if client.provider == "github":
             found = dict(client.check_credential(repo.default_branch), checked=True)
+            found.update(client.check_secrets())
         else:
             found = {"checked": False, "ok": None, "missing": [],
                      "reason": "the rig checks a github credential only"}
