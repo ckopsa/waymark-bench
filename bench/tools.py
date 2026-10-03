@@ -1607,8 +1607,14 @@ def _plan_edit(bench, repo, worktree, plan, item, allow_protected, allow):
     if operation == "replace":
         if new is None or not isinstance(new, str) or not isinstance(old, str):
             raise Refusal("input", field="new", reason="old and new must be texts")
+        if old == "" and not plan.exists(full):
+            # An empty old on a path that is not there is a new file.
+            plan.state[full] = new
+            plan.steps.append(("write", full, new))
+            return {"path": rel}, full
         if not plan.is_file(full):
-            raise Refusal("not_found", path=rel)
+            raise Refusal("not_found", path=rel,
+                          remedy="the file is not there: new with create: true makes it")
         content = plan.text(full)
         found = content.count(old)
         if found > 1:
@@ -3837,7 +3843,8 @@ TOOL_SPECS = [
                 "branch": _BRANCH,
                 "path": {"type": "string", "description": "The path in the repository."},
                 "old": {"type": "string",
-                        "description": "The text to replace. It must be in the file one time."},
+                        "description": "The text to replace. It must be in the file one time. "
+                                       "An empty old on a path that is not there makes the file."},
                 "new": {"type": "string",
                         "description": "The new text with old, or the content of a new file "
                                        "with create: true."},
