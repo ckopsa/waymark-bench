@@ -1,14 +1,17 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives thirty-one
+for each repository and a git worktree for each branch. It gives thirty-three
 tools: `prepare`, `status`, `diff`, `find`, `read`, `symbols`, `read_symbol`, `history`, `check`, `edit`,
 `edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
 `test_result`, `enroll`, `repos`, `unenroll`, `train_build`, `train_checks`,
-`train_open`, `train_status`, `train_land` and `train_delete`. It
-needs Python
-3.11, git, and two libraries: pydantic-settings, for the settings, and
-PyYAML, so `check` can parse the changed `.github` YAML files.
+`train_open`, `train_status`, `train_land`, `train_delete`, `secret_set` and
+`secret_list`. It needs Python
+3.11, git, and three libraries: pydantic-settings, for the settings,
+PyYAML, so `check` can parse the changed `.github` YAML files, and PyNaCl,
+so `secret_set` can seal a value with a repository's Actions public key.
+`secret_set` answers `{repo, name, updated_at}` and never the value;
+`secret_list` answers names only.
 
 ```
 uv sync                      # makes .venv with the two dependencies

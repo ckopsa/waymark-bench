@@ -81,6 +81,14 @@ def scrub(text):
     return settings.scrub(text)
 
 
+def seal(public_key, value):
+    """Seals value for a GitHub Actions secret: a libsodium sealed box to the
+    repository's base64 public key, given back in base64."""
+    from nacl import encoding, public
+    key = public.PublicKey(public_key.encode("utf-8"), encoding.Base64Encoder())
+    return base64.b64encode(public.SealedBox(key).encrypt(value.encode("utf-8"))).decode("ascii")
+
+
 def detect(clone_url):
     """Gives (provider, owner, name) from a clone URL, or None."""
     match = BITBUCKET.search(clone_url or "")
@@ -612,6 +620,26 @@ class GitHub(Client):
         self.request("POST", self.url("/actions/workflows/%s/dispatches" % workflow),
                      {"ref": ref, "inputs": inputs})
         return True
+
+    def set_secret(self, name, value):
+        """Seals value with the repository's Actions public key and PUTs it as
+        the secret name. Gives the secret's updated_at. The value leaves sealed."""
+        key = self.request("GET", self.url("/actions/secrets/public-key"))
+        self.request("PUT", self.url("/actions/secrets/%s" % name),
+                     {"encrypted_value": seal(key["key"], value), "key_id": key["key_id"]})
+        return self.request("GET", self.url("/actions/secrets/%s" % name)).get("updated_at")
+
+    def secrets(self):
+        """Gives the Actions secrets as [{name, updated_at}]; GitHub never answers a value."""
+        found, page = [], 1
+        while True:
+            data = self.request("GET", self.url("/actions/secrets", per_page=100, page=page))
+            items = data.get("secrets") or []
+            found.extend({"name": item.get("name"), "updated_at": item.get("updated_at")}
+                         for item in items)
+            if len(items) < 100:
+                return found
+            page += 1
 
     def steps(self, pipeline_id):
         data = self.request("GET", self.url("/actions/runs/%s/jobs" % pipeline_id, per_page=50))
