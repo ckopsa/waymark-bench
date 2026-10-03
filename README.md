@@ -1,12 +1,12 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives thirty-three
+for each repository and a git worktree for each branch. It gives thirty-five
 tools: `prepare`, `status`, `diff`, `find`, `read`, `symbols`, `read_symbol`, `history`, `check`, `edit`,
 `edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
 `test_result`, `enroll`, `repos`, `unenroll`, `train_build`, `train_checks`,
-`train_open`, `train_status`, `train_land`, `train_delete`, `secret_set` and
-`secret_list`. It needs Python
+`train_open`, `train_status`, `train_land`, `train_delete`, `secret_set`,
+`secret_list`, `dispatch` and `run_status`. It needs Python
 3.11, git, and three libraries: pydantic-settings, for the settings,
 PyYAML, so `check` can parse the changed `.github` YAML files, and PyNaCl,
 so `secret_set` can seal a value with a repository's Actions public key.
@@ -259,6 +259,16 @@ such run on the branch's pushed head, and answers the `run_id`. It does
 so one time per head (`already_rerun` after), and refuses `not_pushed`,
 `red` (a job failed in a test step: fix the code) and
 `nothing_interrupted`.
+
+`dispatch {repo, workflow, ref, inputs, why}` starts one
+`workflow_dispatch` workflow of an enrolled repository: `workflow` is the
+file name under `.github/workflows` (or the id), and `ref` is the default
+branch when it is not given. It answers `{run_id, run_url, dispatched_at}`.
+GitHub answers no run id, so the rig looks for the new run for up to 10
+seconds, and answers `run_id: null` when it did not show. A 403 from
+GitHub is the refusal `token_lacks_actions_write`. `run_status {repo,
+run_id}` answers the run's `status`, its `conclusion` (null while it
+runs) and `failed_steps: [{job, steps}]`.
 
 `test` dispatches one test selection of a branch on the repository's
 own CI and answers at once `{run_id, run_url, conclusion: pending}`.

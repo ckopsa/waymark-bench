@@ -61,14 +61,14 @@ class TestHttp(TransportCase):
         status, answer = self.post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual(status, 200)
         tools = answer["result"]["tools"]
-        self.assertEqual(len(tools), 33)
+        self.assertEqual(len(tools), 35)
         names = [tool["name"] for tool in tools]
         self.assertEqual(sorted(names), sorted([
             "prepare", "status", "diff", "find", "read", "symbols", "read_symbol", "history", "check", "edit",
             "edit_many", "pull", "conflicts", "submit", "feedback", "log", "discard", "merge", "update_branch", "rerun",
             "test", "test_result", "enroll", "repos", "unenroll", "train_build", "train_checks",
             "train_open", "train_status", "train_land", "train_delete", "secret_set",
-            "secret_list"]))
+            "secret_list", "dispatch", "run_status"]))
         for tool in tools:
             self.assertTrue(tool["description"])
             schema = tool["inputSchema"]
@@ -81,8 +81,9 @@ class TestHttp(TransportCase):
                 continue
             self.assertIn("repo", schema["properties"])
             self.assertIn("repo", schema["required"])
-            if tool["name"] in ("enroll", "unenroll", "secret_set", "secret_list"):
-                # The enrollment and the secrets name a repository, and no branch.
+            if tool["name"] in ("enroll", "unenroll", "secret_set", "secret_list",
+                                "dispatch", "run_status"):
+                # The enrollment, the secrets and a workflow run name a repository, and no branch.
                 self.assertNotIn("branch", schema["properties"])
                 continue
             if tool["name"] == "update_branch":
@@ -143,7 +144,7 @@ class TestStdio(unittest.TestCase):
         mcp.serve_stdio(self.bench, io.StringIO("\n".join(lines) + "\n"), output)
         answers = [json.loads(row) for row in output.getvalue().splitlines()]
         self.assertEqual([answer["id"] for answer in answers], [1, 2, 3])
-        self.assertEqual(len(answers[1]["result"]["tools"]), 33)
+        self.assertEqual(len(answers[1]["result"]["tools"]), 35)
         self.assertTrue(answers[2]["result"]["structuredContent"]["result"]["created"])
 
 
