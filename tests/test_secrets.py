@@ -114,6 +114,16 @@ class TestSecretSet(SecretCase):
         opened = public.SealedBox(self.private).decrypt(base64.b64decode(body["encrypted_value"]))
         self.assertEqual(opened.decode("utf-8"), VALUE)
 
+    def test_set_takes_the_shape_the_engine_forwards_with_no_why(self):
+        # The engine keeps `why` for the approval: a held call forwards these five only.
+        answer, refused = self.call("secret_set", repo="demo", name="TS_OAUTH_CLIENT_ID",
+                                    value=VALUE, seat="bench-code-seat",
+                                    sitting="136e91dd-0000-4000-8000-000000000000")
+        self.assertFalse(refused, answer)
+        self.assertEqual(answer["name"], "TS_OAUTH_CLIENT_ID")
+        puts = [c for c in self.calls if c[0] == "PUT"]
+        self.assertEqual([c[1] for c in puts], ["/actions/secrets/TS_OAUTH_CLIENT_ID"])
+
     def test_an_http_error_hides_the_value(self):
         self.put_status = 422
         answer, refused = self.set_secret()

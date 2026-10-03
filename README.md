@@ -262,6 +262,9 @@ so one time per head (`already_rerun` after), and refuses `not_pushed`,
 `red` (a job failed in a test step: fix the code) and
 `nothing_interrupted`.
 
+`why` is optional on `secret_set` and `dispatch`: a gate in front of the
+rig may hold the why itself and not forward it.
+
 `dispatch {repo, workflow, ref, inputs, why}` starts one
 `workflow_dispatch` workflow of an enrolled repository: `workflow` is the
 file name under `.github/workflows` (or the id), and `ref` is the default
