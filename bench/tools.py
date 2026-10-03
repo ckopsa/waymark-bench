@@ -1310,13 +1310,14 @@ def added_lines(worktree, against, rel, cached=False):
     return added
 
 
-def hosted_runner_findings(worktree, against, rels, cached=False):
+def hosted_runner_findings(worktree, against, rels, cached=False, allowed=()):
     """Gives a finding for each GitHub-hosted runs-on line that a change adds or changes
-    in a workflow. A line the change does not touch is not judged."""
+    in a workflow. A line the change does not touch is not judged, and a file in
+    allowed, the repository's hosted_workflows, is not judged."""
     findings = []
     for rel in rels:
         full = os.path.join(worktree, rel)
-        if not is_workflow(rel) or not os.path.isfile(full):
+        if not is_workflow(rel) or rel in allowed or not os.path.isfile(full):
             continue
         with open(full, "r", encoding="utf-8", errors="replace") as handle:
             hosted = hosted_runs_on(handle.read())
@@ -1331,8 +1332,9 @@ def hosted_runner_findings(worktree, against, rels, cached=False):
     return findings
 
 
-def hosted_runner_lines(worktree):
-    """Gives every GitHub-hosted runs-on line of the worktree's workflows, as information."""
+def hosted_runner_lines(worktree, allowed=()):
+    """Gives every GitHub-hosted runs-on line of the worktree's workflows, as information.
+    `allowed` says if the file is in allowed, the repository's hosted_workflows."""
     folder = os.path.join(worktree, ".github", "workflows")
     lines = []
     for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
@@ -1340,7 +1342,8 @@ def hosted_runner_lines(worktree):
         full = os.path.join(folder, name)
         if is_workflow(rel) and os.path.isfile(full):
             with open(full, "r", encoding="utf-8", errors="replace") as handle:
-                lines.extend({"path": rel, "line": item["line"], "text": item["text"]}
+                lines.extend({"path": rel, "line": item["line"], "text": item["text"],
+                              "allowed": rel in allowed}
                              for item in hosted_runs_on(handle.read()))
     return lines
 
@@ -1538,8 +1541,9 @@ def check(bench, args):
             base_head = git.rev_parse(
                 base_ref_of(bench.bare_dir(repo.name), bench.base_of(repo, branch)), cwd=worktree)
             findings.extend(hosted_runner_findings(worktree, base_head,
-                                                   [rel for _, rel in places]))
-        hosted = hosted_runner_lines(worktree)
+                                                   [rel for _, rel in places],
+                                                   allowed=repo.hosted_workflows))
+        hosted = hosted_runner_lines(worktree, repo.hosted_workflows)
         if shell:
             program = shutil.which("bash")
             if not program:
@@ -2151,7 +2155,7 @@ def submit(bench, args):
             hosted = hosted_runner_findings(worktree, against, git.out(
                 ["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--no-renames",
                  "--diff-filter=d", against, "--", ".github/workflows"],
-                cwd=worktree).splitlines(), cached=True)
+                cwd=worktree).splitlines(), cached=True, allowed=repo.hosted_workflows)
             if hosted:
                 os.replace(saved, index)
                 raise Refusal("hosted_runner", findings=hosted,
@@ -3320,9 +3324,15 @@ def enroll(bench, args):
         check = config_module.check_from_dict(name, args.get("check"))
     except config_module.ConfigError as exc:
         raise Refusal("input", field="check", reason=str(exc))
+    try:
+        hosted_workflows = config_module.hosted_workflows_from_dict(
+            name, args.get("hosted_workflows"))
+    except config_module.ConfigError as exc:
+        raise Refusal("input", field="hosted_workflows", reason=str(exc))
     entry = config_module.RepoConfig(
         name=name, clone_url=clone_url, default_branch=default_branch,
-        deny=deny, land=land, source="file", test=test, check=check)
+        deny=deny, land=land, source="file", test=test, check=check,
+        hosted_workflows=hosted_workflows)
     with bench.lock(name):
         cloned = not bench.bare_exists(name)
         try:
@@ -4551,6 +4561,10 @@ TOOL_SPECS = [
                                          "before it, and timeout (optional), in seconds, "
                                          "the budget both share. Without it the check tool "
                                          "runs lint only."},
+                "hosted_workflows": {"type": ["array", "null"], "items": {"type": "string"},
+                                     "description": "The workflow paths, relative to the "
+                                                    "repository, that may use a GitHub-hosted "
+                                                    "runs-on. Without it no workflow may."},
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },

@@ -1036,7 +1036,8 @@ class TestSubmit(BenchCase):
         answer = self.ok("check", branch="work")
         self.assertTrue(answer["ok"], answer)
         self.assertEqual(answer["hosted_runs_on"], [
-            {"path": ".github/workflows/old.yml", "line": 5, "text": "runs-on: ubuntu-latest"}])
+            {"path": ".github/workflows/old.yml", "line": 5, "text": "runs-on: ubuntu-latest",
+             "allowed": False}])
         self.assertTrue(self.ok("submit", branch="work", message="a timeout")["pushed"])
 
     def test_submit_refuses_an_expression_fallback_to_a_hosted_runner(self):
@@ -1056,6 +1057,34 @@ class TestSubmit(BenchCase):
         answer = self.refused("submit", branch="work", message="a matrix")
         self.assertEqual(answer["refused"], "hosted_runner")
         self.assertEqual(answer["findings"][0]["line"], 7)
+
+    def test_submit_passes_a_hosted_runs_on_in_a_listed_workflow(self):
+        self.config.repo("demo").hosted_workflows = [".github/workflows/ansible.yml"]
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/ansible.yml"), self.HOSTED)
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["hosted_runs_on"], [
+            {"path": ".github/workflows/ansible.yml", "line": 5,
+             "text": "runs-on: ubuntu-latest", "allowed": True}])
+        self.assertTrue(self.ok("submit", branch="work", message="a listed workflow")["pushed"])
+
+    def test_submit_refuses_a_hosted_runs_on_in_an_unlisted_workflow(self):
+        self.config.repo("demo").hosted_workflows = [".github/workflows/ansible.yml"]
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/ansible.yml"), self.HOSTED)
+        util.write(os.path.join(path, ".github/workflows/app-image.yml"), self.HOSTED)
+        answer = self.refused("submit", branch="work", message="an unlisted workflow")
+        self.assertEqual(answer["refused"], "hosted_runner")
+        self.assertEqual([f["path"] for f in answer["findings"]],
+                         [".github/workflows/app-image.yml"])
+
+    def test_hosted_workflows_absent_or_null_is_an_empty_list(self):
+        self.assertEqual(self.config.repo("demo").hosted_workflows, [])
+        self.assertEqual(config_module.hosted_workflows_from_dict("demo", None), [])
+        self.assertEqual(self.config.repo("demo").to_dict()["hosted_workflows"], [])
+        with self.assertRaises(config_module.ConfigError):
+            config_module.hosted_workflows_from_dict("demo", "ansible.yml")
 
     def test_submit_refuses_a_change_over_the_ceiling(self):
         path = self.prepared()
@@ -1589,7 +1618,8 @@ class TestCheck(BenchCase):
         self.assertEqual((finding["path"], finding["line"]), (".github/workflows/ci.yml", 5))
         self.assertIn("waymark", finding["message"])
         self.assertEqual(answer["hosted_runs_on"], [
-            {"path": ".github/workflows/ci.yml", "line": 5, "text": "runs-on: ubuntu-latest"}])
+            {"path": ".github/workflows/ci.yml", "line": 5, "text": "runs-on: ubuntu-latest",
+             "allowed": False}])
 
     @unittest.skipUnless(shutil.which("clj-kondo"), "clj-kondo is not on PATH")
     def test_clj_kondo_names_an_unbalanced_let_binding(self):

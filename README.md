@@ -80,6 +80,16 @@ labels. A line the change does not touch is not judged; a new file is
 judged whole. `check` also answers `hosted_runs_on`: every hosted line the
 worktree's workflows hold, as information. The label list is fixed.
 
+A repository's policy can list `hosted_workflows`: the workflow paths,
+relative to the repository (`.github/workflows/ansible.yml`), that may use
+a GitHub-hosted `runs-on`. `submit` and `check` do not judge a file in the
+list; every other file is judged as before. The exception is for a file,
+never for a label. `hosted_runs_on` still gives every hosted line, each
+with `allowed`: true when its file is in the list. An absent or null
+`hosted_workflows` is an empty list. Only a person can grant the exception:
+the list is on the repository's policy row in the engine, which gives it to
+`enroll`, and no seat's change can add to it.
+
 ## A worktree that is old
 
 `prepare` fetches, but it does not move a worktree that exists. Its
