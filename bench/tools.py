@@ -1,4 +1,4 @@
-"""The thirty-one tools of the bench.
+"""The thirty-three tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -71,6 +71,8 @@ BRANCH_CHARS = re.compile(r"^[A-Za-z0-9._/-]+$")
 # part that walks upward.
 REPO_CHARS = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)?$")
 GREP_LINE = re.compile(r"^(?P<path>.+?)[-:](?P<line>\d+)[-:](?P<text>.*)$")
+# A GitHub Actions secret's name: letters, digits and _, not opening with a digit.
+SECRET_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class Refusal(Exception):
@@ -2684,6 +2686,49 @@ def rerun(bench, args):
             "run_id": stopped[0]["id"], "runs": stopped}
 
 
+def _secret_forge(repo):
+    """Gives the GitHub client of a repository: Actions secrets are GitHub's."""
+    client = forge.client(repo)
+    if client.provider != "github":
+        raise Refusal("not_github", repo=repo.name,
+                      reason="Actions secrets are GitHub's; this repository's forge is %s"
+                             % client.provider)
+    return client
+
+
+def secret_set(bench, args):
+    """Writes one Actions secret of an enrolled repository. The value is never
+    answered, logged, or put in a refusal."""
+    repo = bench.repo(args.get("repo"))
+    name = _text(args, "name", required=True)
+    if not SECRET_NAME.match(name) or name.upper().startswith("GITHUB_"):
+        raise Refusal("input", field="name",
+                      reason="a secret name is letters, digits and _, opening with neither "
+                             "a digit nor GITHUB_")
+    value = _text(args, "value", required=True)
+    _text(args, "why", required=True)
+    try:
+        updated_at = _secret_forge(repo).set_secret(name, value)
+    except Refusal:
+        raise
+    except forge.ForgeError as exc:
+        raise Refusal("forge", repo=repo.name, secret=name,
+                      reason=git.scrub(str(exc)).replace(value, "[secret]"))
+    except Exception as exc:  # Its message may carry the value: name its type only.
+        raise Refusal("error", repo=repo.name, secret=name,
+                      reason="the secret was not written: %s" % type(exc).__name__)
+    return {"repo": repo.name, "name": name, "updated_at": updated_at}
+
+
+def secret_list(bench, args):
+    """Gives the names of a repository's Actions secrets and when each was set."""
+    repo = bench.repo(args.get("repo"))
+    try:
+        return {"repo": repo.name, "secrets": _secret_forge(repo).secrets()}
+    except forge.ForgeError as exc:
+        raise Refusal("forge", repo=repo.name, reason=git.scrub(str(exc)))
+
+
 def test(bench, args):
     """Dispatches one test selection of a branch on the repository's own CI and
     answers at once with the run it started; test_result reads that run."""
@@ -4112,6 +4157,45 @@ TOOL_SPECS = [
             "type": "object",
             "properties": {"repo": _REPO, "branch": _BRANCH, "seat": _SEAT, "sitting": _SITTING},
             "required": ["repo", "branch"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "secret_set",
+        "function": secret_set,
+        "description": (
+            "Writes one GitHub Actions secret of an enrolled repository: the rig seals the "
+            "value with the repository's Actions public key and PUTs it, and answers "
+            "{repo, name, updated_at}, never the value. The value is an engine secret "
+            "reference: the engine hands the rig the real value and keeps only the "
+            "reference. The refusals are repo (not enrolled), input, not_github and forge."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "name": {"type": "string", "description": "The secret's name, e.g. TS_OAUTH_SECRET."},
+                "value": {"type": "string", "x-secret-ref": True,
+                          "description": "The engine secret that holds the value."},
+                "why": {"type": "string", "description": "One sentence: why this secret is set."},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
+            "required": ["repo", "name", "value", "why"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "secret_list",
+        "function": secret_list,
+        "description": (
+            "Lists a repository's GitHub Actions secrets as {repo, secrets: [{name, "
+            "updated_at}]}: names only, as GitHub never answers a value. The refusals are "
+            "repo, not_github and forge."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {"repo": _REPO, "seat": _SEAT, "sitting": _SITTING},
+            "required": ["repo"],
             "additionalProperties": False,
         },
     },

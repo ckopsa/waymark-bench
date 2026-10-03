@@ -37,7 +37,7 @@ WORKDIR /app
 # Dependency layer: the project file and the lock first, so a
 # source-only change never re-downloads the dependencies.
 COPY pyproject.toml uv.lock README.md ./
-RUN pip install --no-cache-dir "pydantic-settings>=2.0" "pyyaml>=6.0"
+RUN pip install --no-cache-dir "pydantic-settings>=2.0" "pyyaml>=6.0" "pynacl>=1.5"
 
 # The rig itself, installed as the `bench` command.
 COPY bench/ bench/
