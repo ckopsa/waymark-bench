@@ -70,6 +70,16 @@ carries `state` (`finished`, or `timed_out` when the step passed its
 `timeout`), `exit_code`, and the step's findings after the lint's. A
 repository with no check step answers in one call, as before.
 
+CI runs on the house's runners only (`self-hosted`, `waymark`). `submit`
+refuses `hosted_runner`, and `check` gives a finding, when a change adds
+or changes a `runs-on` in `.github/workflows/*.yml` to a GitHub-hosted
+label (`ubuntu-*`, `windows-*`, `macos-*`): in the value, in an
+expression's fallback (`|| 'ubuntu-latest'`), or in a matrix value that
+`runs-on` reads. Each finding names the file, the line and the house's
+labels. A line the change does not touch is not judged; a new file is
+judged whole. `check` also answers `hosted_runs_on`: every hosted line the
+worktree's workflows hold, as information. The label list is fixed.
+
 ## A worktree that is old
 
 `prepare` fetches, but it does not move a worktree that exists. Its

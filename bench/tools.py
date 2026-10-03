@@ -1252,6 +1252,99 @@ def yaml_errors(places, unavailable):
     return findings
 
 
+# The labels GitHub gives its own runners. CI runs on the house's runners only, and
+# the list is fixed: no repository's policy changes it.
+HOSTED_RUNNER = re.compile(r"(?<![\w.-])(?:ubuntu|windows|macos)-[\w.-]+")
+HOUSE_RUNNER_LABELS = ("self-hosted", "waymark")
+_WORKFLOW_KEY = re.compile(r"^(\s*(?:-\s+)?)([\w-]+)\s*:(.*)$")
+_MATRIX_KEY = re.compile(r"matrix\.([\w-]+)")
+_HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", re.M)
+
+
+def is_workflow(rel):
+    return rel.startswith(".github/workflows/") and rel.endswith((".yml", ".yaml"))
+
+
+def hosted_runs_on(text):
+    """Gives each line of a workflow that gives runs-on a GitHub-hosted label: in its
+    value, in an expression's fallback, in a list under it, or in a matrix value that
+    runs-on reads. `with` names the runs-on lines that read that matrix value."""
+    lines = [line.split(" #")[0].rstrip() for line in text.splitlines()]
+    feeds = {"runs-on": []}
+    for number, line in enumerate(lines, 1):
+        opened = _WORKFLOW_KEY.match(line)
+        if opened and opened.group(2) == "runs-on":
+            for key in _MATRIX_KEY.findall(opened.group(3)):
+                feeds.setdefault(key, []).append(number)
+    found, inside, column = [], None, 0
+    for number, line in enumerate(lines, 1):
+        bare = line.lstrip()
+        if not bare or bare.startswith("#"):
+            continue
+        indent = len(line) - len(bare)
+        opened = _WORKFLOW_KEY.match(line)
+        if opened and opened.group(2) in feeds:
+            inside, column, value = opened.group(2), len(opened.group(1)), opened.group(3)
+        elif inside and (indent > column or (indent == column and bare.startswith("- "))):
+            value = line
+        else:
+            inside = None
+            continue
+        label = HOSTED_RUNNER.search(value)
+        if label:
+            found.append({"line": number, "text": bare, "label": label.group(0),
+                          "with": feeds[inside]})
+    return found
+
+
+def added_lines(worktree, against, rel, cached=False):
+    """Gives the numbers of the lines of rel that a change adds or changes against a
+    commit. None is every line: the commit does not have the file."""
+    if git.run(["cat-file", "-e", "%s:%s" % (against, rel)], cwd=worktree, check=False)[0] != 0:
+        return None
+    text = git.out(["diff", "-U0", "--no-renames"] + (["--cached"] if cached else [])
+                   + [against, "--", rel], cwd=worktree)
+    added = set()
+    for start, count in _HUNK.findall(text):
+        added.update(range(int(start), int(start) + int(count or 1)))
+    return added
+
+
+def hosted_runner_findings(worktree, against, rels, cached=False):
+    """Gives a finding for each GitHub-hosted runs-on line that a change adds or changes
+    in a workflow. A line the change does not touch is not judged."""
+    findings = []
+    for rel in rels:
+        full = os.path.join(worktree, rel)
+        if not is_workflow(rel) or not os.path.isfile(full):
+            continue
+        with open(full, "r", encoding="utf-8", errors="replace") as handle:
+            hosted = hosted_runs_on(handle.read())
+        added = added_lines(worktree, against, rel, cached) if hosted else set()
+        for item in hosted:
+            if added is None or item["line"] in added or added.intersection(item["with"]):
+                findings.append({
+                    "path": rel, "line": item["line"], "col": 1,
+                    "message": "runs-on: %s is a GitHub-hosted runner (%s). CI runs on the "
+                               "house's runners: use the labels %s"
+                               % (item["label"], item["text"], ", ".join(HOUSE_RUNNER_LABELS))})
+    return findings
+
+
+def hosted_runner_lines(worktree):
+    """Gives every GitHub-hosted runs-on line of the worktree's workflows, as information."""
+    folder = os.path.join(worktree, ".github", "workflows")
+    lines = []
+    for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        rel = ".github/workflows/" + name
+        full = os.path.join(folder, name)
+        if is_workflow(rel) and os.path.isfile(full):
+            with open(full, "r", encoding="utf-8", errors="replace") as handle:
+                lines.extend({"path": rel, "line": item["line"], "text": item["text"]}
+                             for item in hosted_runs_on(handle.read()))
+    return lines
+
+
 BASH_ERROR = re.compile(r"^.*?: line (\d+): (.*)$")
 CHECK_MARK = "✗"
 CHECK_KIND = re.compile(r"\[([^\]]+)\]\s*")
@@ -1386,7 +1479,8 @@ def shell_errors(program, worktree, rel):
 
 def check(bench, args):
     """Lints the files a change touched: Clojure forms, Python compiles, shell parses,
-    .github YAML parses. Then it starts the repository's check step, when it has one,
+    .github YAML parses, no workflow line it touched gives runs-on a GitHub-hosted
+    runner. Then it starts the repository's check step, when it has one,
     and waits for it a while: a step that has not ended answers pending with a
     check_id, and check with that check_id answers it later. It never writes."""
     repo = bench.repo(args.get("repo"))
@@ -1440,6 +1534,12 @@ def check(bench, args):
                 skipped.append(rel)
         if workflows:
             findings.extend(yaml_errors(workflows, unavailable))
+        if any(is_workflow(rel) for _, rel in places):
+            base_head = git.rev_parse(
+                base_ref_of(bench.bare_dir(repo.name), bench.base_of(repo, branch)), cwd=worktree)
+            findings.extend(hosted_runner_findings(worktree, base_head,
+                                                   [rel for _, rel in places]))
+        hosted = hosted_runner_lines(worktree)
         if shell:
             program = shutil.which("bash")
             if not program:
@@ -1467,6 +1567,7 @@ def check(bench, args):
         "findings": findings,
         "skipped": skipped,
         "unavailable": unavailable,
+        "hosted_runs_on": hosted,
     }
     if repo.check is None:
         return answer
@@ -2047,6 +2148,18 @@ def submit(bench, args):
                     raise Refusal("over_ceiling", lines=added + removed, max_lines=ceiling,
                                   files=files, against=against, target=target,
                                   remedy="make the change smaller, or raise the ceiling")
+            hosted = hosted_runner_findings(worktree, against, git.out(
+                ["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--no-renames",
+                 "--diff-filter=d", against, "--", ".github/workflows"],
+                cwd=worktree).splitlines(), cached=True)
+            if hosted:
+                os.replace(saved, index)
+                raise Refusal("hosted_runner", findings=hosted,
+                              house_labels=list(HOUSE_RUNNER_LABELS),
+                              reason="the change adds or changes a runs-on to a GitHub-hosted "
+                                     "runner, and CI runs on the house's runners only",
+                              remedy="give runs-on the house's labels in these lines, "
+                                     "then submit again")
             credential = bench.credentials.get(repo.name) or {}
             if workflows and "workflows" in (credential.get("missing") or []):
                 # GitHub rejects the push of a workflow file without it.

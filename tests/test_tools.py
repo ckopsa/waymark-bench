@@ -1008,6 +1008,55 @@ class TestSubmit(BenchCase):
         self.assertEqual(answer["refused"], "default_branch")
         self.assertEqual(answer["default_branch"], "main")
 
+    HOSTED = "name: ci\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps: []\n"
+
+    def test_submit_refuses_an_added_hosted_runs_on(self):
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/new.yml"), self.HOSTED)
+        answer = self.refused("submit", branch="work", message="a hosted runner")
+        self.assertEqual(answer["refused"], "hosted_runner")
+        finding = answer["findings"][0]
+        self.assertEqual((finding["path"], finding["line"]), (".github/workflows/new.yml", 5))
+        self.assertIn("ubuntu-latest", finding["message"])
+        self.assertIn("waymark", answer["house_labels"])
+        self.assertEqual(self.ok("status", branch="work")["dirty"], 1)
+
+    def test_submit_passes_a_house_runs_on(self):
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/new.yml"),
+                   self.HOSTED.replace("ubuntu-latest", "waymark"))
+        self.assertTrue(self.ok("submit", branch="work", message="a house runner")["pushed"])
+
+    def test_submit_passes_a_hosted_runs_on_the_change_does_not_touch(self):
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", ".github/workflows/old.yml", self.HOSTED)
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/old.yml"),
+                   self.HOSTED + "    timeout-minutes: 5\n")
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["hosted_runs_on"], [
+            {"path": ".github/workflows/old.yml", "line": 5, "text": "runs-on: ubuntu-latest"}])
+        self.assertTrue(self.ok("submit", branch="work", message="a timeout")["pushed"])
+
+    def test_submit_refuses_an_expression_fallback_to_a_hosted_runner(self):
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/ci.yml"), self.HOSTED.replace(
+            "ubuntu-latest", "${{ vars.RUNNER || 'ubuntu-latest' }}"))
+        answer = self.refused("submit", branch="work", message="a fallback")
+        self.assertEqual(answer["refused"], "hosted_runner")
+        self.assertEqual(answer["findings"][0]["line"], 5)
+
+    def test_submit_refuses_a_hosted_matrix_value_that_feeds_runs_on(self):
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/ci.yml"), self.HOSTED.replace(
+            "    runs-on: ubuntu-latest\n",
+            "    strategy:\n      matrix:\n        os: [waymark, macos-14]\n"
+            "    runs-on: ${{ matrix.os }}\n"))
+        answer = self.refused("submit", branch="work", message="a matrix")
+        self.assertEqual(answer["refused"], "hosted_runner")
+        self.assertEqual(answer["findings"][0]["line"], 7)
+
     def test_submit_refuses_a_change_over_the_ceiling(self):
         path = self.prepared()
         util.write(os.path.join(path, "big.txt"), "line\n" * 40)
@@ -1529,6 +1578,18 @@ class TestCheck(BenchCase):
         self.assertFalse(answer["ok"])
         self.assertEqual([f["path"] for f in answer["findings"]], [".github/workflows/ci.yml"])
         self.assertGreater(answer["findings"][0]["line"], 1)
+
+    def test_check_finds_an_added_hosted_runs_on(self):
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/ci.yml"),
+                   "name: ci\non: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps: []\n")
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        finding = answer["findings"][0]
+        self.assertEqual((finding["path"], finding["line"]), (".github/workflows/ci.yml", 5))
+        self.assertIn("waymark", finding["message"])
+        self.assertEqual(answer["hosted_runs_on"], [
+            {"path": ".github/workflows/ci.yml", "line": 5, "text": "runs-on: ubuntu-latest"}])
 
     @unittest.skipUnless(shutil.which("clj-kondo"), "clj-kondo is not on PATH")
     def test_clj_kondo_names_an_unbalanced_let_binding(self):
