@@ -2718,7 +2718,7 @@ def secret_set(bench, args):
                       reason="a secret name is letters, digits and _, opening with neither "
                              "a digit nor GITHUB_")
     value = _text(args, "value", required=True)
-    _text(args, "why", required=True)
+    _text(args, "why")  # Optional: a gate in front of the rig may hold the why itself.
     try:
         updated_at = _secret_forge(repo).set_secret(name, value)
     except Refusal:
@@ -2756,7 +2756,7 @@ def dispatch(bench, args):
         inputs = {}
     if not isinstance(inputs, dict):
         raise Refusal("input", field="inputs", reason="the inputs are an object: name to value")
-    _text(args, "why", required=True)
+    _text(args, "why")  # Optional: a gate in front of the rig may hold the why itself.
     try:
         client = forge.client(repo)
         before = {run["id"] for run in client.workflow_runs(workflow, ref)}
@@ -4253,10 +4253,11 @@ TOOL_SPECS = [
                 "name": {"type": "string", "description": "The secret's name, e.g. TS_OAUTH_SECRET."},
                 "value": {"type": "string", "x-secret-ref": True,
                           "description": "The engine secret that holds the value."},
-                "why": {"type": "string", "description": "One sentence: why this secret is set."},
+                "why": {"type": "string", "description": "One sentence: why this secret is set. "
+                        "Optional: a gate in front of this server may hold the why itself."},
                 "seat": _SEAT, "sitting": _SITTING,
             },
-            "required": ["repo", "name", "value", "why"],
+            "required": ["repo", "name", "value"],
             "additionalProperties": False,
         },
     },
@@ -4295,10 +4296,11 @@ TOOL_SPECS = [
                 "ref": {"type": "string", "description": "The branch or tag the workflow "
                         "runs on. The default branch when it is not given."},
                 "inputs": {"type": "object", "description": "The workflow's inputs: name to value."},
-                "why": {"type": "string", "description": "One sentence: why this workflow is started."},
+                "why": {"type": "string", "description": "One sentence: why this workflow is started. "
+                        "Optional: a gate in front of this server may hold the why itself."},
                 "seat": _SEAT, "sitting": _SITTING,
             },
-            "required": ["repo", "workflow", "why"],
+            "required": ["repo", "workflow"],
             "additionalProperties": False,
         },
     },

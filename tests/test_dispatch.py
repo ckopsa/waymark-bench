@@ -129,10 +129,15 @@ class TestDispatch(DispatchCase):
         self.assertTrue(refused)
         self.assertEqual(answer["refused"], "token_lacks_actions_write")
 
+    def test_dispatch_takes_no_why_when_a_gate_holds_it(self):
+        answer, refused = self.call("dispatch", workflow="runner-image.yml")
+        self.assertFalse(refused, answer)
+        self.assertEqual(answer["run_id"], 77)
+
     def test_a_bad_input_is_refused_before_the_forge(self):
         for args, field in (({"workflow": "../x.yml"}, "workflow"),
                             ({"inputs": ["tag"]}, "inputs"),
-                            ({"why": ""}, "why")):
+                            ({"why": 7}, "why")):
             answer, refused = self.dispatch(**args)
             self.assertTrue(refused, args)
             self.assertEqual(answer["field"], field)
