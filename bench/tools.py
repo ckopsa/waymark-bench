@@ -1,4 +1,4 @@
-"""The thirty-three tools of the bench.
+"""The thirty-five tools of the bench.
 
 Each tool is a function over a Bench object. Each function validates its
 input, applies the caps, and gives a dictionary. A refusal is a Refusal
@@ -73,6 +73,11 @@ REPO_CHARS = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9
 GREP_LINE = re.compile(r"^(?P<path>.+?)[-:](?P<line>\d+)[-:](?P<text>.*)$")
 # A GitHub Actions secret's name: letters, digits and _, not opening with a digit.
 SECRET_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# A workflow is its file name under .github/workflows, or its numeric id.
+WORKFLOW_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+# dispatch looks for the run it started at most ten seconds: 5 reads, 2 s apart.
+DISPATCH_FIND_TRIES = 5
+DISPATCH_FIND_SECONDS = 2
 
 
 class Refusal(Exception):
@@ -2729,6 +2734,69 @@ def secret_list(bench, args):
         raise Refusal("forge", repo=repo.name, reason=git.scrub(str(exc)))
 
 
+def dispatch(bench, args):
+    """Starts one workflow_dispatch workflow of a repository on a ref. Answers
+    the run that dispatch started, or run_id null when no run showed within
+    about ten seconds."""
+    repo = bench.repo(args.get("repo"))
+    workflow = _text(args, "workflow", required=True)
+    if not WORKFLOW_NAME.match(workflow):
+        raise Refusal("input", field="workflow",
+                      reason="a workflow is its file name under .github/workflows, or its id")
+    ref = check_branch(_text(args, "ref", default=repo.default_branch))
+    inputs = args.get("inputs")
+    if inputs is None:
+        inputs = {}
+    if not isinstance(inputs, dict):
+        raise Refusal("input", field="inputs", reason="the inputs are an object: name to value")
+    _text(args, "why", required=True)
+    try:
+        client = forge.client(repo)
+        before = {run["id"] for run in client.workflow_runs(workflow, ref)}
+        dispatched_at = _utc_stamp(time.time() - TEST_SKEW_SECONDS)
+        try:
+            client.dispatch_workflow(workflow, ref, inputs)
+        except forge.ForgeError as exc:
+            if exc.status != 403:
+                raise
+            raise Refusal("token_lacks_actions_write", repo=repo.name, workflow=workflow, ref=ref,
+                          reason="GitHub refused the dispatch: the rig's token needs "
+                                 "Actions: read and write (docs/credential.md)")
+        answer = {"repo": repo.name, "workflow": workflow, "ref": ref, "run_id": None,
+                  "run_url": None, "dispatched_at": dispatched_at}
+        for attempt in range(DISPATCH_FIND_TRIES):
+            runs = [run for run in client.workflow_runs(workflow, ref)
+                    if run["id"] not in before]
+            if runs:
+                answer.update(run_id=runs[0]["id"], run_url=runs[0].get("url"))
+                return answer
+            if attempt + 1 < DISPATCH_FIND_TRIES:
+                _sleep(DISPATCH_FIND_SECONDS)
+        return answer
+    except forge.ForgeError as exc:
+        raise Refusal("forge", repo=repo.name, workflow=workflow, reason=git.scrub(str(exc)))
+
+
+def run_status(bench, args):
+    """Gives one workflow run's status, its conclusion and the failed steps of
+    each failed job."""
+    repo = bench.repo(args.get("repo"))
+    run_id = args.get("run_id")
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
+        raise Refusal("input", field="run_id", reason="a run id is a whole number above zero")
+    try:
+        client = forge.client(repo)
+        run = client.pipeline(run_id)
+        failed = [{"job": step.get("name"), "steps": step.get("failed_steps") or []}
+                  for step in client.steps(run_id) if step.get("result") == "failure"]
+    except forge.ForgeError as exc:
+        raise Refusal("forge", repo=repo.name, run_id=run_id, reason=git.scrub(str(exc)))
+    return {"repo": repo.name, "run_id": run_id, "run_url": run.get("url"),
+            "workflow": run.get("kind"), "ref": run.get("branch"),
+            "status": run.get("state"), "conclusion": run.get("result") or None,
+            "failed_steps": failed}
+
+
 def test(bench, args):
     """Dispatches one test selection of a branch on the repository's own CI and
     answers at once with the run it started; test_result reads that run."""
@@ -4196,6 +4264,52 @@ TOOL_SPECS = [
             "type": "object",
             "properties": {"repo": _REPO, "seat": _SEAT, "sitting": _SITTING},
             "required": ["repo"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "dispatch",
+        "function": dispatch,
+        "description": (
+            "Starts one workflow_dispatch workflow of an enrolled repository on a ref "
+            "(the default branch when none is given) with these inputs, and answers "
+            "{repo, workflow, ref, run_id, run_url, dispatched_at}. The rig looks for the "
+            "run about ten seconds; run_id is null when it did not show. Read the run "
+            "with run_status. The refusals are repo (not enrolled), input, "
+            "token_lacks_actions_write (GitHub answered 403) and forge."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "workflow": {"type": "string", "description": "The workflow file under "
+                             ".github/workflows, e.g. runner-image.yml, or its id."},
+                "ref": {"type": "string", "description": "The branch or tag the workflow "
+                        "runs on. The default branch when it is not given."},
+                "inputs": {"type": "object", "description": "The workflow's inputs: name to value."},
+                "why": {"type": "string", "description": "One sentence: why this workflow is started."},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
+            "required": ["repo", "workflow", "why"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "run_status",
+        "function": run_status,
+        "description": (
+            "Reads one workflow run of an enrolled repository: {repo, run_id, run_url, "
+            "workflow, ref, status, conclusion, failed_steps: [{job, steps}]}. conclusion "
+            "is null while the run is not done. The refusals are repo, input and forge."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "run_id": {"type": "integer", "description": "The run, as dispatch answers it."},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
+            "required": ["repo", "run_id"],
             "additionalProperties": False,
         },
     },

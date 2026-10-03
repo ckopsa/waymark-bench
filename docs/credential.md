@@ -21,6 +21,8 @@ needs, so the token can be made whole, and no larger.
 | `feedback`, `merge` | read commit statuses | Commit statuses: read | `repo` |
 | `merge` | merge the pull request | Contents: read and write, Pull requests: read and write | `repo` |
 | `rerun` | re-run the failed jobs of an interrupted workflow run | Actions: read and write | `repo` |
+| `dispatch` | start a `workflow_dispatch` workflow, read its runs | Actions: read and write | `repo` |
+| `run_status` | read one workflow run and its jobs | Actions: read | `repo` |
 | `secret_list` | read the names of the repository's Actions secrets | Secrets: read | `repo` |
 | `secret_set` | read the Actions public key, write one Actions secret | Secrets: read and write | `repo` |
 
@@ -46,7 +48,7 @@ then:
   commit statuses of the default branch. A refusal there is a missing
   permission. What only a write could prove (Contents, Pull requests,
   Workflows, and the write half of Actions) is `unverified`, not missing.
-  When GitHub refuses `rerun`, it answers `token_lacks_actions_write`.
+  When GitHub refuses `rerun` or `dispatch`, it answers `token_lacks_actions_write`.
 
 The check does not look at Secrets, for either kind of token: it is in neither
 `missing` nor `unverified`. A token without it passes the check, and
