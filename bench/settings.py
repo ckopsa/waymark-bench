@@ -12,6 +12,7 @@ another file). The credentials are secrets: they never print, and
   BENCH_BITBUCKET_USER    the Bitbucket user (an email or a username)
   BENCH_BITBUCKET_TOKEN   the Bitbucket app password
   BENCH_GITHUB_TOKEN      the GitHub token, when it is not the git token
+  BENCH_SECRETS_TOKEN     the GitHub token of secret_set and secret_list only
   BENCH_TEST_WAIT         the seconds test_result waits by default (25; 28 at most)
 """
 
@@ -32,6 +33,7 @@ class Settings(BaseSettings):
     bitbucket_user: str | None = None
     bitbucket_token: SecretStr | None = None
     github_token: SecretStr | None = None
+    secrets_token: SecretStr | None = None
     test_wait: int = 25
 
     def secret(self, name):
@@ -45,7 +47,7 @@ class Settings(BaseSettings):
     def secrets(self):
         """Gives the values of every set secret."""
         found = []
-        for name in ("git_token", "bitbucket_token", "github_token"):
+        for name in ("git_token", "bitbucket_token", "github_token", "secrets_token"):
             value = self.secret(name)
             if value:
                 found.append(value)

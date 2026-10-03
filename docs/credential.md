@@ -1,9 +1,10 @@
-# The rig's GitHub credential
+# The rig's GitHub credentials
 
-The rig holds one GitHub token (`BENCH_GITHUB_TOKEN`, or `BENCH_GIT_TOKEN`).
-Seats never hold it: they reach GitHub only through the rig's tools. This
-page names every thing the rig does with GitHub and the permission each one
-needs, so the token can be made whole, and no larger.
+The rig holds two GitHub tokens: the main token (`BENCH_GITHUB_TOKEN`, or
+`BENCH_GIT_TOKEN`) and the secrets token (`BENCH_SECRETS_TOKEN`). Seats never
+hold them: they reach GitHub only through the rig's tools. This page names
+every thing the rig does with GitHub and the permission each one needs, so
+each token can be made whole, and no larger.
 
 ## What the rig does, and what it needs
 
@@ -23,17 +24,41 @@ needs, so the token can be made whole, and no larger.
 | `rerun` | re-run the failed jobs of an interrupted workflow run | Actions: read and write | `repo` |
 | `dispatch` | start a `workflow_dispatch` workflow, read its runs | Actions: read and write | `repo` |
 | `run_status` | read one workflow run and its jobs | Actions: read | `repo` |
-| `secret_list` | read the names of the repository's Actions secrets | Secrets: read | `repo` |
-| `secret_set` | read the Actions public key, write one Actions secret | Secrets: read and write | `repo` |
+| `secret_list` | read the names of the repository's Actions secrets | the secrets token. Secrets: read | not used |
+| `secret_set` | read the Actions public key, write one Actions secret | the secrets token. Secrets: read and write | not used |
 
-In short: a classic token needs `repo` and `workflow`. A fine-grained token
-needs these repository permissions: Contents (read and write), Pull requests
-(read and write), Workflows (read and write), Commit statuses (read), Checks
-(read), Actions (read and write), Secrets (read and write) and Metadata
-(read). Secrets is needed only where `secret_set` and `secret_list` are used.
+In short: a classic main token needs `repo` and `workflow`. A fine-grained
+main token needs these repository permissions: Contents (read and write),
+Pull requests (read and write), Workflows (read and write), Commit statuses
+(read), Checks (read), Actions (read and write) and Metadata (read). It does
+not need Secrets: remove Secrets from the main token.
 
 Use a fine-grained token, limited to the enrolled repositories. Add a
 repository to the token when you enroll it.
+
+## The secrets token
+
+A fine-grained permission applies to every repository the token selects. With
+Secrets on the main token, the rig could overwrite the Actions secrets of
+every enrolled repository. So `secret_set` and `secret_list` use a second
+token, `BENCH_SECRETS_TOKEN`, and no other tool ever uses it. When it is not
+set, the two refuse `no_secrets_token`; the main token never stands in for it.
+
+Make it a fine-grained token with only these repository permissions: Secrets
+(read and write) and Metadata (read). Select only the repositories that are
+meant to take secrets from the rig (today: ckopsa/home-infrastructure). Do
+not use a classic token: its `repo` scope reaches every repository.
+
+It reaches the rig the same way `BENCH_GITHUB_TOKEN` does: a Nomad variable
+that the job gives the task as the environment variable `BENCH_SECRETS_TOKEN`.
+The rig never logs it, and removes its value from every message it gives.
+
+A fine-grained token expires: GitHub asks for an expiry date when you make
+it, a year ahead at most. Write the date down beside the Nomad variable. After
+that date GitHub answers 401: `secret_set` and `secret_list` refuse `forge`,
+and the check reports `secrets_token.ok` false. Make a new token with the same
+permissions and repositories, and put it in the Nomad variable. The main
+token expires in the same way, on its own date.
 
 ## The check
 
@@ -50,16 +75,27 @@ then:
   Workflows, and the write half of Actions) is `unverified`, not missing.
   When GitHub refuses `rerun` or `dispatch`, it answers `token_lacks_actions_write`.
 
-The check does not look at Secrets, for either kind of token: it is in neither
-`missing` nor `unverified`. A token without it passes the check, and
-`secret_set` and `secret_list` then refuse `forge` with GitHub's 403 in the
-reason.
+Secrets is in neither `missing` nor `unverified`: the main token should not
+hold it. The check reports the two tokens apart. It reads the names of the
+repository's Actions secrets one time with each token:
+
+- `secrets_token` is `{set, ok}`, with a `reason` when `ok` is not true.
+  `set` is false when `BENCH_SECRETS_TOKEN` is not set. `ok` is false when
+  GitHub refuses the read: the token expired, or it does not select this
+  repository, which is right for a repository that takes no secrets.
+- `warnings` holds `main_token_reads_secrets` when the main token can read
+  them. Remove Secrets from the main token then. A classic token with `repo`
+  always gives this warning.
+
+`ok`, `missing` and `unverified` speak of the main token only.
 
 `repos` and `enroll` answer each repository's check as `credential`:
 
 ```json
 {"checked": true, "ok": false, "token": "classic",
- "missing": ["workflows"], "unverified": []}
+ "missing": ["workflows"], "unverified": [],
+ "secrets_token": {"set": true, "ok": true},
+ "warnings": ["main_token_reads_secrets"]}
 ```
 
 A repository without a GitHub forge answers `{"checked": false, ...}` with the

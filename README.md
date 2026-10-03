@@ -11,7 +11,9 @@ tools: `prepare`, `status`, `diff`, `find`, `read`, `symbols`, `read_symbol`, `h
 PyYAML, so `check` can parse the changed `.github` YAML files, and PyNaCl,
 so `secret_set` can seal a value with a repository's Actions public key.
 `secret_set` answers `{repo, name, updated_at}` and never the value;
-`secret_list` answers names only.
+`secret_list` answers names only. The two use their own token,
+`BENCH_SECRETS_TOKEN` (docs/credential.md), and refuse `no_secrets_token`
+when it is not set; no other tool uses it.
 
 ```
 uv sync                      # makes .venv with the two dependencies
