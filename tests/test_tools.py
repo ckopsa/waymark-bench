@@ -236,6 +236,15 @@ class TestFind(BenchCase):
             if entry["path"] == "README.md":
                 self.assertGreater(entry["size"], 0)
 
+    def test_find_without_mode_gives_a_tree(self):
+        self.prepared()
+        answer = self.ok("find", branch="work", path="", pattern="*.py")
+        self.assertEqual(answer["mode"], "tree")
+        self.assertIn("README.md", [entry["path"] for entry in answer["entries"]])
+        schema = tools.TOOLS["find"]["schema"]
+        self.assertNotIn("mode", schema["required"])
+        self.assertEqual(schema["properties"]["mode"]["default"], "tree")
+
     def test_find_glob_gives_the_paths_that_match(self):
         self.prepared()
         answer = self.ok("find", branch="work", mode="glob", pattern="*.py")
@@ -497,6 +506,17 @@ class TestRead(BenchCase):
         answer = self.ok("read", branch="work", path="docs/a.txt", offset=2, limit=1)
         self.assertEqual(answer["lines"], [{"line": 2, "text": "bravo"}])
         self.assertFalse(answer["eof"])
+
+    def test_read_refuses_start_and_end_and_names_offset_and_limit(self):
+        self.prepared()
+        answer = self.refused("read", branch="work", path="docs/a.txt", start=2, end=3)
+        self.assertEqual(answer["refused"], "input")
+        self.assertEqual(answer["unknown"], ["end", "start"])
+        self.assertIn("offset", answer["reason"])
+        self.assertIn("limit", answer["reason"])
+        properties = tools.TOOLS["read"]["schema"]["properties"]
+        self.assertIn("first line", properties["offset"]["description"])
+        self.assertIn("count of lines", properties["limit"]["description"])
 
     def test_read_of_a_ref_gives_the_base_file(self):
         path = self.prepared()
