@@ -1108,6 +1108,11 @@ def read(bench, args):
     """Gives lines with numbers from the worktree or from a ref."""
     if args.get("symbol") is not None:
         raise Refusal("input", field="symbol", reason="read takes no symbol; use read_symbol")
+    unknown = sorted(key for key in args if key not in TOOLS["read"]["schema"]["properties"])
+    if unknown:
+        raise Refusal("input", field=unknown[0], unknown=unknown,
+                      reason="read takes no %s; the window is offset, the first line "
+                             "from 1, and limit, the count of lines" % " or ".join(unknown))
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     offset = _int(args, "offset", 1, 1, 1000000)
@@ -3755,6 +3760,7 @@ TOOL_SPECS = [
                 "repo": _REPO,
                 "branch": _BRANCH,
                 "mode": {"type": "string", "enum": ["tree", "glob", "grep", "diff"],
+                         "default": "tree",
                          "description": "The kind of look. The default is tree."},
                 "path": {"type": "string", "description": "The path to look in."},
                 "depth": {"type": "integer",
@@ -3775,7 +3781,7 @@ TOOL_SPECS = [
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },
-            "required": ["repo", "branch", "mode"],
+            "required": ["repo", "branch"],
             "additionalProperties": False,
         },
     },
@@ -3798,9 +3804,14 @@ TOOL_SPECS = [
                 "branch": _BRANCH,
                 "path": {"type": "string", "description": "The path in the repository."},
                 "offset": {"type": "integer",
-                           "description": "The first line. The lines start at 1."},
+                           "description": (
+                               "The number of the first line to give. The lines start at 1, "
+                               "and the default is 1. There is no start and no end: the "
+                               "window is offset and limit.")},
                 "limit": {"type": "integer",
-                          "description": "The count of lines. The default is 120, and a read gives 120 at most."},
+                          "description": (
+                              "The count of lines to give from offset, and not the number of "
+                              "the last line. The default is 120, and a read gives 120 at most.")},
                 "ref": {"type": "string",
                         "description": "A git ref to read instead of the worktree. Use base for the base branch."},
                 "if_hash": {"type": "string",
