@@ -950,7 +950,8 @@ def find(bench, args):
     """Looks in a worktree: a tree, a glob, a grep or a diff."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
-    mode = _text(args, "mode", default="tree")
+    # A pattern with no mode is a search: the tree would drop the pattern.
+    mode = _text(args, "mode", default="grep" if args.get("pattern") else "tree")
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
     allow = _globs(args, "allow")
     if mode in ("glob", "grep") and not args.get("pattern"):
@@ -3819,7 +3820,8 @@ TOOL_SPECS = [
                 "branch": _BRANCH,
                 "mode": {"type": "string", "enum": ["tree", "glob", "grep", "diff"],
                          "default": "tree",
-                         "description": "The kind of look. The default is tree."},
+                         "description": ("The kind of look. The default is tree. "
+                                         "With a pattern and no mode, the mode is grep.")},
                 "path": {"type": "string", "description": "The path to look in."},
                 "depth": {"type": "integer",
                           "description": "The depth for mode tree. The default is 2."},

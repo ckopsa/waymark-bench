@@ -238,12 +238,25 @@ class TestFind(BenchCase):
 
     def test_find_without_mode_gives_a_tree(self):
         self.prepared()
-        answer = self.ok("find", branch="work", path="", pattern="*.py")
+        answer = self.ok("find", branch="work", path="")
         self.assertEqual(answer["mode"], "tree")
         self.assertIn("README.md", [entry["path"] for entry in answer["entries"]])
         schema = tools.TOOLS["find"]["schema"]
         self.assertNotIn("mode", schema["required"])
         self.assertEqual(schema["properties"]["mode"]["default"], "tree")
+
+    def test_find_with_a_pattern_and_no_mode_greps(self):
+        self.prepared()
+        answer = self.ok("find", branch="work", pattern="TODO")
+        self.assertEqual(answer["mode"], "grep")
+        self.assertEqual(answer["files"], [{"path": "src/app.py", "count": 2}])
+        self.assertIn("grep", tools.TOOLS["find"]["schema"]["properties"]["mode"]["description"])
+
+    def test_find_with_mode_tree_and_a_pattern_gives_a_tree(self):
+        self.prepared()
+        answer = self.ok("find", branch="work", mode="tree", pattern="TODO")
+        self.assertEqual(answer["mode"], "tree")
+        self.assertIn("README.md", [entry["path"] for entry in answer["entries"]])
 
     def test_find_glob_gives_the_paths_that_match(self):
         self.prepared()
