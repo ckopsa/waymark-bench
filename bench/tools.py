@@ -2603,10 +2603,20 @@ def log(bench, args):
     width = _int(args, "width", 200, 80, 400)
     item = bench.landings.get(repo, branch)
     head = item.state.get("head") if item else None
+    run_id = args.get("run_id")
     try:
         client = forge.client(repo)
         jobs = []
-        for run in pipelines_of_head(client.pipelines(branch), head):
+        runs = client.pipelines(branch)
+        if run_id is None:
+            runs = pipelines_of_head(runs, head)
+        else:
+            known = [p.get("id") for p in runs]
+            runs = [p for p in runs if str(p.get("id")) == str(run_id)]
+            if not runs:
+                raise Refusal("run", repo=repo.name, branch=branch, run_id=run_id, runs=known,
+                              reason="no run with this id is among the branch's newest runs")
+        for run in runs:
             jobs.extend((run, job) for job in client.steps(run["id"]))
     except forge.ForgeError as exc:
         raise Refusal("forge", reason=str(exc))
@@ -2761,10 +2771,62 @@ def update_branch(bench, args):
     return dict(answer, repo=repo.name, number=number)
 
 
+def _rerun_failed(client, repo, branch, head, run_id):
+    """Asks the forge to start one run's failed jobs again. A 403 is the token's."""
+    try:
+        client.rerun_failed_jobs(run_id)
+    except forge.ForgeError as exc:
+        if exc.status != 403:
+            raise
+        raise Refusal("token_lacks_actions_write", repo=repo.name, branch=branch,
+                      head=head, run_id=run_id,
+                      reason="GitHub refused the re-run: the rig's token needs "
+                             "Actions: read and write (docs/credential.md)")
+
+
+def rerun_one(bench, repo, branch, head, run_id):
+    """Starts the failed jobs of one finished run on the branch's pushed head again,
+    one time per run. A red test step counts too: a test can fail in a path the
+    change does not touch."""
+    if run_id in ((bench.meta_read(repo.name).get(branch) or {}).get("rerun_runs") or []):
+        raise Refusal("already_rerun", repo=repo.name, branch=branch, head=head, run_id=run_id,
+                      reason="this run was started again once already: a second failure is "
+                             "real, so read log, fix it and submit")
+    try:
+        client = forge.client(repo)
+        found = [p for p in client.pipelines(branch)
+                 if str(p.get("id")) == run_id and p.get("commit") == head]
+        if not found:
+            raise Refusal("not_own_head", repo=repo.name, branch=branch, head=head, run_id=run_id,
+                          reason="no run with this id is on the branch's pushed head: a seat "
+                                 "re-runs the CI of its own change only")
+        run = found[0]
+        if run.get("state") != "completed":
+            raise Refusal("not_finished", repo=repo.name, branch=branch, head=head, run_id=run_id,
+                          url=run.get("url"), reason="the run has not ended: wait for it")
+        jobs = [s.get("name") for s in client.steps(run["id"])
+                if s.get("interrupted") or s.get("result") in ("failure", "cancelled", "timed_out")]
+        if not jobs:
+            raise Refusal("nothing_failed", repo=repo.name, branch=branch, head=head,
+                          run_id=run_id, url=run.get("url"), reason="the run has no failed job")
+        _rerun_failed(client, repo, branch, head, run["id"])
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=git.scrub(str(exc)))
+    with bench.lock(repo.name):
+        meta = bench.meta_read(repo.name)
+        meta.setdefault(branch, {}).setdefault("rerun_runs", []).append(run_id)
+        bench.meta_write(repo.name, meta)
+    stopped = [{"id": run["id"], "kind": run.get("kind"), "url": run.get("url"), "jobs": jobs}]
+    return {"repo": repo.name, "branch": branch, "head": head,
+            "run_id": run["id"], "runs": stopped}
+
+
 def rerun(bench, args):
-    """Starts the interrupted CI of the branch's pushed head again, one time per head."""
+    """Starts the interrupted CI of the branch's pushed head again, one time per head.
+    With run_id it starts that run's failed jobs again, one time per run."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
+    run_id = args.get("run_id")
     remote = "refs/remotes/origin/" + branch
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
@@ -2773,6 +2835,8 @@ def rerun(bench, args):
             raise Refusal("not_pushed", repo=repo.name, branch=branch,
                           reason="the branch is not on the remote: submit pushes it")
         head = git.rev_parse(remote, cwd=worktree)
+    if run_id is not None:
+        return rerun_one(bench, repo, branch, head, str(run_id))
     if (bench.meta_read(repo.name).get(branch) or {}).get("rerun_head") == head:
         raise Refusal("already_rerun", repo=repo.name, branch=branch, head=head,
                       reason="the CI of this head was started again once already")
@@ -2800,20 +2864,14 @@ def rerun(bench, args):
                           reason="no finished run on the head has a cancelled, timed out or "
                                  "stopped-in-setup job")
         for run in stopped:
-            try:
-                client.rerun_failed_jobs(run["id"])
-            except forge.ForgeError as exc:
-                if exc.status != 403:
-                    raise
-                raise Refusal("token_lacks_actions_write", repo=repo.name, branch=branch,
-                              head=head, run_id=run["id"],
-                              reason="GitHub refused the re-run: the rig's token needs "
-                                     "Actions: read and write (docs/credential.md)")
+            _rerun_failed(client, repo, branch, head, run["id"])
     except forge.ForgeError as exc:
         raise Refusal("forge", reason=git.scrub(str(exc)))
     with bench.lock(repo.name):
         meta = bench.meta_read(repo.name)
-        meta.setdefault(branch, {})["rerun_head"] = head
+        entry = meta.setdefault(branch, {})
+        entry["rerun_head"] = head
+        entry.setdefault("rerun_runs", []).extend(str(run["id"]) for run in stopped)
         bench.meta_write(repo.name, meta)
     return {"repo": repo.name, "branch": branch, "head": head,
             "run_id": stopped[0]["id"], "runs": stopped}
@@ -4225,7 +4283,9 @@ TOOL_SPECS = [
             "marked hit; mode range gives limit lines from offset, counting from 1. Every line "
             "comes without colors and without GitHub's timestamp, cut at width characters; a "
             "cut line ends in '… (+N)'. The rig keeps a log an hour, so paging does not fetch "
-            "it again."
+            "it again. With run_id the jobs are those of that run of the branch, not of the "
+            "newest run of each workflow; an id the branch's newest runs do not hold is "
+            "refused run."
         ),
         "schema": {
             "type": "object",
@@ -4233,6 +4293,9 @@ TOOL_SPECS = [
                 "repo": _REPO,
                 "branch": _BRANCH,
                 "job": {"type": "string", "description": "The job's name, as feedback reports it."},
+                "run_id": {"type": "integer",
+                           "description": "The run to read, as feedback and rerun name it. "
+                                          "Without it: the newest run of each workflow."},
                 "mode": {"type": "string", "enum": list(LOG_MODES),
                          "description": "markers (the default), grep or range."},
                 "pattern": {"type": "string", "description": "The regex of mode grep."},
@@ -4368,11 +4431,22 @@ TOOL_SPECS = [
             "failed jobs of its run, e.g. {\"run_id\": 11, \"runs\": [...]}. Use it when "
             "feedback gives a finding whose message starts ci: interrupted. One time per "
             "head. The refusals are not_pushed, red (a job failed in a test step: fix it), "
-            "nothing_interrupted, already_rerun (this head was re-run once) and forge."
+            "nothing_interrupted, already_rerun (this head was re-run once) and forge. With "
+            "run_id it re-runs the failed jobs of that one finished run, a red test step "
+            "too, for a failure in a path the change does not touch. One time per run: "
+            "already_rerun after, because a second failure is real. The run must be on the "
+            "branch's pushed head (not_own_head), ended (not_finished) and hold a failed "
+            "job (nothing_failed)."
         ),
         "schema": {
             "type": "object",
-            "properties": {"repo": _REPO, "branch": _BRANCH, "seat": _SEAT, "sitting": _SITTING},
+            "properties": {
+                "repo": _REPO, "branch": _BRANCH,
+                "run_id": {"type": "integer",
+                           "description": "The workflow run whose failed jobs to start again. "
+                                          "It must be on the branch's pushed head."},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
             "required": ["repo", "branch"],
             "additionalProperties": False,
         },

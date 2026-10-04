@@ -282,6 +282,14 @@ so one time per head (`already_rerun` after), and refuses `not_pushed`,
 `red` (a job failed in a test step: fix the code) and
 `nothing_interrupted`.
 
+A test can also fail in a path the change does not touch. `rerun` with
+`run_id` re-runs the failed jobs of that one run, a red test step too.
+It does so one time per run: a second call is `already_rerun`, because a
+second failure is real. The run must be on the branch's pushed head
+(`not_own_head`), ended (`not_finished`) and hold a failed job
+(`nothing_failed`). `log` takes the same `run_id` and reads the jobs of
+that run; without it, it reads the newest run of each workflow.
+
 `why` is optional on `secret_set` and `dispatch`: a gate in front of the
 rig may hold the why itself and not forward it.
 

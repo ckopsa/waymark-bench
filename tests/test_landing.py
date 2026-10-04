@@ -1015,6 +1015,34 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual(self.refused("rerun", branch="work")["refused"], "nothing_interrupted")
         self.assertEqual(self.reruns(), [])
 
+    def test_rerun_of_a_run_on_the_own_head_is_accepted_once(self):
+        head = self.submitted()
+        self.one_run(head, self.RED_JOBS)
+        answer = self.ok("rerun", branch="work", run_id=11)
+        self.assertEqual(answer["run_id"], 11)
+        self.assertEqual(answer["head"], head)
+        self.assertEqual(answer["runs"][0]["jobs"], ["unit", "lint"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+        again = self.refused("rerun", branch="work", run_id=11)
+        self.assertEqual(again["refused"], "already_rerun")
+        self.assertIn("a second failure is real", again["reason"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_rerun_of_a_run_on_another_head_is_refused(self):
+        self.submitted()
+        self.one_run("0" * 40, self.DEAD_JOBS)
+        answer = self.refused("rerun", branch="work", run_id=11)
+        self.assertEqual(answer["refused"], "not_own_head")
+        self.assertEqual(self.reruns(), [])
+
+    def test_rerun_of_the_head_counts_for_its_runs(self):
+        head = self.submitted()
+        self.one_run(head, self.DEAD_JOBS)
+        self.ok("rerun", branch="work")
+        again = self.refused("rerun", branch="work", run_id=11)
+        self.assertEqual(again["refused"], "already_rerun")
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
     def test_feedback_marks_an_interrupted_run_and_a_red_one_as_red(self):
         self.submitted()
         self.one_run("abc123", self.DEAD_JOBS)
@@ -1122,6 +1150,15 @@ class TestLog(LandingCase):
         self.assertEqual(jobs[self.JOB]["result"], "failure")
         self.assertEqual(jobs[self.JOB]["lines"], 427)
         self.assertIsNone(jobs["lint"]["lines"])
+
+    def test_a_run_id_names_the_run_whose_jobs_the_log_reads(self):
+        answer = self.ok("log", branch="work", run_id=11)
+        self.assertEqual([job["job"] for job in answer["jobs"]], [self.JOB, "lint"])
+        marked = self.ok("log", branch="work", run_id=11, job=self.JOB, mode="markers")
+        self.assertEqual(marked["job"], self.JOB)
+        refused = self.refused("log", branch="work", run_id=12)
+        self.assertEqual(refused["refused"], "run")
+        self.assertEqual(refused["runs"], [11])
 
     def test_markers_find_the_failure_without_colors_or_timestamps(self):
         answer = self.ok("log", branch="work", job=self.JOB, mode="markers")
