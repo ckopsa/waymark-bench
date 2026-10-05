@@ -5,6 +5,7 @@ The forge is a fake: the tests replace forge.http with a function that
 answers canned JSON, and record what the rig asked.
 """
 
+import base64
 import io
 import json
 import os
@@ -1157,6 +1158,53 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual(answer["refused"], "red")
         self.assertEqual(answer["jobs"], ["unit"])
         self.assertEqual(self.reruns(), [])
+
+    GATE = {"id": 23, "name": "gate", "status": "completed", "conclusion": "failure",
+            "steps": [{"name": "Set up job", "conclusion": "success"},
+                      {"name": "Every suite passed", "conclusion": "failure"}]}
+    CUT_JOBS = [
+        {"id": 21, "name": "unit", "status": "completed", "conclusion": "success", "steps": []},
+        {"id": 22, "name": "lint", "status": "completed", "conclusion": "cancelled", "steps": []}]
+    WORKFLOW = ("jobs:\n  unit:\n    steps: []\n  lint:\n    steps: []\n"
+                "  gate:\n    needs: [unit, lint]\n    if: always()\n    steps: []\n")
+
+    def gated_run(self, head, jobs):
+        """Answers one failed run on head: these jobs, and a gate job that needs them."""
+        self.one_run(head, jobs + [self.GATE])
+        self.answers["/contents/.github/workflows/tests.yml"] = ("GET", {
+            "content": base64.b64encode(self.WORKFLOW.encode()).decode()})
+        self.answers["/actions/runs/11"] = ("GET", {
+            "id": 11, "head_sha": head, "path": ".github/workflows/tests.yml"})
+
+    def test_rerun_starts_a_run_red_only_by_cancelled_suites(self):
+        head = self.submitted()
+        self.gated_run(head, self.CUT_JOBS)
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["runs"][0]["jobs"], ["lint", "gate"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+        again = self.refused("rerun", branch="work")
+        self.assertEqual(again["refused"], "already_rerun")
+
+    def test_rerun_refuses_a_red_test_beside_a_cancelled_sibling_and_its_gate(self):
+        head = self.submitted()
+        self.gated_run(head, self.RED_JOBS)
+        answer = self.refused("rerun", branch="work")
+        self.assertEqual(answer["refused"], "red")
+        self.assertEqual(answer["jobs"], ["unit", "gate"])
+        self.assertEqual(self.reruns(), [])
+
+    def test_feedback_names_the_cancellation_of_a_run_red_only_by_cancelled_suites(self):
+        self.submitted()
+        self.gated_run("abc123", self.CUT_JOBS)
+        feedback = self.ok("feedback", branch="work")
+        sources = [(f["source"], f["severity"]) for f in feedback["findings"]]
+        self.assertEqual(sources, [("pipeline", "interrupted"), ("status", "interrupted")])
+        message = feedback["findings"][0]["message"]
+        self.assertTrue(message.startswith("ci: interrupted: lint cancelled"), message)
+        self.assertIn("no log: call rerun and the bench reruns it", message)
+        self.assertIn("gate is red only because they did not finish", message)
+        self.assertEqual(feedback["findings"][0]["jobs"], ["lint", "gate"])
+        self.assertFalse(any("/logs" in path for _, path, _ in self.calls))
 
     def test_rerun_refused_by_github_names_the_missing_actions_write(self):
         head = self.submitted()
