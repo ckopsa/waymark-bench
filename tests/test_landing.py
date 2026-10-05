@@ -773,6 +773,10 @@ class TestBitbucketMerge(BitbucketCase):
     def test_no_credential_is_refused_forge(self):
         os.environ.pop("BENCH_BITBUCKET_USER")
         os.environ.pop("BENCH_BITBUCKET_TOKEN")
+        # on macOS the client falls back to the keychain: it holds nothing here
+        original = forge._keychain_bitbucket
+        forge._keychain_bitbucket = lambda: None
+        self.addCleanup(setattr, forge, "_keychain_bitbucket", original)
         self.forge_with()
         answer, refused = self.merge()
         self.assertTrue(refused, answer)
