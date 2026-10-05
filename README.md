@@ -275,7 +275,10 @@ refusal (`update_refused`) and a forge that is not GitHub
 CI can die with the code sound: a runner freezes, a job is cancelled or
 times out, or it fails in checkout or container set-up before any test
 runs. `feedback` gives such a run one finding of severity `interrupted`
-(not `error`) whose message starts `ci: interrupted`. `rerun` (give
+(not `error`) whose message starts `ci: interrupted`. A job that only
+gathers the others counts with them: its own step failed, and each job
+its workflow file says it `needs` is success, skipped or interrupted (a
+`gate` job red only because suites were cancelled). `rerun` (give
 `repo` and `branch`) then asks GitHub to re-run the failed jobs of each
 such run on the branch's pushed head, and answers the `run_id`. It does
 so one time per head (`already_rerun` after), and refuses `not_pushed`,

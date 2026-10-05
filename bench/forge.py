@@ -508,6 +508,56 @@ def job_interrupted(job):
                    for step in job.get("steps") or [])
 
 
+def workflow_needs(text):
+    """Gives {job name: [the names of the jobs it needs]} of a workflow file's
+    text, or {} when the text is no workflow."""
+    try:
+        import yaml
+        data = yaml.safe_load(text)
+    except Exception:
+        return {}
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    if not isinstance(jobs, dict):
+        return {}
+    jobs = {str(key): job for key, job in jobs.items() if isinstance(job, dict)}
+    names = {key: str(job.get("name") or key) for key, job in jobs.items()}
+    found = {}
+    for key, job in jobs.items():
+        needs = job.get("needs") or []
+        if isinstance(needs, str):
+            needs = [needs]
+        if needs:
+            found[names[key]] = [names.get(str(need), str(need)) for need in needs]
+    return found
+
+
+def job_named(job_name, name):
+    """Tells if a run's job is the workflow's job of this name. A matrix job
+    carries its values after the name, or in the place of an expression."""
+    if "${{" in name:
+        return job_name.startswith(name.split("${{")[0])
+    return job_name == name or job_name.startswith(name + " (")
+
+
+def mark_aggregates(steps, needs):
+    """Marks interrupted each failed job that only gathers the others: every
+    job it needs is success, skipped or interrupted, and one is interrupted.
+    No test of its own failed, so its red is the runner's too."""
+    for step in steps:
+        if step.get("result") != "failure" or step.get("interrupted"):
+            continue
+        wanted = [need for name, listed in needs.items()
+                  if job_named(step.get("name") or "", name) for need in listed]
+        needed = [s for s in steps
+                  if s is not step and any(job_named(s.get("name") or "", need) for need in wanted)]
+        if (any(s.get("interrupted") for s in needed)
+                and all(s.get("interrupted") or s.get("result") in ("success", "skipped")
+                        for s in needed)):
+            step["interrupted"] = True
+            step["aggregate"] = True
+    return steps
+
+
 class GitHub(Client):
     provider = "github"
     api = "https://api.github.com/repos"
@@ -765,7 +815,27 @@ class GitHub(Client):
                 "seconds": None, "failed_steps": failed,
                 "interrupted": job_interrupted(job),
             })
+        # a red job beside an interrupted one may only gather it: the workflow file tells
+        if (any(s["result"] == "failure" and not s["interrupted"] for s in found)
+                and any(s["interrupted"] for s in found)):
+            mark_aggregates(found, self.needs_of_run(pipeline_id))
         return found
+
+    def needs_of_run(self, run_id):
+        """Gives the needs of each job of a run's workflow file, as
+        workflow_needs gives them, or {} when the file cannot be read."""
+        try:
+            run = self.request("GET", self.url("/actions/runs/%s" % run_id))
+            path = (run.get("path") or "").split("@")[0]
+            if not path.startswith(".github/workflows/") or not run.get("head_sha"):
+                return {}
+            data = self.request("GET", self.url("/contents/" + urllib.parse.quote(path),
+                                                ref=run["head_sha"]))
+            if not isinstance(data, dict):
+                return {}
+            return workflow_needs(base64.b64decode(data.get("content") or "").decode("utf-8", "replace"))
+        except (ForgeError, ValueError):
+            return {}
 
     def rerun_failed_jobs(self, run_id):
         """Starts the failed and cancelled jobs of one workflow run again."""
