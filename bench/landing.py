@@ -387,8 +387,10 @@ class Landing:
                     # Nothing is wrong with the change, and it is pushed: a
                     # landing again before the reset meets the same refusal.
                     self.hold(item, "the pull request waits: %s" % exc, exc.reset)
+                    self.post_statuses()
                     return
                 self.finish(item, False, output=str(exc), reason="the pull request failed: %s" % exc)
+                self.post_statuses()
                 return
             with self.lock:
                 self.state["pull_request"] = result
@@ -409,9 +411,43 @@ class Landing:
                     self.state["auto_merge"] = auto
             self.finish(item, True, exit_code=0, output=json.dumps(result))
 
+        self.post_statuses()
         with self.lock:
             self.state["state"] = "landed"
             self.state["finished"] = now()
+        self.save()
+
+    def post_statuses(self):
+        """Posts each stage that ran as a commit status on the pushed head, on
+        Bitbucket: there the stages run on the bench, and no pipeline puts a
+        status on the head for the merge tool to judge. The outcome of each
+        post is kept in `statuses`; a post that fails never fails the landing."""
+        names = [stage.name for stage in self.repo.land.stages]
+        with self.lock:
+            ran = [(item["name"], item["state"]) for item in self.state["steps"]
+                   if item["name"] in names and item["state"] in ("passed", "failed")]
+            head = self.state.get("head")
+            url = (self.state.get("pull_request") or {}).get("url")
+        if not ran or not head:
+            return
+        try:
+            client = forge.client(self.repo)
+        except forge.ForgeError:
+            return
+        if client.provider != "bitbucket":
+            return
+        url = url or "https://bitbucket.org/%s/%s/branch/%s" % (client.owner, client.name, self.branch)
+        posted = []
+        for name, state in ran:
+            key = "bench/" + name
+            status = "SUCCESSFUL" if state == "passed" else "FAILED"
+            try:
+                client.post_status(head, key, status, name, url)
+                posted.append({"key": key, "state": status, "error": None})
+            except Exception as exc:  # A status is a report, never the landing.
+                posted.append({"key": key, "state": status, "error": git.scrub(str(exc))})
+        with self.lock:
+            self.state["statuses"] = posted
         self.save()
 
     def _shell(self, stage, worktree):

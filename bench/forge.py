@@ -239,9 +239,17 @@ class Client:
 # ---------------------------------------------------------------- bitbucket
 
 
+# The merge strategy Bitbucket names for each method of the merge tool.
+BITBUCKET_STRATEGIES = {"merge": "merge_commit", "squash": "squash", "rebase": "fast_forward"}
+# The most pages of statuses the rig reads on one commit.
+BITBUCKET_PAGES = 20
+
+
 class Bitbucket(Client):
     provider = "bitbucket"
     api = "https://api.bitbucket.org/2.0/repositories"
+    # close_source_branch of the pull_request block; the factory sets it.
+    close_source = True
 
     def credential(self):
         current = settings.load()
@@ -273,6 +281,23 @@ class Bitbucket(Client):
         data = self.request("GET", self.url(path, **query))
         return data.get("values") or []
 
+    def all_values(self, path, **query):
+        """Gives the values of every page, following each page's `next`."""
+        query.setdefault("pagelen", 100)
+        url, found = self.url(path, **query), []
+        for _ in range(BITBUCKET_PAGES):
+            data = self.request("GET", url)
+            found.extend(data.get("values") or [])
+            url = data.get("next")
+            if not url:
+                break
+        return found
+
+    def post_status(self, sha, key, state, name, url):
+        """Posts one build status on a commit: state is SUCCESSFUL or FAILED."""
+        return self.request("POST", self.url("/commit/%s/statuses/build" % sha), {
+            "key": key, "state": state, "name": name, "url": url})
+
     def find_pull_request(self, branch, target):
         query = 'source.branch.name="%s" AND destination.branch.name="%s" AND state="OPEN"' % (
             branch, target)
@@ -298,7 +323,51 @@ class Bitbucket(Client):
         raise ForgeError("bitbucket does not enable auto-merge on a pull request")
 
     def merge_when_green(self, number, head_sha, required_checks, method="merge"):
-        raise ForgeError("the rig merges a pull request itself only on github")
+        """Merges one pull request when every required status is green on its
+        head, in the answers of the GitHub path. A required name is the `key`
+        of a commit status; Bitbucket's source hash is short, so the head
+        matches head_sha by a prefix."""
+        if not required_checks:
+            return {"refused": "no_required_checks",
+                    "reason": "the rig never merges a change nothing has tested"}
+        data = self.request("GET", self.url("/pullrequests/%s" % number))
+        state = (data.get("state") or "").upper()
+        if state == "MERGED":
+            return {"state": "merged", "sha": (data.get("merge_commit") or {}).get("hash")}
+        if state in ("DECLINED", "SUPERSEDED"):
+            return {"state": "closed"}
+        head = ((data.get("source") or {}).get("commit") or {}).get("hash") or ""
+        if not head or not (head_sha.startswith(head) or head.startswith(head_sha)):
+            return {"refused": "head_moved", "head": head,
+                    "reason": "the head is %s, not %s: something was pushed since" % (
+                        head, head_sha)}
+        states = {}
+        for item in self.all_values("/commit/%s/statuses" % head_sha):
+            states[item.get("key")] = (item.get("state") or "").upper()
+        failed = [name for name in required_checks if states.get(name) in ("FAILED", "STOPPED")]
+        if failed:
+            return {"state": "red", "failed": failed}
+        pending = [name for name in required_checks if states.get(name) != "SUCCESSFUL"]
+        if pending:
+            return {"state": "waiting", "pending": pending}
+        url = self.url("/pullrequests/%s/merge" % number)
+        status, text = http("POST", url, self.headers(), {
+            "merge_strategy": BITBUCKET_STRATEGIES.get(method, "merge_commit"),
+            "close_source_branch": bool(self.close_source),
+        })
+        text = scrub(text)
+        try:
+            answer = json.loads(text) if text.strip() else {}
+        except ValueError:
+            answer = {}
+        if not isinstance(answer, dict):
+            answer = {}
+        if 200 <= status < 300:
+            return {"state": "merged", "sha": (answer.get("merge_commit") or {}).get("hash")}
+        message = ((answer.get("error") or {}).get("message") or answer.get("message")
+                   or text)
+        return {"refused": "merge_refused",
+                "reason": "bitbucket answered %s: %s" % (status, str(message)[:300])}
 
     def land_pull_request(self, number, sha):
         raise ForgeError("the rig lands a merge train only on github")
@@ -878,7 +947,9 @@ def client(repo):
         owner = owner or found[1]
         name = name or found[2]
     if provider == "bitbucket":
-        return Bitbucket(owner, name)
+        found = Bitbucket(owner, name)
+        found.close_source = bool((spec or {}).get("close_source_branch", True))
+        return found
     if provider == "github":
         return GitHub(owner, name)
     raise ForgeError("unknown forge: %s" % provider)
