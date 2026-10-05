@@ -623,6 +623,167 @@ class TestHouseMerge(LandingCase):
         self.assertEqual([body for method, path, body in self.calls if path == GRAPHQL], [])
 
 
+BITBUCKET_PR = {"id": 7, "state": "OPEN", "title": "t", "links": {"html": {"href": "https://bb/pr/7"}},
+                "source": {"branch": {"name": "work"}, "commit": {"hash": "abc123def456"}},
+                "destination": {"branch": {"name": "main"}}}
+BITBUCKET_HEAD = "abc123def4567890"
+
+
+class BitbucketCase(LandingCase):
+
+    def setUp(self):
+        LandingCase.setUp(self)
+        os.environ["BENCH_BITBUCKET_USER"] = "me"
+        os.environ["BENCH_BITBUCKET_TOKEN"] = "app-password"
+        self.addCleanup(os.environ.pop, "BENCH_BITBUCKET_USER", None)
+        self.addCleanup(os.environ.pop, "BENCH_BITBUCKET_TOKEN", None)
+
+    def bitbucket(self, stages=(), **block):
+        return self.make({"stages": list(stages), "pull_request": dict(
+            {"provider": "bitbucket", "workspace": "w", "repo": "s"}, **block)})
+
+
+class TestBitbucketStatuses(BitbucketCase):
+
+    def posted(self):
+        return [(path, body) for method, path, body in self.calls
+                if method == "POST" and path.endswith("/statuses/build")]
+
+    def test_a_landing_posts_each_stage_on_the_pushed_head(self):
+        self.bitbucket(STAGES)
+        path = self.prepared()
+        self.answers = {"/pullrequests?": ("GET", {"values": []}),
+                        "/pullrequests": ("POST", BITBUCKET_PR),
+                        "/commit/": ("POST", {})}
+        self.change(path)
+        landing = self.ok("submit", branch="work", message="change one line")["landing"]
+        self.assertEqual(landing["state"], "landed")
+        head = self.remote_head("work")
+        self.assertEqual(self.posted(), [
+            ("/commit/%s/statuses/build" % head, {"key": "bench/setup", "state": "SUCCESSFUL",
+                                                  "name": "setup", "url": "https://bb/pr/7"}),
+            ("/commit/%s/statuses/build" % head, {"key": "bench/test", "state": "SUCCESSFUL",
+                                                  "name": "test", "url": "https://bb/pr/7"})])
+        self.assertEqual([s["error"] for s in landing["statuses"]], [None, None])
+
+    def test_a_refused_status_post_does_not_fail_the_landing(self):
+        self.bitbucket(STAGES)
+        path = self.prepared()
+        self.answers = {"/pullrequests?": ("GET", {"values": []}),
+                        "/pullrequests": ("POST", BITBUCKET_PR),
+                        "/commit/": ("POST", 500)}
+        self.change(path)
+        landing = self.ok("submit", branch="work", message="change one line")["landing"]
+        self.assertEqual(landing["state"], "landed")
+        self.assertEqual(len(self.posted()), 2)
+        self.assertTrue(all("500" in s["error"] for s in landing["statuses"]))
+
+    def test_a_github_landing_posts_no_status(self):
+        self.make({"stages": STAGES, "pull_request": {"provider": "github", "owner": "o", "repo": "r"}})
+        path = self.prepared()
+        self.answers = {"/pulls?": ("GET", []), "/pulls": ("POST", GITHUB_PR)}
+        self.change(path)
+        landing = self.ok("submit", branch="work", message="change one line")["landing"]
+        self.assertEqual(landing["state"], "landed")
+        self.assertEqual([c for c in self.calls if "/statuses" in c[1]], [])
+        self.assertNotIn("statuses", landing)
+
+
+def bitbucket_statuses(*items, next_page=None):
+    page = {"values": [{"key": key, "state": state} for key, state in items]}
+    if next_page:
+        page["next"] = next_page
+    return page
+
+
+class TestBitbucketMerge(BitbucketCase):
+
+    def setUp(self):
+        BitbucketCase.setUp(self)
+        self.bitbucket(close_source_branch=False)
+
+    def forge_with(self, pr=BITBUCKET_PR, statuses=None, merged=None, second=None):
+        self.answers = {
+            "/pullrequests/7/merge": ("POST", merged if merged is not None
+                                      else {"merge_commit": {"hash": "m999"}}),
+            "/pullrequests/7": ("GET", pr),
+            "/commit/%s/statuses?page=2" % BITBUCKET_HEAD: ("GET", second or bitbucket_statuses()),
+            "/commit/%s/statuses" % BITBUCKET_HEAD: ("GET", statuses or bitbucket_statuses()),
+        }
+
+    def merge(self, **args):
+        args.setdefault("number", 7)
+        args.setdefault("head_sha", BITBUCKET_HEAD)
+        args.setdefault("required_checks", ["bench/test"])
+        return self.call("merge", **args)
+
+    def green(self, **args):
+        answer, refused = self.merge(**args)
+        self.assertFalse(refused, answer)
+        return answer
+
+    def merges(self):
+        return [body for method, path, body in self.calls if path.endswith("/merge")]
+
+    def test_all_green_merges_with_the_strategy_and_close_source(self):
+        page2 = "https://api.bitbucket.org/2.0/repositories/w/s/commit/%s/statuses?page=2" % BITBUCKET_HEAD
+        self.forge_with(statuses=bitbucket_statuses(("bench/test", "SUCCESSFUL"), next_page=page2),
+                        second=bitbucket_statuses(("bench/setup", "SUCCESSFUL")))
+        answer = self.green(required_checks=["bench/test", "bench/setup"], method="squash")
+        self.assertEqual((answer["state"], answer["sha"]), ("merged", "m999"))
+        self.assertEqual(self.merges(), [{"merge_strategy": "squash", "close_source_branch": False}])
+
+    def test_a_missing_or_running_status_is_waiting(self):
+        self.forge_with(statuses=bitbucket_statuses(("bench/setup", "INPROGRESS")))
+        answer = self.green(required_checks=["bench/test", "bench/setup"])
+        self.assertEqual(answer["state"], "waiting")
+        self.assertEqual(answer["pending"], ["bench/test", "bench/setup"])
+        self.assertEqual(self.merges(), [])
+
+    def test_a_failed_or_stopped_status_is_red(self):
+        self.forge_with(statuses=bitbucket_statuses(("bench/test", "FAILED"), ("lint", "STOPPED")))
+        answer = self.green(required_checks=["bench/test", "lint"])
+        self.assertEqual(answer["state"], "red")
+        self.assertEqual(answer["failed"], ["bench/test", "lint"])
+        self.assertEqual(self.merges(), [])
+
+    def test_a_moved_head_is_refused(self):
+        self.forge_with(pr=dict(BITBUCKET_PR, source={"commit": {"hash": "fff000"}}),
+                        statuses=bitbucket_statuses(("bench/test", "SUCCESSFUL")))
+        answer, refused = self.merge()
+        self.assertTrue(refused, answer)
+        self.assertEqual(answer["refused"], "head_moved")
+        self.assertEqual(self.merges(), [])
+
+    def test_a_declined_or_merged_pull_request_says_so(self):
+        self.forge_with(pr=dict(BITBUCKET_PR, state="DECLINED"))
+        self.assertEqual(self.green()["state"], "closed")
+        self.forge_with(pr=dict(BITBUCKET_PR, state="MERGED", merge_commit={"hash": "m1"}))
+        answer = self.green()
+        self.assertEqual((answer["state"], answer["sha"]), ("merged", "m1"))
+        self.assertEqual(self.merges(), [])
+
+    def test_a_refused_merge_is_merge_refused(self):
+        self.forge_with(statuses=bitbucket_statuses(("bench/test", "SUCCESSFUL")), merged=400)
+        answer, refused = self.merge()
+        self.assertTrue(refused, answer)
+        self.assertEqual(answer["refused"], "merge_refused")
+        self.assertIn("400", answer["reason"])
+
+    def test_no_credential_is_refused_forge(self):
+        os.environ.pop("BENCH_BITBUCKET_USER")
+        os.environ.pop("BENCH_BITBUCKET_TOKEN")
+        # on macOS the client falls back to the keychain: it holds nothing here
+        original = forge._keychain_bitbucket
+        forge._keychain_bitbucket = lambda: None
+        self.addCleanup(setattr, forge, "_keychain_bitbucket", original)
+        self.forge_with()
+        answer, refused = self.merge()
+        self.assertTrue(refused, answer)
+        self.assertEqual(answer["refused"], "forge")
+        self.assertEqual(self.calls, [])
+
+
 class TestPullRequestAndFeedback(LandingCase):
 
     def github(self):
