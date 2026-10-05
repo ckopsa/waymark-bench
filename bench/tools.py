@@ -2347,7 +2347,7 @@ def feedback(bench, args):
                 dead.extend((pipeline, step, None) for step in stopped)
                 findings.append({
                     "source": "pipeline", "severity": "interrupted",
-                    "message": INTERRUPTED % ", ".join(step.get("name") or "job" for step in stopped),
+                    "message": interrupted_message(stopped),
                     "jobs": [step.get("name") for step in stopped], "url": pipeline.get("url"),
                 })
                 continue
@@ -2447,7 +2447,20 @@ LOG_MODES = ("markers", "grep", "range")
 
 # A job that was cancelled, timed out or stopped in setup ran no test: its
 # red is the runner's, and rerun starts it again.
-INTERRUPTED = "ci: interrupted: %s stopped before a test ran; call rerun to start it again"
+INTERRUPTED = ("ci: interrupted: %s cancelled or stopped before a test ran, no log: "
+               "call rerun and the bench reruns it")
+# A job that only gathers the others is red because they did not finish.
+GATHERED = "; %s is red only because they did not finish, and rerun starts it again too"
+
+
+def interrupted_message(stopped):
+    """Gives the message of the interrupted jobs of one pipeline."""
+    gathered = [step.get("name") or "job" for step in stopped if step.get("aggregate")]
+    names = [step.get("name") or "job" for step in stopped if not step.get("aggregate")]
+    message = INTERRUPTED % ", ".join(names or gathered)
+    if names and gathered:
+        message += GATHERED % ", ".join(gathered)
+    return message
 
 
 def interrupted_of(steps):
