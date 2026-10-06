@@ -177,6 +177,26 @@ class TestTheTestTool(LandingCase):
                          ["Execution error (IllegalArgumentException) at waymark10.core/f (core.clj:3).",
                           "no such field :repo"])
 
+    def test_a_drive_s_failed_check_keeps_the_values_line_above_it(self):
+        log = ["  ok the page opens", "  ok the sheet loads", "  ok the replay starts",
+               "the replay's sheets: [3,4]",
+               "file:///work/waymark10/scripts/ui-drive.mjs:175",
+               '  if (!cond) throw new Error("FAILED: " + name);',
+               "                   ^", "",
+               "Error: FAILED: the replay's sheets match",
+               "    at ok (file:///work/waymark10/scripts/ui-drive.mjs:175:20)",
+               "##[error]Process completed with exit code 1."]
+        self.assertEqual(tools._failing_tests("ui-drive", log), [{
+            "test": None, "job": "ui-drive",
+            "lines": [log[3], log[4], log[5], log[6], log[8]]}])
+
+    def test_the_lines_above_a_drive_s_marks_stay_in_the_line_budget(self):
+        log = []
+        for i in range(tools.LOG_AFTER_MARK - 1):
+            log += ["the values of check %d" % i, "Error: FAILED: check %d" % i]
+        lines = tools._failing_tests("ui-drive", log)[0]["lines"]
+        self.assertEqual(lines, [log[0]] + log[1::2])
+
     def test_a_kaocha_failure_keeps_its_message_expected_and_actual(self):
         log = ["--- unit (clojure.test) ---",
                "FAIL in waymark10.decision-sugar-test/the-canonical-hash (decision_sugar_test.clj:42)",
