@@ -358,7 +358,7 @@ class Landing:
             code, text, err = git.run(args, cwd=worktree, check=False, timeout=600)
         if code != 0:
             self.finish(item, False, exit_code=code, output=(err or text),
-                        reason="the push was rejected: %s" % (err or text).strip()[:300])
+                        reason="the push was rejected: %s" % git.failure(err, text))
             return
         with self.lock:
             self.state["pushed"] = True

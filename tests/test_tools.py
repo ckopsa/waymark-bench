@@ -1213,6 +1213,21 @@ class TestSubmit(BenchCase):
         self.assertEqual(answer["refused"], "push_rejected")
         self.assertIn("pull", answer["remedy"])
 
+    def test_submit_names_the_end_of_a_failed_hook(self):
+        # A hook prints its progress first and its error last: the refusal keeps the end.
+        path = self.prepared()
+        hooks = util.git(["rev-parse", "--git-path", "hooks"], cwd=path).strip()
+        hook = os.path.join(path, hooks, "pre-commit")
+        util.write(hook, "#!/bin/sh\nfor i in $(seq 1 100); do echo \"codegen progress line $i\"; done\n"
+                         "echo 'ERROR: the real cause' >&2\nexit 1\n")
+        os.chmod(hook, 0o755)
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")
+        answer = self.refused("submit", branch="work", message="our change")
+        self.assertEqual(answer["refused"], "commit_failed")
+        self.assertIn("ERROR: the real cause", answer["reason"])
+        self.assertTrue(answer["reason"].startswith("…"))
+        self.assertNotIn("progress line 1\n", answer["reason"])
+
 
 class TestDiscard(BenchCase):
 
