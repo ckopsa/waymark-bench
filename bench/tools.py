@@ -3169,6 +3169,13 @@ def test_result(bench, args):
     spec = _test_spec(repo)
     default = max(0, min(settings.load().test_wait, CEILING_TEST_WAIT))
     wait = _int(args, "wait_seconds", default, 0, CEILING_TEST_WAIT)
+    pattern = None
+    if args.get("pattern") is not None:
+        try:
+            pattern = re.compile(_text(args, "pattern", required=True))
+        except re.error as exc:
+            raise Refusal("input", field="pattern", reason=str(exc))
+    limit = _int(args, "limit", 40, 1, 100)
     deadline = _clock() + wait
     try:
         client = forge.client(repo)
@@ -3194,10 +3201,31 @@ def test_result(bench, args):
         answer["duration_s"] = None if None in (start, end) else max(0, end - start)
         if answer["conclusion"] not in ("success", "cancelled", "skipped", "neutral"):
             answer["failures"] = _failures(bench, repo, client, run["id"])
+        if pattern is not None:
+            answer.update(_run_matches(bench, repo, client, run["id"], pattern, limit))
     except forge.ForgeError as exc:
         raise Refusal("forge", reason=git.scrub(str(exc)))
     answer["scratch_deleted"] = _drop_scratch(bench, repo, run.get("branch"), run.get("commit"))
     return answer
+
+
+def _run_matches(bench, repo, client, run_id, pattern, limit):
+    """Gives the lines of a run's job logs that pattern matches, green jobs and
+    red: {matches: [{job, line, text}], count, truncated, dropped}. A job the
+    forge gives no log for has no lines."""
+    rows = []
+    for job in client.steps(run_id):
+        try:
+            lines = job_lines(bench, repo, client, run_id, job["id"])
+        except Refusal:
+            continue
+        rows.extend({"job": job.get("name"), "line": i + 1, "text": cut_line(line, 200)}
+                    for i, line in enumerate(lines) if pattern.search(line))
+    matches, dropped = cap_items(
+        rows[:limit], DEFAULT_MAX_BYTES,
+        lambda item: len(item["text"].encode("utf-8", "replace")) + 48)
+    return {"matches": matches, "count": len(rows), "truncated": len(rows) > limit,
+            "dropped": dropped}
 
 
 def _find_test_run(bench, repo, spec, client, args, deadline):
@@ -4662,8 +4690,11 @@ TOOL_SPECS = [
             "at most 28), and answers {conclusion: success or cancelled, run_url, duration_s}, "
             "{conclusion: failure, run_url, duration_s, failures: [{test, job, lines}]} or "
             "{conclusion: pending, run_url, elapsed_s}. It never dispatches: ask again while "
-            "it answers pending. It deletes the scratch ref when the run is done. The "
-            "refusals are no_test_workflow and forge."
+            "it answers pending. It deletes the scratch ref when the run is done. With "
+            "pattern, a run that is done, green or red, also answers the lines of its job "
+            "logs the regex matches: {matches: [{job, line, text}], count, truncated}; ask "
+            "again with another pattern at any time. The refusals are no_test_workflow, "
+            "input and forge."
         ),
         "schema": {
             "type": "object",
@@ -4677,6 +4708,10 @@ TOOL_SPECS = [
                          "description": "With no run_id: the head test answered."},
                 "dispatched_at": {"type": "string",
                                   "description": "With no run_id: the dispatched_at test answered."},
+                "pattern": {"type": "string",
+                            "description": "A regex: answer the job log lines it matches."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100,
+                          "description": "With pattern: the most matches. Default 40."},
                 "seat": _SEAT, "sitting": _SITTING,
             },
             "required": ["repo"],

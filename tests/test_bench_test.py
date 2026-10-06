@@ -112,6 +112,29 @@ class TestTheTestTool(LandingCase):
         self.assertTrue(result["scratch_deleted"])
         self.assertEqual(self.scratch(), "")
 
+    def test_a_green_run_answers_the_lines_a_pattern_matches(self):
+        head = self.make_test()
+        green = [{"id": 41, "name": "unit", "status": "completed", "conclusion": "success",
+                  "steps": []}]
+        self.serve(head, "completed", "success", green)
+        self.ok("test", branch="work", select="waymark.core-test")
+        self.assertNotIn("matches", self.ok("test_result", run_id=31))
+        # the scratch ref is gone, and the run's log still reads
+        self.assertEqual(self.scratch(), "")
+        answer = self.ok("test_result", run_id=31, pattern="^Ran|expected")
+        self.assertEqual(answer["conclusion"], "success")
+        self.assertEqual(answer["matches"], [{"job": "unit", "line": 1, "text": "Ran 12 tests"},
+                                             {"job": "unit", "line": 3, "text": "expected: 1"}])
+        self.assertEqual(answer["count"], 2)
+        self.assertFalse(answer["truncated"])
+        one = self.ok("test_result", run_id=31, pattern="^Ran|expected", limit=1)
+        self.assertEqual([row["line"] for row in one["matches"]], [1])
+        self.assertEqual(one["count"], 2)
+        self.assertTrue(one["truncated"])
+        refused = self.refused("test_result", run_id=31, pattern="(")
+        self.assertEqual(refused["refused"], "input")
+        self.assertEqual(refused["field"], "pattern")
+
     def test_a_red_run_answers_the_failing_tests_with_their_lines(self):
         head = self.make_test()
         self.serve(head, "completed", "failure", RED_JOBS)
