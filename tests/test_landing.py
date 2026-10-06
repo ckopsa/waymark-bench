@@ -1369,6 +1369,39 @@ class TestLog(LandingCase):
         self.assertEqual(refused["refused"], "run")
         self.assertEqual(refused["runs"], [11])
 
+    def test_the_base_branch_lists_the_jobs_of_its_newest_runs(self):
+        answer = self.ok("log", branch="main")
+        self.assertEqual([job["job"] for job in answer["jobs"]], [self.JOB, "lint"])
+        self.assertTrue(any(path.startswith("/actions/runs?") and "branch=main" in path
+                            for method, path, body in self.calls))
+
+    def test_runs_lists_the_newest_runs_of_a_workflow_with_their_jobs(self):
+        def run(run_id, name, conclusion):
+            return {"id": run_id, "run_number": run_id, "status": "completed",
+                    "conclusion": conclusion, "head_sha": "sha%d" % run_id, "name": name,
+                    "html_url": "https://github.com/o/r/actions/runs/%d" % run_id}
+
+        self.answers["/actions/runs?"] = {"workflow_runs": [
+            run(15, "tests", "success"), run(14, "image", "failure"),
+            run(13, "tests", "success"), run(12, "tests", "failure")]}
+        for run_id, conclusion in ((15, "success"), (13, "success"), (12, "failure")):
+            self.answers["/actions/runs/%d/jobs" % run_id] = {"jobs": [
+                {"id": run_id * 10, "name": "ui-access", "status": "completed",
+                 "conclusion": conclusion, "steps": []}]}
+        answer = self.ok("log", branch="main", workflow="tests", runs=2)
+        self.assertEqual([item["run_id"] for item in answer["runs"]], [15, 13])
+        self.assertEqual(answer["runs"][0]["jobs"], [{"job": "ui-access", "result": "success"}])
+        self.assertEqual(answer["green_in_a_row"], 2)
+        answer = self.ok("log", branch="main", workflow="tests", runs=10)
+        self.assertEqual([item["run_id"] for item in answer["runs"]], [15, 13, 12])
+        self.assertEqual(answer["runs"][2]["jobs"], [{"job": "ui-access", "result": "failure"}])
+        self.assertEqual(answer["green_in_a_row"], 2)
+        self.assertEqual(self.fetches(), 0)
+        refused = self.refused("log", branch="main", workflow="nope", runs=3)
+        self.assertEqual(refused["refused"], "workflow")
+        self.assertEqual(refused["workflows"], ["image", "tests"])
+        self.assertEqual(self.refused("log", branch="main", runs=3, job=self.JOB)["field"], "job")
+
     def test_markers_find_the_failure_without_colors_or_timestamps(self):
         answer = self.ok("log", branch="work", job=self.JOB, mode="markers")
         texts = self.texts(answer, "matches")

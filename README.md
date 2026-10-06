@@ -293,6 +293,18 @@ second failure is real. The run must be on the branch's pushed head
 (`nothing_failed`). `log` takes the same `run_id` and reads the jobs of
 that run; without it, it reads the newest run of each workflow.
 
+`log` reads any branch of the repository, the base branch too. A branch
+with no landing, as `main` is, answers the newest run of each workflow.
+With `runs` (1 to 20) it reads no log: it lists that many of the branch's
+newest runs, those of `workflow` when it is given, each as `{run_id,
+number, workflow, state, result, commit, created, url, jobs}` with every
+job's `result`. `green_in_a_row` counts the runs whose result is `success`
+from the newest until the first that is not, so "ten green runs of `tests`
+on `main`" is one call: `log {branch: main, workflow: tests, runs: 10}`.
+A workflow with no run among the branch's newest hundred is refused
+`workflow`, with the names that have one. `runs` with `job` or `run_id`
+is refused `input`.
+
 `why` is optional on `secret_set` and `dispatch`: a gate in front of the
 rig may hold the why itself and not forward it.
 
