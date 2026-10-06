@@ -1494,10 +1494,29 @@ class TestLog(LandingCase):
         self.assertNotIn("Post job cleanup", "\n".join(texts))
 
     def test_the_markers_know_a_drive_s_failure_lines(self):
-        for line in ("not ok 12 - the replay's sheets", "✗ the replay's sheets",
-                     "AssertionError [ERR_ASSERTION]: 3 !== 4"):
+        for line in ("Error: FAILED: the replay's sheets match",
+                     'Error: timed out waiting for the sheet: {"rows":3}', "CONSOLE ERRORS:"):
             self.assertTrue(tools.LOG_MARKERS.search(line), line)
-        self.assertFalse(tools.LOG_MARKERS.search("ok 12 - the replay's sheets"))
+        for line in ("  ok the replay's sheets match", "ok 12 - the replay's sheets",
+                     "not ok 12 - the replay's sheets", "✗ the replay's sheets",
+                     "AssertionError [ERR_ASSERTION]: 3 !== 4",
+                     "UI drive (replay): 12 checks passed, no console errors"):
+            self.assertFalse(tools.LOG_MARKERS.search(line), line)
+
+    def test_a_drive_s_failed_check_is_a_hit_with_its_values_above_it(self):
+        self.quiet_log(["  ok the page opens", "  ok the sheet loads", "  ok the replay starts",
+                        "the replay's sheets: [3,4]",
+                        "file:///work/waymark10/scripts/ui-drive.mjs:175",
+                        '  if (!cond) throw new Error("FAILED: " + name);',
+                        "                   ^", "",
+                        "Error: FAILED: the replay's sheets match",
+                        "    at ok (file:///work/waymark10/scripts/ui-drive.mjs:175:20)",
+                        "##[error]Process completed with exit code 1."])
+        answer = self.ok("log", branch="work", job=self.JOB, mode="markers")
+        hits = [item["text"] for item in answer["matches"] if item.get("hit")]
+        self.assertIn("Error: FAILED: the replay's sheets match", hits)
+        self.assertEqual([text for text in hits if text.lstrip().startswith("ok ")], [])
+        self.assertIn("the replay's sheets: [3,4]", self.texts(answer, "matches"))
 
     def test_the_log_is_fetched_once_an_hour(self):
         now = [0.0]

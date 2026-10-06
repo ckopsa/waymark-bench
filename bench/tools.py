@@ -2422,12 +2422,15 @@ def feedback(bench, args):
 
 
 # The lines of a test report that must survive the cut of a log: clojure.test
-# and the like name the failure, the two values and the count. A drive names
-# its failed step `not ok` or `✗`, and node names an AssertionError.
+# and the like name the failure, the two values and the count. A drive
+# (ui-drive.mjs) throws `FAILED: <name>` or `timed out waiting for <what>`, and
+# ends with `CONSOLE ERRORS:` and one line for each. Node prints the source line
+# of the throw, which holds the same words, three lines above its `Error:` line:
+# the values a story prints just before the block are two lines above that mark.
 LOG_MARKERS = re.compile(
     r"FAIL in|ERROR in|expected:|actual:|Ran \d+ tests|\d+ failures?, \d+ errors?"
     r"|\d+ tests?, \d+ assertions?, \d+ errors?, \d+ failures?|Uncaught exception|Exception: |ExceptionInfo"
-    r"|\bnot ok\b|✗|AssertionError")
+    r"|FAILED: |timed out waiting for |CONSOLE ERRORS:")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 LOG_AFTER_MARK = 8
 # A thrown error prints `Execution error (Class) at ...`, then its message on the
