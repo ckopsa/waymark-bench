@@ -486,7 +486,7 @@ def finish_merge(worktree):
     git.run(["add", "-A", "--", "."], cwd=worktree)
     code, text, err = git.run(["commit", "--no-edit"], cwd=worktree, check=False)
     if code != 0:
-        raise Refusal("commit_failed", reason=(err or text).strip()[:400])
+        raise Refusal("commit_failed", reason=git.failure(err, text))
     return []
 
 
@@ -2050,7 +2050,7 @@ def submit(bench, args):
             code, text, err = git.run(commit_args, cwd=worktree, check=False)
             if code != 0:
                 os.replace(saved, index)
-                raise Refusal("commit_failed", reason=(err or text).strip()[:400])
+                raise Refusal("commit_failed", reason=git.failure(err, text))
             os.remove(saved)
             clear_written(worktree)
             committed = True
@@ -2062,7 +2062,7 @@ def submit(bench, args):
                                       cwd=worktree, check=False, timeout=600)
             if code != 0:
                 raise Refusal("push_rejected", commit=commit,
-                              reason=(err or text).strip()[:400],
+                              reason=git.failure(err, text),
                               remedy="use pull from head, then submit again")
             return {
                 "repo": repo.name,

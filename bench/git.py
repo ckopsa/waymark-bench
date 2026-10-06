@@ -90,6 +90,15 @@ def run(argv, cwd=None, timeout=DEFAULT_TIMEOUT, check=True):
     return proc.returncode, out, err
 
 
+def failure(err, text, limit=2000):
+    """Gives the end of a failed command's output: a hook prints its progress first and its
+    error last, so the head alone hides the cause. Marks a cut with a leading ellipsis."""
+    reason = (err or text).strip()
+    if len(reason) <= limit:
+        return reason
+    return "…" + reason[-limit:]
+
+
 def out(argv, cwd=None, timeout=DEFAULT_TIMEOUT):
     """Runs one git command and gives the standard output."""
     return run(argv, cwd=cwd, timeout=timeout)[1]
