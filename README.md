@@ -302,7 +302,10 @@ job's `result`. `green_in_a_row` counts the runs whose result is `success`
 from the newest until the first that is not, so "ten green runs of `tests`
 on `main`" is one call: `log {branch: main, workflow: tests, runs: 10}`.
 A workflow with no run among the branch's newest hundred is refused
-`workflow`, with the names that have one. `runs` with `job` or `run_id`
+`workflow`, with the names that have one. The rig reads that hundred and
+no further: when it was full and held fewer runs of `workflow` than `runs`
+asks, the answer carries `truncated: true`, and the list is short for that
+reason. `runs` with `job` or `run_id`
 is refused `input`.
 
 `why` is optional on `secret_set` and `dispatch`: a gate in front of the

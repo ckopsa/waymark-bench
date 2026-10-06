@@ -2609,7 +2609,9 @@ def job_lines(bench, repo, client, run_id, job_id):
 
 def run_history(repo, branch, args):
     """Lists the newest runs of a branch, each with its jobs' results, and
-    counts the green runs in a row from the newest."""
+    counts the green runs in a row from the newest. truncated says the page
+    of the branch's newest runs was full before that many of workflow were found."""
+    page = 100
     count = _int(args, "runs", 10, 1, RUN_HISTORY_CEILING)
     workflow = _text(args, "workflow")
     for field in ("job", "run_id"):
@@ -2618,7 +2620,8 @@ def run_history(repo, branch, args):
                           reason="runs lists the runs; read one run's job without runs")
     try:
         client = forge.client(repo)
-        found = client.pipelines(branch, limit=100)
+        found = client.pipelines(branch, limit=page)
+        full = len(found) >= page
         known = sorted({p.get("kind") for p in found if p.get("kind")})
         if workflow:
             found = [p for p in found if p.get("kind") == workflow]
@@ -2642,7 +2645,8 @@ def run_history(repo, branch, args):
             break
         green += 1
     return {"repo": repo.name, "branch": branch, "workflow": workflow or None,
-            "workflows": known, "runs": rows, "green_in_a_row": green}
+            "workflows": known, "runs": rows, "green_in_a_row": green,
+            "truncated": bool(workflow) and full and len(rows) < count}
 
 
 def log(bench, args):
@@ -4348,9 +4352,11 @@ TOOL_SPECS = [
             "(and no job, no run_id) it reads no log: it lists the newest runs of the branch, "
             "those of workflow when it is given, as {runs: [{run_id, number, workflow, state, "
             "result, commit, created, url, jobs: [{job, result}]}], green_in_a_row, "
-            "workflows}. green_in_a_row counts the runs with result success from the newest "
+            "workflows, truncated}. green_in_a_row counts the runs with result success from the newest "
             "until the first that is not; a workflow with no run among the branch's newest "
-            "hundred is refused workflow, with the names that have one."
+            "hundred is refused workflow, with the names that have one. truncated is true when "
+            "that hundred was full and held fewer runs of workflow than runs asks: the list is "
+            "short because the rig read no further, not because the workflow ran no more."
         ),
         "schema": {
             "type": "object",
