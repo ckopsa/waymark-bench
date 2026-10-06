@@ -1396,11 +1396,30 @@ class TestLog(LandingCase):
         self.assertEqual([item["run_id"] for item in answer["runs"]], [15, 13, 12])
         self.assertEqual(answer["runs"][2]["jobs"], [{"job": "ui-access", "result": "failure"}])
         self.assertEqual(answer["green_in_a_row"], 2)
+        self.assertFalse(answer["truncated"])
         self.assertEqual(self.fetches(), 0)
         refused = self.refused("log", branch="main", workflow="nope", runs=3)
         self.assertEqual(refused["refused"], "workflow")
         self.assertEqual(refused["workflows"], ["image", "tests"])
         self.assertEqual(self.refused("log", branch="main", runs=3, job=self.JOB)["field"], "job")
+
+    def test_runs_says_truncated_when_the_full_page_holds_fewer_of_the_workflow(self):
+        def run(run_id, name):
+            return {"id": run_id, "run_number": run_id, "status": "completed",
+                    "conclusion": "success", "head_sha": "sha%d" % run_id, "name": name,
+                    "html_url": "https://github.com/o/r/actions/runs/%d" % run_id}
+
+        self.answers["/actions/runs?"] = {"workflow_runs": (
+            [run(200 - n, "image") for n in range(99)] + [run(101, "tests")])}
+        self.answers["/actions/runs/101/jobs"] = {"jobs": [
+            {"id": 1010, "name": "ui-access", "status": "completed",
+             "conclusion": "success", "steps": []}]}
+        answer = self.ok("log", branch="main", workflow="tests", runs=2)
+        self.assertEqual([item["run_id"] for item in answer["runs"]], [101])
+        self.assertTrue(answer["truncated"])
+        self.assertFalse(self.ok("log", branch="main", workflow="tests", runs=1)["truncated"])
+        self.answers["/actions/runs/200/jobs"] = self.answers["/actions/runs/101/jobs"]
+        self.assertFalse(self.ok("log", branch="main", runs=1)["truncated"])
 
     def test_markers_find_the_failure_without_colors_or_timestamps(self):
         answer = self.ok("log", branch="work", job=self.JOB, mode="markers")
