@@ -1518,6 +1518,20 @@ class TestLog(LandingCase):
         self.assertEqual([text for text in hits if text.lstrip().startswith("ok ")], [])
         self.assertIn("the replay's sheets: [3,4]", self.texts(answer, "matches"))
 
+    def test_feedback_carries_the_values_line_beside_a_drive_s_failed_check(self):
+        self.quiet_log(["  ok the page opens", "  ok the sheet loads", "  ok the replay starts",
+                        "the replay's sheets: [3,4]",
+                        "file:///work/waymark10/scripts/ui-drive.mjs:175",
+                        '  if (!cond) throw new Error("FAILED: " + name);',
+                        "                   ^", "",
+                        "Error: FAILED: the replay's sheets match",
+                        "    at ok (file:///work/waymark10/scripts/ui-drive.mjs:175:20)",
+                        "##[error]Process completed with exit code 1."])
+        feedback = self.ok("feedback", branch="work")
+        pipeline = [f for f in feedback["findings"] if f["source"] == "pipeline"][0]
+        self.assertIn("the replay's sheets: [3,4]", pipeline["message"])
+        self.assertIn("Error: FAILED: the replay's sheets match", pipeline["message"])
+
     def test_the_log_is_fetched_once_an_hour(self):
         now = [0.0]
         self.addCleanup(setattr, tools, "_clock", tools._clock)

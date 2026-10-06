@@ -2437,6 +2437,9 @@ LOG_AFTER_MARK = 8
 # lines after it, up to a blank line or a stack frame.
 EXECUTION_ERROR = "Execution error ("
 EXECUTION_ERROR_LINES = 20
+# A drive's mark keeps the lines just above it: the values its story printed.
+DRIVE_MARK = re.compile(r"FAILED: |timed out waiting for ")
+LOG_BEFORE_MARK = 2
 # GitHub marks a failed step ##[error], and opens each step with ##[group]Run and
 # its header's ##[endgroup]. A job log's tail is the post-job cleanup, so a
 # failure with no test marker takes the failed step's last lines instead.
@@ -3401,13 +3404,21 @@ def _failing_tests(job, lines):
 def _marked_lines(lines):
     """Gives a log's last LOG_AFTER_MARK marked lines. An Execution error line keeps
     its message: the lines after it up to a blank line or a stack frame, in
-    EXECUTION_ERROR_LINES lines at most."""
+    EXECUTION_ERROR_LINES lines at most. A drive's mark keeps the LOG_BEFORE_MARK
+    lines above it that are not blank, while the marked lines and these together
+    are LOG_AFTER_MARK at most."""
     marked = [index for index, line in enumerate(lines)
               if LOG_MARKERS.search(line) or EXECUTION_ERROR in line][-LOG_AFTER_MARK:]
+    room = LOG_AFTER_MARK - len(marked)
     kept = []
     for index in marked:
         if kept and index <= kept[-1]:
             continue
+        if DRIVE_MARK.search(lines[index]):
+            for before in range(max(0, index - LOG_BEFORE_MARK), index):
+                if room > 0 and lines[before].strip() and not (kept and before <= kept[-1]):
+                    kept.append(before)
+                    room -= 1
         kept.append(index)
         if not lines[index].lstrip().startswith(EXECUTION_ERROR):
             continue
