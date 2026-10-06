@@ -1503,20 +1503,49 @@ class TestLog(LandingCase):
                      "UI drive (replay): 12 checks passed, no console errors"):
             self.assertFalse(tools.LOG_MARKERS.search(line), line)
 
+    # The end of a failed ui-access job, ckopsa/waymark run 37531466745, job
+    # 112501698516, as the runner wrote it: only the checkout path is replaced,
+    # by RUNNER_PATH. This failing check printed no values line.
+    DRIVE_LOG = (
+        "2026-10-06T21:13:36.7007982Z   ok Accept is offered, with no refusal said",
+        "2026-10-06T21:13:37.3626290Z   ok Not now leaves no quest and shows no tracker",
+        "2026-10-06T21:13:38.2823131Z RUNNER_PATH/ui-drive.mjs:175",
+        '2026-10-06T21:13:38.2861402Z   if (!cond) throw new Error("FAILED: " + name);',
+        "2026-10-06T21:13:38.2862471Z                    ^",
+        "2026-10-06T21:13:38.2862935Z ",
+        "2026-10-06T21:13:38.2863956Z Error: FAILED: Accept closes the sheet and shows the tracker",
+        "2026-10-06T21:13:38.2865267Z     at ok (RUNNER_PATH/ui-drive.mjs:175:20)",
+        "2026-10-06T21:13:38.2866750Z     at notYet (RUNNER_PATH/ui-drive.mjs:3813:5)",
+        "2026-10-06T21:13:38.2868742Z     at async questPhoneStory (RUNNER_PATH/ui-drive.mjs:4123:3)",
+        "2026-10-06T21:13:38.2870659Z     at async RUNNER_PATH/ui-drive.mjs:4132:34",
+        "2026-10-06T21:13:38.2871259Z ",
+        "2026-10-06T21:13:38.2871484Z Node.js v22.23.3",
+    )
+    # A values line of the same log, from before an earlier `ok`.
+    DRIVE_VALUES = "2026-10-06T21:13:29.1379812Z   the connector's film's sheets: [{\"replay\":true,\"closed\":true, ... }]"
+    DRIVE_SOURCE = '  if (!cond) throw new Error("FAILED: " + name);'
+    DRIVE_ERROR = "Error: FAILED: Accept closes the sheet and shows the tracker"
+
+    def drive_log(self, rows):
+        self.answers["/actions/jobs/21/logs"] = "".join(row + "\n" for row in rows)
+
     def test_a_drive_s_failed_check_is_a_hit_with_its_values_above_it(self):
-        self.quiet_log(["  ok the page opens", "  ok the sheet loads", "  ok the replay starts",
-                        "the replay's sheets: [3,4]",
-                        "file:///work/waymark10/scripts/ui-drive.mjs:175",
-                        '  if (!cond) throw new Error("FAILED: " + name);',
-                        "                   ^", "",
-                        "Error: FAILED: the replay's sheets match",
-                        "    at ok (file:///work/waymark10/scripts/ui-drive.mjs:175:20)",
-                        "##[error]Process completed with exit code 1."])
+        self.drive_log(self.DRIVE_LOG)
         answer = self.ok("log", branch="work", job=self.JOB, mode="markers")
         hits = [item["text"] for item in answer["matches"] if item.get("hit")]
-        self.assertIn("Error: FAILED: the replay's sheets match", hits)
+        self.assertEqual(hits, [self.DRIVE_SOURCE, self.DRIVE_ERROR])
         self.assertEqual([text for text in hits if text.lstrip().startswith("ok ")], [])
-        self.assertIn("the replay's sheets: [3,4]", self.texts(answer, "matches"))
+        texts = self.texts(answer, "matches")
+        self.assertIn("  ok Not now leaves no quest and shows no tracker", texts)
+        self.assertEqual([text for text in texts if text[:4].isdigit()], [])
+
+    def test_a_drive_s_values_line_right_before_the_source_line_is_shown(self):
+        self.drive_log(self.DRIVE_LOG[:2] + (self.DRIVE_VALUES,) + self.DRIVE_LOG[2:])
+        answer = self.ok("log", branch="work", job=self.JOB, mode="markers")
+        hits = [item["text"] for item in answer["matches"] if item.get("hit")]
+        self.assertEqual(hits, [self.DRIVE_SOURCE, self.DRIVE_ERROR])
+        self.assertIn("  the connector's film's sheets: [{\"replay\":true,\"closed\":true, ... }]",
+                      self.texts(answer, "matches"))
 
     def test_the_log_is_fetched_once_an_hour(self):
         now = [0.0]
