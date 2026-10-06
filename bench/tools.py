@@ -2471,6 +2471,9 @@ def interrupted_of(steps):
     return [step for step in steps if step.get("interrupted")]
 
 
+RUN_HISTORY_CEILING = 20
+
+
 def pipelines_of_head(pipelines, head):
     """Gives the newest pipeline of each workflow on the head commit.
 
@@ -2604,11 +2607,51 @@ def job_lines(bench, repo, client, run_id, job_id):
     return remember_log(bench, repo, run_id, job_id, text)
 
 
+def run_history(repo, branch, args):
+    """Lists the newest runs of a branch, each with its jobs' results, and
+    counts the green runs in a row from the newest."""
+    count = _int(args, "runs", 10, 1, RUN_HISTORY_CEILING)
+    workflow = _text(args, "workflow")
+    for field in ("job", "run_id"):
+        if args.get(field) is not None:
+            raise Refusal("input", field=field,
+                          reason="runs lists the runs; read one run's job without runs")
+    try:
+        client = forge.client(repo)
+        found = client.pipelines(branch, limit=100)
+        known = sorted({p.get("kind") for p in found if p.get("kind")})
+        if workflow:
+            found = [p for p in found if p.get("kind") == workflow]
+            if not found:
+                raise Refusal("workflow", repo=repo.name, branch=branch, workflow=workflow,
+                              workflows=known,
+                              reason="no run of this workflow is among the branch's newest runs")
+        rows = []
+        for run in found[:count]:
+            rows.append({"run_id": run.get("id"), "number": run.get("number"),
+                         "workflow": run.get("kind"), "state": run.get("state"),
+                         "result": run.get("result"), "commit": run.get("commit"),
+                         "created": run.get("created"), "url": run.get("url"),
+                         "jobs": [{"job": job.get("name"), "result": job.get("result")}
+                                  for job in client.steps(run["id"])]})
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=str(exc))
+    green = 0
+    for row in rows:
+        if row["result"] != "success":
+            break
+        green += 1
+    return {"repo": repo.name, "branch": branch, "workflow": workflow or None,
+            "workflows": known, "runs": rows, "green_in_a_row": green}
+
+
 def log(bench, args):
     """Reads one job's log of the newest run on a branch's head: its jobs, the
     marked lines, a grep, or a range. Every line comes cleaned and cut."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
+    if args.get("runs") is not None:
+        return run_history(repo, branch, args)
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
     name = _text(args, "job")
     mode = _text(args, "mode", default="markers")
@@ -4300,7 +4343,14 @@ TOOL_SPECS = [
             "cut line ends in '… (+N)'. The rig keeps a log an hour, so paging does not fetch "
             "it again. With run_id the jobs are those of that run of the branch, not of the "
             "newest run of each workflow; an id the branch's newest runs do not hold is "
-            "refused run."
+            "refused run. The branch can be any branch of the repository, the base branch "
+            "too: a branch with no landing reads the newest run of each workflow. With runs "
+            "(and no job, no run_id) it reads no log: it lists the newest runs of the branch, "
+            "those of workflow when it is given, as {runs: [{run_id, number, workflow, state, "
+            "result, commit, created, url, jobs: [{job, result}]}], green_in_a_row, "
+            "workflows}. green_in_a_row counts the runs with result success from the newest "
+            "until the first that is not; a workflow with no run among the branch's newest "
+            "hundred is refused workflow, with the names that have one."
         ),
         "schema": {
             "type": "object",
@@ -4311,6 +4361,12 @@ TOOL_SPECS = [
                 "run_id": {"type": "integer",
                            "description": "The run to read, as feedback and rerun name it. "
                                           "Without it: the newest run of each workflow."},
+                "runs": {"type": "integer",
+                         "description": "List this many of the newest runs, each with its jobs' "
+                                        "results, and read no log. From 1 to 20."},
+                "workflow": {"type": "string",
+                             "description": "With runs: the workflow's name, as a job list "
+                                            "reports it. Without it: the runs of every workflow."},
                 "mode": {"type": "string", "enum": list(LOG_MODES),
                          "description": "markers (the default), grep or range."},
                 "pattern": {"type": "string", "description": "The regex of mode grep."},
