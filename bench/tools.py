@@ -2425,12 +2425,14 @@ def feedback(bench, args):
 # and the like name the failure, the two values and the count. A drive
 # (ui-drive.mjs) throws `FAILED: <name>` or `timed out waiting for <what>`, and
 # ends with `CONSOLE ERRORS:` and one line for each. Node prints the source line
-# of the throw, which holds the same words, three lines above its `Error:` line:
-# the values a story prints just before the block are two lines above that mark.
+# of the throw, `throw new Error("FAILED: " + name)`, three lines above its
+# `Error:` line; only the `Error: FAILED: ` line is a mark, so one failed check
+# is one hit. The values a story prints just before the block are five lines
+# above that mark.
 LOG_MARKERS = re.compile(
     r"FAIL in|ERROR in|expected:|actual:|Ran \d+ tests|\d+ failures?, \d+ errors?"
     r"|\d+ tests?, \d+ assertions?, \d+ errors?, \d+ failures?|Uncaught exception|Exception: |ExceptionInfo"
-    r"|FAILED: |timed out waiting for |CONSOLE ERRORS:")
+    r"|Error: FAILED: |timed out waiting for |CONSOLE ERRORS:")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 LOG_AFTER_MARK = 8
 # A thrown error prints `Execution error (Class) at ...`, then its message on the
@@ -2439,7 +2441,7 @@ EXECUTION_ERROR = "Execution error ("
 EXECUTION_ERROR_LINES = 20
 # A drive's mark keeps the lines just above it: the values its story printed.
 DRIVE_MARK = re.compile(r"FAILED: |timed out waiting for ")
-LOG_BEFORE_MARK = 2
+LOG_BEFORE_MARK = 5
 # GitHub marks a failed step ##[error], and opens each step with ##[group]Run and
 # its header's ##[endgroup]. A job log's tail is the post-job cleanup, so a
 # failure with no test marker takes the failed step's last lines instead.
@@ -2556,7 +2558,8 @@ def log_tail(text, size):
             keep.add(mark)
             used += cost(mark)
     for mark in marks:
-        window = [i for i in range(max(0, mark - 2), min(len(lines), mark + 1 + LOG_AFTER_MARK))
+        before = LOG_BEFORE_MARK if DRIVE_MARK.search(lines[mark]) else 2
+        window = [i for i in range(max(0, mark - before), min(len(lines), mark + 1 + LOG_AFTER_MARK))
                   if i not in keep]
         extra = sum(cost(i) for i in window)
         if used + extra > size:
@@ -2740,7 +2743,10 @@ def log(bench, args):
         hits = [i for i, line in enumerate(lines) if pattern.search(line)]
         shown = set()
         for i in hits[:limit]:
-            shown.update(range(max(0, i - context), min(len(lines), i + context + 1)))
+            before = context
+            if mode == "markers" and DRIVE_MARK.search(lines[i]):
+                before = max(context, LOG_BEFORE_MARK)
+            shown.update(range(max(0, i - before), min(len(lines), i + context + 1)))
         rows = []
         for i in sorted(shown):
             rows.append(row(i))

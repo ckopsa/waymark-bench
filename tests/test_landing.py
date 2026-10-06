@@ -1497,7 +1497,7 @@ class TestLog(LandingCase):
         for line in ("Error: FAILED: the replay's sheets match",
                      'Error: timed out waiting for the sheet: {"rows":3}', "CONSOLE ERRORS:"):
             self.assertTrue(tools.LOG_MARKERS.search(line), line)
-        for line in ("  ok the replay's sheets match", "ok 12 - the replay's sheets",
+        for line in ("  ok the replay's sheets match", "ok 12 - the replay's sheets", self.DRIVE_SOURCE,
                      "not ok 12 - the replay's sheets", "✗ the replay's sheets",
                      "AssertionError [ERR_ASSERTION]: 3 !== 4",
                      "UI drive (replay): 12 checks passed, no console errors"):
@@ -1533,7 +1533,8 @@ class TestLog(LandingCase):
         self.drive_log(self.DRIVE_LOG)
         answer = self.ok("log", branch="work", job=self.JOB, mode="markers")
         hits = [item["text"] for item in answer["matches"] if item.get("hit")]
-        self.assertEqual(hits, [self.DRIVE_SOURCE, self.DRIVE_ERROR])
+        self.assertEqual(hits, [self.DRIVE_ERROR])
+        self.assertEqual(answer["count"], 1)
         self.assertEqual([text for text in hits if text.lstrip().startswith("ok ")], [])
         texts = self.texts(answer, "matches")
         self.assertIn("  ok Not now leaves no quest and shows no tracker", texts)
@@ -1543,7 +1544,7 @@ class TestLog(LandingCase):
         self.drive_log(self.DRIVE_LOG[:2] + (self.DRIVE_VALUES,) + self.DRIVE_LOG[2:])
         answer = self.ok("log", branch="work", job=self.JOB, mode="markers")
         hits = [item["text"] for item in answer["matches"] if item.get("hit")]
-        self.assertEqual(hits, [self.DRIVE_SOURCE, self.DRIVE_ERROR])
+        self.assertEqual(hits, [self.DRIVE_ERROR])
         self.assertIn("  the connector's film's sheets: [{\"replay\":true,\"closed\":true, ... }]",
                       self.texts(answer, "matches"))
 
