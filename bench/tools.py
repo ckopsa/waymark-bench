@@ -2422,10 +2422,12 @@ def feedback(bench, args):
 
 
 # The lines of a test report that must survive the cut of a log: clojure.test
-# and the like name the failure, the two values and the count.
+# and the like name the failure, the two values and the count. A drive names
+# its failed step `not ok` or `✗`, and node names an AssertionError.
 LOG_MARKERS = re.compile(
     r"FAIL in|ERROR in|expected:|actual:|Ran \d+ tests|\d+ failures?, \d+ errors?"
-    r"|\d+ tests?, \d+ assertions?, \d+ errors?, \d+ failures?|Uncaught exception|Exception: |ExceptionInfo")
+    r"|\d+ tests?, \d+ assertions?, \d+ errors?, \d+ failures?|Uncaught exception|Exception: |ExceptionInfo"
+    r"|\bnot ok\b|✗|AssertionError")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 LOG_AFTER_MARK = 8
 # A thrown error prints `Execution error (Class) at ...`, then its message on the
@@ -2443,6 +2445,12 @@ LOG_STAMP = re.compile(r"^﻿?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?")
 LOG_CACHE_SECONDS = 3600
 LOG_HINT = "\nread more with bench__log {job: %s}"
 LOG_MODES = ("markers", "grep", "range")
+# A failed job with no marked line answers this many lines: those that end at
+# its ##[error], or its last ones.
+LOG_NO_MARK_LINES = 60
+LOG_NO_MARK_NOTE = ("no marker matched in this failed job: these are the lines up to its "
+                    "##[error], or its last lines. Read others with mode: \"grep\" and a "
+                    "pattern, or mode: \"range\" with offset and limit.")
 
 
 # A job that was cancelled, timed out or stopped in setup ran no test: its
@@ -2658,9 +2666,12 @@ def log(bench, args):
         return run_history(repo, branch, args)
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 256, CEILING_MAX_BYTES)
     name = _text(args, "job")
-    mode = _text(args, "mode", default="markers")
+    mode = _text(args, "mode", default="grep" if args.get("pattern") else "markers")
     if mode not in LOG_MODES:
         raise Refusal("input", field="mode", reason="one of markers, grep, range")
+    if args.get("pattern") and mode != "grep":
+        raise Refusal("input", field="pattern",
+                      reason='mode %s reads no pattern; give mode: "grep" with it' % mode)
     width = _int(args, "width", 200, 80, 400)
     item = bench.landings.get(repo, branch)
     head = item.state.get("head") if item else None
@@ -2731,6 +2742,17 @@ def log(bench, args):
                 rows[-1]["hit"] = True
         answer.update({"count": len(hits), "truncated": len(hits) > limit})
         key = "matches"
+        if mode == "markers" and not hits and job.get("result") in ("failed", "error", "failure"):
+            end = len(lines)
+            errors = [i for i, line in enumerate(lines) if line.startswith(LOG_ERROR)]
+            if errors:
+                end = errors[0] + 1
+                while end < len(lines) and lines[end].startswith(LOG_ERROR):
+                    end += 1
+            start = max(0, end - LOG_NO_MARK_LINES)
+            rows = [row(i) for i in range(start, end)]
+            answer.update({"offset": start + 1, "eof": end >= len(lines), "note": LOG_NO_MARK_NOTE})
+            key = "lines"
     answer[key], answer["dropped"] = cap_items(
         rows, max_bytes, lambda item: len(item["text"].encode("utf-8", "replace")) + 32)
     return answer
@@ -4370,7 +4392,10 @@ TOOL_SPECS = [
             "job (the name feedback reports): mode markers (the default) gives the lines of the "
             "test report (FAIL in, ERROR in, the exception, the summary) with context around "
             "them; mode grep gives the lines a regex pattern finds, with context, the found ones "
-            "marked hit; mode range gives limit lines from offset, counting from 1. Every line "
+            "marked hit; mode range gives limit lines from offset, counting from 1. A pattern "
+            "with no mode means grep, and a pattern with another mode is refused. When markers "
+            "finds no line in a failed job, the answer has no matches: it gives lines, the 60 "
+            "that end at the job's ##[error] or its last 60, with a note. Every line "
             "comes without colors and without GitHub's timestamp, cut at width characters; a "
             "cut line ends in '… (+N)'. The rig keeps a log an hour, so paging does not fetch "
             "it again. With run_id the jobs are those of that run of the branch, not of the "

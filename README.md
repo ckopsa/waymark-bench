@@ -539,6 +539,11 @@ branch's head. Without `job` it lists the jobs with their result and line
 count. `mode: "markers"` (the default) gives the test report's lines with
 `context` lines around them; `mode: "grep"` gives what a regex `pattern`
 finds; `mode: "range"` gives `limit` lines from `offset`, counting from 1.
+A `pattern` with no `mode` means grep; a `pattern` with another mode is
+refused `input`, and the reason names `mode: "grep"`. When `markers` finds
+no line in a failed job, the answer has no `matches`: it gives `lines`, the
+60 that end at the job's `##[error]` (its last 60 when it has none), with
+`offset`, `eof` and a `note` that names `grep` and `range`.
 Each line comes without colors and without GitHub's timestamp, cut at
 `width` characters (200 by default) and ending in `… (+N)` when cut. The rig
 keeps a log an hour, so paging fetches it once.

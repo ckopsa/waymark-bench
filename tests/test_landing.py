@@ -1452,6 +1452,53 @@ class TestLog(LandingCase):
         self.refused("log", branch="work", job="nope", mode="range")
         self.refused("log", branch="work", job=self.JOB, mode="grep", pattern="(")
 
+    def test_a_pattern_without_a_mode_greps(self):
+        answer = self.ok("log", branch="work", job=self.JOB, pattern="ERROR in", context=0)
+        self.assertEqual(answer["mode"], "grep")
+        self.assertEqual(answer["count"], 1)
+        self.assertEqual([item["line"] for item in answer["matches"] if item.get("hit")], [2])
+
+    def test_a_pattern_with_another_mode_is_refused_and_names_grep(self):
+        for mode in ("markers", "range"):
+            refused = self.refused("log", branch="work", job=self.JOB, mode=mode, pattern="ERROR in")
+            self.assertEqual(refused["field"], "pattern")
+            self.assertIn('mode: "grep"', refused["reason"])
+
+    def quiet_log(self, rows):
+        stamp = "2026-09-28T10:00:00.1234567Z "
+        self.answers["/actions/jobs/21/logs"] = "".join(stamp + row + "\n" for row in rows)
+
+    def test_a_failed_job_with_no_marker_answers_its_tail_with_a_note(self):
+        self.quiet_log(["drive step %d" % i for i in range(100)] + ["the replay's sheets: 3 and 4"])
+        answer = self.ok("log", branch="work", job=self.JOB)
+        self.assertEqual(answer["mode"], "markers")
+        self.assertEqual(answer["count"], 0)
+        self.assertNotIn("matches", answer)
+        self.assertEqual([item["line"] for item in answer["lines"]], list(range(42, 102)))
+        self.assertEqual(answer["lines"][-1]["text"], "the replay's sheets: 3 and 4")
+        self.assertEqual(answer["offset"], 42)
+        self.assertTrue(answer["eof"])
+        self.assertIn('mode: "grep"', answer["note"])
+        self.assertIn('mode: "range"', answer["note"])
+
+    def test_the_tail_of_a_job_with_no_marker_ends_at_its_error_not_the_cleanup(self):
+        self.quiet_log(["drive step %d" % i for i in range(100)]
+                       + ["##[error]Process completed with exit code 1."]
+                       + ["Post job cleanup: removing file %d" % i for i in range(80)])
+        answer = self.ok("log", branch="work", job=self.JOB, mode="markers")
+        texts = self.texts(answer, "lines")
+        self.assertEqual([item["line"] for item in answer["lines"]], list(range(42, 102)))
+        self.assertEqual(texts[-1], "##[error]Process completed with exit code 1.")
+        self.assertEqual(texts[-2], "drive step 99")
+        self.assertFalse(answer["eof"])
+        self.assertNotIn("Post job cleanup", "\n".join(texts))
+
+    def test_the_markers_know_a_drive_s_failure_lines(self):
+        for line in ("not ok 12 - the replay's sheets", "✗ the replay's sheets",
+                     "AssertionError [ERR_ASSERTION]: 3 !== 4"):
+            self.assertTrue(tools.LOG_MARKERS.search(line), line)
+        self.assertFalse(tools.LOG_MARKERS.search("ok 12 - the replay's sheets"))
+
     def test_the_log_is_fetched_once_an_hour(self):
         now = [0.0]
         self.addCleanup(setattr, tools, "_clock", tools._clock)
