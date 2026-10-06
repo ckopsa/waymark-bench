@@ -333,6 +333,12 @@ pull request) and answers `head` (the scratch commit),
 up to `wait_seconds` (25 by default, the setting `BENCH_TEST_WAIT`; 28 at
 most) and answers `success`, `cancelled`, `failure` with
 `failures: [{test, job, lines}]` (4 KB in all), or `pending`: ask again.
+`test_result {run_id, pattern}` also answers the lines of the run's job
+logs that the regex `pattern` matches, for a green run as for a red one:
+`matches: [{job, line, text}]` (`limit` at most, 40 by default), `count`
+and `truncated`. So a test that prints a measurement and asserts little
+can be read after it passes. The scratch ref is gone by then, but the run
+is not: ask again with another `pattern`.
 It waits up to 25 s, under the engine's 30 s limit on a call,
 and `test_result` never dispatches. When the run did not show within
 about 15 seconds, `test` answers `run_id: null` with `head` and
