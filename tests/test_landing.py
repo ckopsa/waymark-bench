@@ -1560,6 +1560,10 @@ class TestLog(LandingCase):
         pipeline = [f for f in feedback["findings"] if f["source"] == "pipeline"][0]
         self.assertIn("the replay's sheets: [3,4]", pipeline["message"])
         self.assertIn("Error: FAILED: the replay's sheets match", pipeline["message"])
+        # The values line is the log's line 4, two above the throw's source line.
+        self.assertIn(4, pipeline["lines"])
+        self.assertIn(9, pipeline["lines"])
+        self.assertEqual(pipeline["lines"], sorted(set(pipeline["lines"])))
 
     def test_the_log_is_fetched_once_an_hour(self):
         now = [0.0]
