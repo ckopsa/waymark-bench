@@ -19,6 +19,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # The major version the Dockerfile's NODE_MAJOR pins, so the tests
+      # that run the real `node --check` run the image's grammar.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Name the node the tests run
+        run: node --version | grep -E '^v22\.'
       - uses: astral-sh/setup-uv@v5
       - name: Install the rig and its dependency
         run: uv sync

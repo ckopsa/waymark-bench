@@ -457,7 +457,9 @@ A container that loses it clones again on the next `enroll` or
 
 The image carries a JDK 21 and the Clojure CLI, pinned by the
 Dockerfile's `CLOJURE_CLI_VERSION` to the version ckopsa/waymark's CI
-uses, so a `check` step can run `clojure`. The deps cache lives on the
+uses, so a `check` step can run `clojure`. It carries node too, pinned by
+`NODE_MAJOR` to the major version that CI's browser jobs run, so `check`
+parses `.js` and `.mjs` files by the same grammar. The deps cache lives on the
 volume: at each start the entrypoint (`entrypoint.sh`) makes `/data/m2`
 and `/data/gitlibs` when they are missing and links `/root/.m2` and
 `/root/.gitlibs` to them, so the deps persist across restarts.

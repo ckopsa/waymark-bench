@@ -1605,6 +1605,23 @@ class TestCheck(BenchCase):
         self.assertIn("SyntaxError", answer["findings"][0]["message"])
         self.assertGreaterEqual(answer["findings"][0]["line"], 1)
 
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_the_real_node_passes_a_js_module_and_refuses_a_broken_mjs_with_its_line(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "ui/app.js"),
+                   "import a from \"./a.js\";\nexport const b = a;\n")
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["findings"], [])
+        self.assertEqual(answer["unavailable"], [])
+        util.write(os.path.join(path, "scripts/drive.mjs"),
+                   "export const c = 1;\nconst d = ;\nexport const e = 2;\n")
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        self.assertEqual([finding["path"] for finding in answer["findings"]], ["scripts/drive.mjs"])
+        self.assertEqual(answer["findings"][0]["line"], 2)
+        self.assertIn("SyntaxError", answer["findings"][0]["message"])
+
     def test_paths_limit_the_check(self):
         path = self.prepared()
         util.write(os.path.join(path, "src/app.py"), "def broken(:\n")
