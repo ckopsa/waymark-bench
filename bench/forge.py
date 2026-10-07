@@ -15,11 +15,13 @@ feedback tool can turn Bitbucket and GitHub into the same findings.
 """
 
 import base64
+import contextlib
 import datetime
 import json
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -29,6 +31,8 @@ from . import settings
 
 
 TIMEOUT = 60
+# The least a call inside a window is given, so a lookup at the window's end is still made.
+WINDOW_FLOOR = 1
 BITBUCKET = re.compile(r"bitbucket\.org[:/]([^/]+)/([^/]+?)(?:\.git)?/?$")
 GITHUB = re.compile(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?$")
 RATE_LIMIT = re.compile(r"rate limit", re.IGNORECASE)
@@ -126,6 +130,33 @@ class _KeepCredentialOnHost(urllib.request.HTTPRedirectHandler):
         return new
 
 
+_window = threading.local()
+
+
+@contextlib.contextmanager
+def within(seconds):
+    """Bounds every HTTP call made in the block, on this thread, by the time
+    left of seconds. A tool that waits inside the engine's limit on a call
+    gives its wait here, so a lookup that hangs is NoAnswer inside the wait
+    and not after TIMEOUT. A window inside a window keeps the earlier end."""
+    before = getattr(_window, "deadline", None)
+    deadline = time.monotonic() + seconds
+    _window.deadline = deadline if before is None else min(before, deadline)
+    try:
+        yield
+    finally:
+        _window.deadline = before
+
+
+def timeout():
+    """Gives the seconds one HTTP call may take now: TIMEOUT, or the time left
+    of the window when that is less, and never less than WINDOW_FLOOR."""
+    deadline = getattr(_window, "deadline", None)
+    if deadline is None:
+        return TIMEOUT
+    return min(TIMEOUT, max(WINDOW_FLOOR, deadline - time.monotonic()))
+
+
 # The one HTTP call. The tests replace it.
 def http(method, url, headers, body=None):
     """Gives (status, text); the text is a Text, so it carries the answer's
@@ -137,7 +168,7 @@ def http(method, url, headers, body=None):
     request = urllib.request.Request(url, data=data, method=method, headers=headers)
     opener = urllib.request.build_opener(_KeepCredentialOnHost)
     try:
-        with opener.open(request, timeout=TIMEOUT) as answer:
+        with opener.open(request, timeout=timeout()) as answer:
             return answer.status, _text(answer.read(), answer.headers)
     except urllib.error.HTTPError as exc:
         return exc.code, _text(exc.read(), exc.headers)

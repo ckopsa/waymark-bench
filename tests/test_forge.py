@@ -6,7 +6,9 @@ store that GitHub redirects the log of a job to.
 """
 
 import os
+import socket
 import threading
+import time
 import unittest
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -294,6 +296,32 @@ class TestNoAnswer(unittest.TestCase):
         self.assertIn("no answer from api.github.com", answer["note"])
         self.assertIn("call test_result again", answer["note"])
         self.assertEqual(self.slept, [5, 5])
+
+    def test_a_lookup_that_hangs_answers_pending_inside_the_wait(self):
+        silent = socket.socket()  # it takes the connection and never answers
+        self.addCleanup(silent.close)
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(1)
+        url = "http://127.0.0.1:%d/runs/31" % silent.getsockname()[1]
+        started = time.monotonic()
+        with mock.patch.dict(os.environ, {"no_proxy": "*", "NO_PROXY": "*"}), \
+                mock.patch.object(tools, "TEST_LOOKUP_FLOOR", 1):
+            answer = self.result(lambda run_id: forge.http("GET", url, {}), wait_seconds=1)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(answer["conclusion"], "pending")
+        self.assertEqual(answer["run_id"], 31)
+        self.assertIn("no answer from 127.0.0.1", answer["note"])
+        self.assertIn("call test_result again", answer["note"])
+
+    def test_a_call_outside_a_window_keeps_the_whole_timeout(self):
+        self.assertEqual(forge.timeout(), forge.TIMEOUT)
+        with forge.within(3):
+            self.assertLessEqual(forge.timeout(), 3)
+            with forge.within(30):
+                self.assertLessEqual(forge.timeout(), 3)
+        with forge.within(0):
+            self.assertEqual(forge.timeout(), forge.WINDOW_FLOOR)
+        self.assertEqual(forge.timeout(), forge.TIMEOUT)
 
     def test_an_http_error_of_the_forge_is_still_a_refusal(self):
         with self.assertRaises(tools.Refusal):
