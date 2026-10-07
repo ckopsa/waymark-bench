@@ -1622,6 +1622,19 @@ class TestCheck(BenchCase):
         self.assertEqual(answer["findings"][0]["line"], 2)
         self.assertIn("SyntaxError", answer["findings"][0]["message"])
 
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_the_real_node_passes_a_js_module_on_the_first_parse(self):
+        # The evidence for node_errors' second parse: one `node --check` on the
+        # .js file itself, with no .mjs copy, already passes module syntax.
+        path = self.prepared()
+        util.write(os.path.join(path, "ui/app.js"),
+                   "import a from \"./a.js\";\nexport const b = a;\n")
+        program = shutil.which("node")
+        self.assertIsNone(tools.node_finding(program, path, "ui/app.js", "ui/app.js"))
+        with mock.patch.object(tools, "node_finding", wraps=tools.node_finding) as parse:
+            self.assertEqual(tools.node_errors(program, path, "ui/app.js"), [])
+        self.assertEqual(parse.call_count, 1)
+
     def test_paths_limit_the_check(self):
         path = self.prepared()
         util.write(os.path.join(path, "src/app.py"), "def broken(:\n")

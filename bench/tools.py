@@ -1509,10 +1509,12 @@ def node_finding(program, worktree, path, rel):
 def node_errors(program, worktree, rel):
     """Parses one .js or .mjs file with node. A .js file that node refuses as a
     script for its module syntax is parsed again as a module, from a copy
-    outside the worktree: the browser's modules are .js files too. The second
-    parse is kept under the image's Node 22: a node that detects module syntax
-    itself passes the first parse and never reaches it, and a rig outside the
-    image may hold an older node that does not."""
+    outside the worktree: the browser's modules are .js files too. The image's
+    Node 22 detects module syntax itself: its `--check` passes a .js module on
+    the first parse and never reaches the second, as the real-node test
+    `test_the_real_node_passes_a_js_module_on_the_first_parse` measures. The
+    second parse, NODE_MODULE and the fake-node test for them are kept for one
+    reason: a rig outside the image may hold an older node that does not."""
     finding = node_finding(program, worktree, rel, rel)
     if finding and rel.endswith(".js") and NODE_MODULE.search(finding["message"]):
         with tempfile.TemporaryDirectory(prefix="bench-node-") as scratch:
