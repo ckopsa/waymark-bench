@@ -2367,7 +2367,7 @@ def feedback(bench, args):
                 else:
                     read.append((pipeline, step, log))
                     cleaned = remember_log(bench, repo, pipeline["id"], step["id"], log)
-                    marked = [i + 1 for i, line in enumerate(cleaned) if LOG_MARKERS.search(line)]
+                    marked = _marked_numbers(cleaned)
                 log = log_tail(log, log_bytes)
                 findings.append({
                     "source": "pipeline", "step": step.get("name"), "severity": "error",
@@ -2442,6 +2442,23 @@ EXECUTION_ERROR_LINES = 20
 # A drive's mark keeps the lines just above it: the values its story printed.
 DRIVE_MARK = re.compile(r"FAILED: |timed out waiting for ")
 LOG_BEFORE_MARK = 5
+
+
+def _marked_numbers(lines):
+    """Gives the numbers, from 1, of a log's marked lines. A drive's mark brings the
+    LOG_BEFORE_MARK lines above it that are not blank, as _marked_lines keeps them."""
+    numbers = []
+    for index, line in enumerate(lines):
+        if not LOG_MARKERS.search(line):
+            continue
+        if DRIVE_MARK.search(line):
+            for before in range(max(0, index - LOG_BEFORE_MARK), index):
+                if lines[before].strip() and not (numbers and before + 1 <= numbers[-1]):
+                    numbers.append(before + 1)
+        numbers.append(index + 1)
+    return numbers
+
+
 # GitHub marks a failed step ##[error], and opens each step with ##[group]Run and
 # its header's ##[endgroup]. A job log's tail is the post-job cleanup, so a
 # failure with no test marker takes the failed step's last lines instead.
