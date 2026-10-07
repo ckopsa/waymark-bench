@@ -1,14 +1,26 @@
 # Serves the bench rig over HTTP: git worktrees, landings and feedback
 # over MCP. Build: make image (buildx arm64 → ghcr.io/ckopsa/waymark-bench:<tag>).
+
+# Node's major version, pinned to the one ckopsa/waymark's CI browser
+# jobs run: a bump is this one line, and the `node-version` of
+# .github/workflows/tests.yml with it.
+ARG NODE_MAJOR=22
+FROM node:${NODE_MAJOR}-bookworm-slim AS node
+
 FROM python:3.11-slim-bookworm
 
 # git is the rig's one tool; ca-certificates lets it clone over https;
-# curl fetches the Clojure CLI's installer and its tarball; nodejs lets
-# check parse the changed .js and .mjs files with `node --check`.
+# curl fetches the Clojure CLI's installer and its tarball.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates curl nodejs \
- && rm -rf /var/lib/apt/lists/* \
- && node --version
+ && apt-get install -y --no-install-recommends git ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# node lets check parse the changed .js and .mjs files with
+# `node --check`, by the grammar ckopsa/waymark's CI parses them with.
+# The build fails when `node --version` names another major version.
+ARG NODE_MAJOR
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+RUN node --version | grep -E "^v${NODE_MAJOR}\."
 
 # A JDK 21, the Temurin ckopsa/waymark's CI uses, for the check step's
 # `clojure -M:check`.
