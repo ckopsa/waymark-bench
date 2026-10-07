@@ -3306,6 +3306,7 @@ def test_result(bench, args):
             raise Refusal("input", field="pattern", reason=str(exc))
     limit = _int(args, "limit", 40, 1, 100)
     deadline = _clock() + wait
+    run_id = None
     try:
         client = forge.client(repo)
         if args.get("run_id") is not None:
@@ -3333,6 +3334,12 @@ def test_result(bench, args):
         answer["tests"] = _run_counts(bench, repo, client, run["id"])
         if pattern is not None:
             answer.update(_run_matches(bench, repo, client, run["id"], pattern, limit))
+    except forge.NoAnswer as exc:
+        # the forge was not reached, so this says nothing about the run
+        return {"repo": repo.name, "conclusion": "pending", "run_id": run_id, "run_url": None,
+                "elapsed_s": None,
+                "note": "%s; the run's result is not read yet: call test_result again"
+                        % git.scrub(str(exc))}
     except forge.ForgeError as exc:
         raise Refusal("forge", reason=git.scrub(str(exc)))
     answer["scratch_deleted"] = _drop_scratch(bench, repo, run.get("branch"), run.get("commit"))
@@ -3601,12 +3608,22 @@ def _failed_step_lines(lines):
 
 
 def _wait_for_run(client, run_id, wait):
-    """Reads the run until it completes or the wait runs out; gives the last read."""
+    """Reads the run until it completes or the wait runs out; gives the last read.
+    A read that nothing answers is made again inside the wait; forge.NoAnswer
+    goes up only when the wait runs out with no read at all."""
     deadline = _clock() + wait
+    run, missed = None, None
     while True:
-        run = client.pipeline(run_id)
+        try:
+            run = client.pipeline(run_id)
+        except forge.NoAnswer as exc:
+            missed = exc
         left = deadline - _clock()
-        if run.get("state") == "completed" or left <= 0:
+        if run is not None and run.get("state") == "completed":
+            return run
+        if left <= 0:
+            if run is None:
+                raise missed
             return run
         _sleep(min(TEST_POLL_SECONDS, left))
 
@@ -4886,7 +4903,8 @@ TOOL_SPECS = [
             "at most 28), and answers {conclusion: success or cancelled, run_url, duration_s}, "
             "{conclusion: failure, run_url, duration_s, failures: [{test, job, lines}]} or "
             "{conclusion: pending, run_url, elapsed_s}. It never dispatches: ask again while "
-            "it answers pending. It deletes the scratch ref when the run is done. A run "
+            "it answers pending. When the forge does not answer inside the wait, it answers "
+            "pending with a note, not a refusal. It deletes the scratch ref when the run is done. A run "
             "that is done also answers tests: {ran, failures, errors, skipped, skips: "
             "[{test, reason}]}, the counts the runner printed and the first 5 skips, or "
             "null when no job log holds a 'Ran N tests' line. With "
