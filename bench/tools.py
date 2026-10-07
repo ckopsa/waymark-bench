@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -1355,6 +1356,10 @@ def hosted_runner_lines(worktree, allowed=()):
 
 
 BASH_ERROR = re.compile(r"^.*?: line (\d+): (.*)$")
+NODE_SUFFIXES = (".js", ".mjs")
+NODE_PLACE = re.compile(r"^.*:(\d+)$")
+NODE_MESSAGE = re.compile(r"^\w*Error: ")
+NODE_MODULE = re.compile(r"\b(import|export|modules?)\b")
 CHECK_MARK = "✗"
 CHECK_KIND = re.compile(r"\[([^\]]+)\]\s*")
 CHECK_FIELD = re.compile(r"(\S+?):(?:\s+|$)")
@@ -1486,8 +1491,37 @@ def shell_errors(program, worktree, rel):
     return findings
 
 
+def node_finding(program, worktree, path, rel):
+    """Runs `node --check` on one file. Gives its syntax error as one finding, or None."""
+    run = subprocess.run([program, "--check", path], cwd=worktree, capture_output=True,
+                         text=True, timeout=30)
+    if run.returncode == 0:
+        return None
+    lines = [line for line in run.stderr.splitlines() if line.strip()]
+    place = NODE_PLACE.match(lines[0].strip()) if lines else None
+    caret = next((line for line in lines if set(line.strip()) == {"^"}), None)
+    message = next((line.strip() for line in lines if NODE_MESSAGE.match(line)), None)
+    return {"path": rel, "line": int(place.group(1)) if place else 1,
+            "col": caret.index("^") + 1 if caret else 1,
+            "message": message or (lines[0].strip() if lines else "node --check failed")}
+
+
+def node_errors(program, worktree, rel):
+    """Parses one .js or .mjs file with node. A .js file that node refuses as a
+    script for its module syntax is parsed again as a module, from a copy
+    outside the worktree: the browser's modules are .js files too."""
+    finding = node_finding(program, worktree, rel, rel)
+    if finding and rel.endswith(".js") and NODE_MODULE.search(finding["message"]):
+        with tempfile.TemporaryDirectory(prefix="bench-node-") as scratch:
+            copy = os.path.join(scratch, "module.mjs")
+            shutil.copyfile(os.path.join(worktree, rel), copy)
+            finding = node_finding(program, worktree, copy, rel)
+    return [finding] if finding else []
+
+
 def check(bench, args):
     """Lints the files a change touched: Clojure forms, Python compiles, shell parses,
+    .js and .mjs parse,
     .github YAML parses, no workflow line it touched gives runs-on a GitHub-hosted
     runner. Then it starts the repository's check step, when it has one,
     and waits for it a while: a step that has not ended answers pending with a
@@ -1508,6 +1542,7 @@ def check(bench, args):
                               or not all(isinstance(item, str) and item for item in given)):
         raise Refusal("input", field="paths", reason="paths is a list of paths")
     findings, skipped, unavailable, clojure, shell, workflows = [], [], [], [], [], []
+    scripts = []
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
         if given:
@@ -1537,6 +1572,8 @@ def check(bench, args):
                     findings.append({"path": rel, "line": 1, "col": 1, "message": str(exc)})
             elif rel.endswith(".sh"):
                 shell.append(rel)
+            elif rel.endswith(NODE_SUFFIXES):
+                scripts.append(rel)
             elif rel.startswith(".github/") and rel.endswith((".yml", ".yaml")):
                 workflows.append((full, rel))
             else:
@@ -1560,6 +1597,16 @@ def check(bench, args):
                         findings.extend(shell_errors(program, worktree, rel))
                     except (OSError, subprocess.SubprocessError) as exc:
                         unavailable.append("bash -n did not answer on %s: %s" % (rel, exc))
+        if scripts:
+            program = shutil.which("node")
+            if not program:
+                unavailable.append("node not installed on the rig: the .js and .mjs files were not parsed")
+            else:
+                for rel in scripts:
+                    try:
+                        findings.extend(node_errors(program, worktree, rel))
+                    except (OSError, subprocess.SubprocessError) as exc:
+                        unavailable.append("node --check did not answer on %s: %s" % (rel, exc))
         if clojure:
             program = shutil.which("clj-kondo")
             if not program:
@@ -4134,7 +4181,8 @@ TOOL_SPECS = [
             "Lints the files a change touched, before submit. With no paths it checks every "
             "file the branch changed against its base. Clojure files (.clj .cljs .cljc .edn) "
             "get a balance check of their forms, and clj-kondo's errors when the rig has it; "
-            "Python files get a compile check. Other files are listed as skipped. The answer "
+            "Python files get a compile check; .js and .mjs files get node --check. Other "
+            "files are listed as skipped. The answer "
             "is ok, the findings with path, line, col and message, skipped and unavailable. "
             "When the repository has a check step, check starts it and waits up to `wait` "
             "seconds: a step that has not ended answers pending: true, ok: null and a check_id. "
