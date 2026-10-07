@@ -337,6 +337,10 @@ pull request) and answers `head` (the scratch commit),
 up to `wait_seconds` (25 by default, the setting `BENCH_TEST_WAIT`; 28 at
 most) and answers `success`, `cancelled`, `failure` with
 `failures: [{test, job, lines}]` (4 KB in all), or `pending`: ask again.
+A run that is done also answers `tests`: `{ran, failures, errors, skipped,
+skips: [{test, reason}]}`, the counts the runner printed in the job logs
+and the first 5 skips, so a green run says whether a `skipUnless` test
+ran. `tests` is `null` when no job log holds a `Ran N tests` line.
 `test_result {run_id, pattern}` also answers the lines of the run's job
 logs that the regex `pattern` matches, for a green run as for a red one:
 `matches: [{job, line, text}]` (`limit` at most, 40 by default), `count`
