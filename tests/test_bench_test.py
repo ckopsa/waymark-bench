@@ -135,6 +135,32 @@ class TestTheTestTool(LandingCase):
         self.assertEqual(refused["refused"], "input")
         self.assertEqual(refused["field"], "pattern")
 
+    def test_a_finished_run_answers_the_counts_the_runner_printed(self):
+        head = self.make_test()
+        green = [{"id": 41, "name": "unit", "status": "completed", "conclusion": "success",
+                  "steps": []}]
+        self.serve(head, "completed", "success", green)
+        stamp = "2026-10-07T00:00:01.0000000Z "
+        self.answers["/actions/jobs/41/logs"] = ("GET", "".join(stamp + line + "\n" for line in (
+            "test_node (tests.test_tools.TestNode.test_node) ... skipped 'node is not installed'",
+            "test_other (tests.test_tools.TestNode.test_other) ... ok",
+            "Ran 12 tests in 0.512s",
+            "",
+            "OK (skipped=1, expected failures=2)")))
+        self.ok("test", branch="work", select="waymark.core-test")
+        answer = self.ok("test_result", run_id=31)
+        self.assertEqual(answer["conclusion"], "success")
+        self.assertEqual(answer["tests"], {
+            "ran": 12, "failures": 0, "errors": 0, "skipped": 1,
+            "skips": [{"test": "tests.test_tools.TestNode.test_node",
+                       "reason": "node is not installed"}]})
+
+    def test_a_run_with_no_job_log_answers_no_counts(self):
+        head = self.make_test()
+        self.serve(head, "completed", "success")
+        self.ok("test", branch="work", select="waymark.core-test")
+        self.assertIsNone(self.ok("test_result", run_id=31)["tests"])
+
     def test_a_red_run_answers_the_failing_tests_with_their_lines(self):
         head = self.make_test()
         self.serve(head, "completed", "failure", RED_JOBS)

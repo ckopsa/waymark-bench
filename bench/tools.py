@@ -3330,6 +3330,7 @@ def test_result(bench, args):
         answer["duration_s"] = None if None in (start, end) else max(0, end - start)
         if answer["conclusion"] not in ("success", "cancelled", "skipped", "neutral"):
             answer["failures"] = _failures(bench, repo, client, run["id"])
+        answer["tests"] = _run_counts(bench, repo, client, run["id"])
         if pattern is not None:
             answer.update(_run_matches(bench, repo, client, run["id"], pattern, limit))
     except forge.ForgeError as exc:
@@ -3355,6 +3356,58 @@ def _run_matches(bench, repo, client, run_id, pattern, limit):
         lambda item: len(item["text"].encode("utf-8", "replace")) + 48)
     return {"matches": matches, "count": len(rows), "truncated": len(rows) > limit,
             "dropped": dropped}
+
+
+# The lines a test runner prints at its end: unittest's `Ran 12 tests in 0.5s`
+# and `OK (skipped=1)` or `FAILED (failures=1, errors=1)`, clojure.test's
+# `Ran 12 tests containing 40 assertions.` and `0 failures, 0 errors.`, and
+# unittest -v's `test_x (module.Class.test_x) ... skipped 'the reason'`.
+_RAN = re.compile(r"\bRan (\d+) tests?\b")
+_TALLY = re.compile(r"\b(?:OK|FAILED)(?: \(([^)]*)\))?\s*$")
+_TALLY_PART = re.compile(r"(?<!expected )\b(failures|errors|skipped)=(\d+)")
+_CLOJURE_TALLY = re.compile(r"\b(\d+) failures, (\d+) errors\b")
+_SKIPPED = re.compile(r"(?:\(([\w.]+)\))?\s*\.\.\. skipped (.*)$")
+SKIPS_SHOWN = 5
+
+
+def _run_counts(bench, repo, client, run_id):
+    """Gives the counts the runner printed in a run's job logs, summed over the
+    jobs: {ran, failures, errors, skipped, skips: [{test, reason}]}, the first
+    SKIPS_SHOWN skips. None when no job log holds a `Ran N tests` line, so no
+    count is never read as zero."""
+    counts = {"ran": 0, "failures": 0, "errors": 0, "skipped": 0}
+    skips, found = [], False
+    for job in client.steps(run_id):
+        try:
+            lines = job_lines(bench, repo, client, run_id, job["id"])
+        except Refusal:
+            continue
+        tally_next = False
+        for line in lines:
+            ran = _RAN.search(line)
+            if ran:
+                counts["ran"] += int(ran.group(1))
+                found = tally_next = True
+                continue
+            skip = _SKIPPED.search(line)
+            if skip:
+                skips.append({"test": skip.group(1),
+                              "reason": cut_line(skip.group(2).strip().strip("'\""), 200)})
+                continue
+            if not tally_next:
+                continue
+            tally, clojure = _TALLY.search(line), _CLOJURE_TALLY.search(line)
+            if tally:
+                for name, number in _TALLY_PART.findall(tally.group(1) or ""):
+                    counts[name] += int(number)
+            elif clojure:
+                counts["failures"] += int(clojure.group(1))
+                counts["errors"] += int(clojure.group(2))
+            tally_next = not (tally or clojure)
+    if not found:
+        return None
+    counts["skips"] = skips[:SKIPS_SHOWN]
+    return counts
 
 
 def _find_test_run(bench, repo, spec, client, args, deadline):
@@ -4833,7 +4886,10 @@ TOOL_SPECS = [
             "at most 28), and answers {conclusion: success or cancelled, run_url, duration_s}, "
             "{conclusion: failure, run_url, duration_s, failures: [{test, job, lines}]} or "
             "{conclusion: pending, run_url, elapsed_s}. It never dispatches: ask again while "
-            "it answers pending. It deletes the scratch ref when the run is done. With "
+            "it answers pending. It deletes the scratch ref when the run is done. A run "
+            "that is done also answers tests: {ran, failures, errors, skipped, skips: "
+            "[{test, reason}]}, the counts the runner printed and the first 5 skips, or "
+            "null when no job log holds a 'Ran N tests' line. With "
             "pattern, a run that is done, green or red, also answers the lines of its job "
             "logs the regex matches: {matches: [{job, line, text}], count, truncated}; ask "
             "again with another pattern at any time. The refusals are no_test_workflow, "
