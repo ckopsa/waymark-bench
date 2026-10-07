@@ -47,6 +47,11 @@ class ForgeError(Exception):
         self.reset = reset
 
 
+class NoAnswer(ForgeError):
+    """Nothing answered: the name did not resolve, the connection closed, or
+    the call timed out. The same call can be made again."""
+
+
 class NoSecretsToken(ForgeError):
     """BENCH_SECRETS_TOKEN is not set: secret_set and secret_list have no token."""
 
@@ -137,7 +142,7 @@ def http(method, url, headers, body=None):
     except urllib.error.HTTPError as exc:
         return exc.code, _text(exc.read(), exc.headers)
     except (urllib.error.URLError, OSError) as exc:
-        raise ForgeError("no answer from %s: %s" % (urllib.parse.urlsplit(url).netloc, exc))
+        raise NoAnswer("no answer from %s: %s" % (urllib.parse.urlsplit(url).netloc, exc))
 
 
 def _text(raw, headers):

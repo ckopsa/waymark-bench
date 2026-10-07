@@ -12,7 +12,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-from bench import forge
+from bench import forge, tools
 
 
 PROXIES = ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY")
@@ -233,6 +233,72 @@ class TestNewestRun(unittest.TestCase):
         client.merge_pull_request = lambda number, head_sha, method: {"sha": "m"}
         answer = client.merge_when_green(5, "abc", ["tests"])
         self.assertEqual(answer, {"state": "merged", "sha": "m"})
+
+
+GREEN_RUN = {"id": 31, "url": "https://github.com/o/r/actions/runs/31", "branch": "bench-test/work",
+             "commit": "abc", "state": "completed", "result": "success",
+             "created": "2026-10-07T10:00:00Z", "completed": "2026-10-07T10:03:00Z"}
+
+
+class TestNoAnswer(unittest.TestCase):
+    """A lookup that nothing answers is made again inside the wait of
+    test_result; it is never the run's answer."""
+
+    def setUp(self):
+        self.now = [0.0]
+        self.slept = []
+        fakes = {"_clock": lambda: self.now[0], "_sleep": self.sleep, "_test_spec": lambda repo: {},
+                 "_dirty_included": lambda *args: False, "_run_counts": lambda *args: None,
+                 "_drop_scratch": lambda *args: True}
+        for name, fake in fakes.items():
+            patch = mock.patch.object(tools, name, fake)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now[0] += seconds
+
+    def result(self, reads, **args):
+        """Answers test_result for run 31; each read of the run takes the next of reads."""
+        client = mock.Mock()
+        client.pipeline.side_effect = reads
+        repo = mock.Mock()
+        repo.name = "demo"
+        bench = mock.Mock()
+        bench.repo.return_value = repo
+        with mock.patch.object(tools.forge, "client", return_value=client):
+            return tools.test_result(bench, dict(args, run_id=31))
+
+    def test_the_one_http_call_names_a_network_error_no_answer(self):
+        with mock.patch.dict(os.environ, {"no_proxy": "*", "NO_PROXY": "*"}):
+            with self.assertRaises(forge.NoAnswer) as raised:
+                forge.http("GET", "http://127.0.0.1:1/runs/31", {})
+        self.assertIsNone(raised.exception.status)
+        self.assertIn("no answer from 127.0.0.1:1", str(raised.exception))
+
+    def test_one_failed_lookup_then_a_good_one_answers_the_run(self):
+        missed = forge.NoAnswer("no answer from api.github.com: name resolution")
+        answer = self.result([missed, GREEN_RUN])
+        self.assertEqual(answer["conclusion"], "success")
+        self.assertEqual(answer["run_id"], 31)
+        self.assertEqual(answer["duration_s"], 180)
+        self.assertNotIn("note", answer)
+        self.assertEqual(self.slept, [5])
+
+    def test_a_lookup_that_fails_every_time_answers_pending_with_the_note(self):
+        missed = forge.NoAnswer("no answer from api.github.com: name resolution")
+        answer = self.result(lambda run_id: (_ for _ in ()).throw(missed), wait_seconds=10)
+        self.assertEqual(answer["conclusion"], "pending")
+        self.assertEqual(answer["run_id"], 31)
+        self.assertIn("no answer from api.github.com", answer["note"])
+        self.assertIn("call test_result again", answer["note"])
+        self.assertEqual(self.slept, [5, 5])
+
+    def test_an_http_error_of_the_forge_is_still_a_refusal(self):
+        with self.assertRaises(tools.Refusal):
+            self.result([forge.ForgeError("github answered 500: no", 500)])
+        self.assertEqual(self.slept, [])
 
 
 if __name__ == "__main__":
