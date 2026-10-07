@@ -45,6 +45,8 @@ CEILING_WAIT = 28
 # so the wait is the setting BENCH_TEST_WAIT (25 by default) and never past 28.
 CEILING_TEST_WAIT = 28
 TEST_POLL_SECONDS = 5
+# The window of test_result's lookups is never shorter: a wait of 0 still reads the run.
+TEST_LOOKUP_FLOOR = 5
 # test looks for the run it started about fifteen seconds: 8 reads, 2 s apart.
 TEST_FIND_TRIES = 8
 TEST_FIND_SECONDS = 2
@@ -3309,15 +3311,17 @@ def test_result(bench, args):
     run_id = None
     try:
         client = forge.client(repo)
-        if args.get("run_id") is not None:
-            run_id = _int(args, "run_id", 0, 1, 2 ** 63)
-        else:
-            run_id = _find_test_run(bench, repo, spec, client, args, deadline)
-            if run_id is None:
-                since = _stamp_seconds(args.get("dispatched_at"))
-                return {"repo": repo.name, "conclusion": "pending", "run_id": None,
-                        "run_url": None, "elapsed_s": _age(since)}
-        run = _wait_for_run(client, run_id, max(0, deadline - _clock()))
+        # a lookup that hangs ends inside the wait, not after forge.TIMEOUT
+        with forge.within(max(wait, TEST_LOOKUP_FLOOR)):
+            if args.get("run_id") is not None:
+                run_id = _int(args, "run_id", 0, 1, 2 ** 63)
+            else:
+                run_id = _find_test_run(bench, repo, spec, client, args, deadline)
+                if run_id is None:
+                    since = _stamp_seconds(args.get("dispatched_at"))
+                    return {"repo": repo.name, "conclusion": "pending", "run_id": None,
+                            "run_url": None, "elapsed_s": _age(since)}
+            run = _wait_for_run(client, run_id, max(0, deadline - _clock()))
         answer = {"repo": repo.name, "run_id": run["id"], "run_url": run.get("url"),
                   "branch": run.get("branch"), "head": run.get("commit"),
                   "dirty_included": _dirty_included(bench, repo, run.get("branch"),
