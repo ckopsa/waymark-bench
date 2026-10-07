@@ -1524,6 +1524,87 @@ class TestCheck(BenchCase):
         self.assertEqual(answer["findings"], [])
         self.assertEqual(answer["skipped"], [])
 
+    FAKE_NODE = ("#!/bin/sh\n"
+                 "if grep -q BROKEN \"$2\"; then\n"
+                 "  printf '%s:2\\nlet = BROKEN;\\n      ^^^^^^\\n\\nSyntaxError: Unexpected identifier\\n"
+                 "    at wrapSafe (node:internal/modules/cjs/loader:1)\\n\\nNode.js v22\\n' \"$PWD/$2\" >&2\n"
+                 "  exit 1\n"
+                 "fi\n"
+                 "case \"$2\" in *.js) if grep -q '^import ' \"$2\"; then\n"
+                 "  printf '%s:1\\nimport a from \"./a.js\";\\n^^^^^^\\n\\n"
+                 "SyntaxError: Cannot use import statement outside a module\\n' \"$PWD/$2\" >&2\n"
+                 "  exit 1\n"
+                 "fi;; esac\n"
+                 "exit 0\n")
+
+    def fake_node(self):
+        """Puts a node that answers as `node --check` does first on the PATH."""
+        program = os.path.join(self.root, "fake-bin", "node")
+        util.write(program, self.FAKE_NODE)
+        os.chmod(program, 0o755)
+        patch = mock.patch.dict(os.environ, {"PATH": os.path.dirname(program) + os.pathsep
+                                             + os.environ.get("PATH", "")})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_broken_js_file_is_found_with_its_line(self):
+        path = self.prepared()
+        self.fake_node()
+        util.write(os.path.join(path, "ui/app.js"), "const a = 1;\nlet = BROKEN;\n")
+        util.write(os.path.join(path, "scripts/drive.mjs"), "const b = 2;\nlet = BROKEN;\n")
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        self.assertEqual(sorted(finding["path"] for finding in answer["findings"]),
+                         ["scripts/drive.mjs", "ui/app.js"])
+        for finding in answer["findings"]:
+            self.assertEqual(finding["line"], 2)
+            self.assertEqual(finding["col"], 7)
+            self.assertEqual(finding["message"], "SyntaxError: Unexpected identifier")
+        self.assertEqual(answer["skipped"], [])
+
+    def test_a_good_js_file_answers_ok(self):
+        path = self.prepared()
+        self.fake_node()
+        util.write(os.path.join(path, "ui/app.js"), "const a = 1;\n")
+        util.write(os.path.join(path, "scripts/drive.mjs"), "export const b = 2;\n")
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["findings"], [])
+        self.assertEqual(answer["skipped"], [])
+        self.assertEqual(answer["unavailable"], [])
+
+    def test_a_js_file_that_is_a_module_is_parsed_as_a_module(self):
+        path = self.prepared()
+        self.fake_node()
+        util.write(os.path.join(path, "ui/app.js"), "import a from \"./a.js\";\n")
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        util.write(os.path.join(path, "ui/app.js"), "import a from \"./a.js\";\nlet = BROKEN;\n")
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["findings"][0]["path"], "ui/app.js")
+        self.assertEqual(answer["findings"][0]["line"], 2)
+
+    def test_check_says_when_node_is_not_installed(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "ui/app.js"), "let = BROKEN;\n")
+        with mock.patch.object(tools.shutil, "which", return_value=None):
+            answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"])
+        self.assertEqual(answer["skipped"], [])
+        self.assertIn("node not installed", answer["unavailable"][0])
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_the_real_node_refuses_a_broken_file_and_passes_a_good_one(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "ui/good.js"), "export const a = 1;\n")
+        util.write(os.path.join(path, "ui/bad.js"), "const a = 1;\nfunction f( {\n")
+        answer = self.ok("check", branch="work")
+        self.assertFalse(answer["ok"])
+        self.assertEqual([finding["path"] for finding in answer["findings"]], ["ui/bad.js"])
+        self.assertIn("SyntaxError", answer["findings"][0]["message"])
+        self.assertGreaterEqual(answer["findings"][0]["line"], 1)
+
     def test_paths_limit_the_check(self):
         path = self.prepared()
         util.write(os.path.join(path, "src/app.py"), "def broken(:\n")

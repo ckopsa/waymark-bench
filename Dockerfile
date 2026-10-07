@@ -3,10 +3,12 @@
 FROM python:3.11-slim-bookworm
 
 # git is the rig's one tool; ca-certificates lets it clone over https;
-# curl fetches the Clojure CLI's installer and its tarball.
+# curl fetches the Clojure CLI's installer and its tarball; nodejs lets
+# check parse the changed .js and .mjs files with `node --check`.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ca-certificates curl \
- && rm -rf /var/lib/apt/lists/*
+ && apt-get install -y --no-install-recommends git ca-certificates curl nodejs \
+ && rm -rf /var/lib/apt/lists/* \
+ && node --version
 
 # A JDK 21, the Temurin ckopsa/waymark's CI uses, for the check step's
 # `clojure -M:check`.
