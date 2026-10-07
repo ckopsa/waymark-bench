@@ -91,7 +91,7 @@ class TestPrepare(BenchCase):
         with self.assertRaises(config_module.ConfigError):
             config_module.setup_from_dict("demo", {"timeout": 5})
 
-    def test_prepare_says_a_worktree_on_its_base_is_old(self):
+    def test_prepare_brings_a_worktree_on_its_base_up(self):
         # The case that read old code: a worktree of the base branch itself,
         # prepared once, and the remote moved on.
         self.prepared("main")
@@ -99,14 +99,11 @@ class TestPrepare(BenchCase):
         util.push_change(other, "main", "docs/new.txt", "from the other person\n")
         again = self.ok("prepare", branch="main")
         self.assertFalse(again["created"])
-        self.assertNotEqual(again["head"], again["base_head"])
-        self.assertEqual(again["behind"], 1)
-        self.assertEqual(again["behind_remote"], 1)
-        self.assertIn("use pull from head", again["note"])
-        self.ok("pull", branch="main", **{"from": "head"})
-        current = self.ok("prepare", branch="main")
-        self.assertEqual(current["behind_remote"], 0)
-        self.assertEqual(current["note"], "")
+        self.assertTrue(again["fast_forwarded"])
+        self.assertEqual(again["head"], again["base_head"])
+        self.assertEqual((again["behind"], again["behind_remote"]), (0, 0))
+        self.assertEqual(again["note"], "")
+        self.assertTrue(os.path.isfile(os.path.join(self.worktree("main"), "docs/new.txt")))
 
     def test_prepare_says_a_worktree_is_behind_its_remote_branch(self):
         self.prepared()
@@ -118,15 +115,48 @@ class TestPrepare(BenchCase):
         self.assertEqual(again["note"],
                          "the worktree is 1 commit behind origin/work: use pull from head")
 
-    def test_prepare_says_a_worktree_is_behind_its_base(self):
+    def test_prepare_fast_forwards_a_branch_with_no_commits_of_its_own(self):
         self.prepared()
         other = util.clone(self.root, self.clone_url)
         util.push_change(other, "main", "docs/new.txt", "from the other person\n")
         again = self.ok("prepare", branch="work")
-        self.assertEqual(again["behind"], 1)
+        self.assertTrue(again["fast_forwarded"])
+        self.assertEqual(again["head"], again["base_head"])
+        self.assertEqual(again["behind"], 0)
         self.assertIsNone(again["behind_remote"])
+        self.assertEqual(again["note"], "")
+        self.assertTrue(os.path.isfile(os.path.join(self.worktree(), "docs/new.txt")))
+        current = self.ok("prepare", branch="work")
+        self.assertFalse(current["fast_forwarded"], "a current worktree is not moved")
+
+    def test_prepare_leaves_a_branch_with_its_own_commits_and_says_it_is_behind(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/local.txt"), "a local commit\n")
+        util.git(["add", "-A"], cwd=path)
+        util.git(["commit", "-m", "its own"], cwd=path)
+        own = util.git(["rev-parse", "HEAD"], cwd=path)
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/new.txt", "from the other person\n")
+        again = self.ok("prepare", branch="work")
+        self.assertFalse(again["fast_forwarded"])
+        self.assertEqual(again["head"], own.strip(), "its own commits are not rewritten")
+        self.assertEqual(again["behind"], 1)
         self.assertEqual(again["note"],
                          "the worktree is 1 commit behind the base main: pull from base merges it in")
+
+    def test_prepare_does_not_touch_a_dirty_worktree(self):
+        path = self.prepared()
+        before = tools.head_of(path)
+        util.write(os.path.join(path, "docs/a.txt"), "work in progress\n")
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/new.txt", "from the other person\n")
+        again = self.ok("prepare", branch="work")
+        self.assertFalse(again["fast_forwarded"])
+        self.assertEqual(again["head"], before)
+        self.assertEqual(again["behind"], 1)
+        self.assertEqual(again["dirty_paths"], ["docs/a.txt"])
+        with open(os.path.join(path, "docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "work in progress\n")
 
     def test_prepare_refuses_a_bad_branch_name(self):
         answer = self.refused("prepare", branch="../escape")
