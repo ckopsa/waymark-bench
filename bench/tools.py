@@ -409,8 +409,8 @@ def lag_of(bare, worktree, branch, base_head):
 
     behind counts against the base head, as status does. behind_remote
     counts against the remote branch, and is None when the branch is
-    not on the remote. prepare fetches but does not move a worktree, so
-    these two are how a caller learns that it reads old code.
+    not on the remote. prepare moves only a worktree with no commits of
+    its own, so these two are how a caller learns that it reads old code.
     """
     counts = git.line(["rev-list", "--left-right", "--count", "%s...HEAD" % base_head],
                       cwd=worktree)
@@ -420,6 +420,30 @@ def lag_of(bare, worktree, branch, base_head):
         return behind, None
     behind_remote = int(git.line(["rev-list", "--count", "HEAD.." + remote], cwd=worktree))
     return behind, behind_remote
+
+
+def bring_up(bare, worktree, branch, base_head):
+    """Fast-forwards a worktree with no commits of its own to the base head. Gives True when it moved.
+
+    The branch has none of its own when its head is an ancestor of the base
+    head, and so is origin/<branch> when the branch is on the remote: the
+    move then loses nothing and rewrites nothing. A dirty worktree, or one
+    with a merge in progress, is left alone.
+    """
+    if status_paths(worktree) or git.ref_exists("MERGE_HEAD", cwd=worktree):
+        return False
+    head = head_of(worktree)
+    if head is None or head == base_head:
+        return False
+    if git.run(["merge-base", "--is-ancestor", "HEAD", base_head], cwd=worktree, check=False)[0] != 0:
+        return False
+    remote = "refs/remotes/origin/" + branch
+    if git.ref_exists(remote, cwd=bare):
+        code = git.run(["merge-base", "--is-ancestor", remote, base_head], cwd=bare, check=False)[0]
+        if code != 0:
+            return False
+    git.run(["merge", "--ff-only", "-q", base_head], cwd=worktree, timeout=600)
+    return True
 
 
 def lag_note(branch, base, behind, behind_remote):
@@ -628,6 +652,7 @@ def prepare(bench, args):
             base = bench.base_of(repo, branch)
         dropped = [] if created else drop_stray(repo, bare, path, branch)
         base_head = git.rev_parse(base_ref_of(bare, base), cwd=bare)
+        fast_forwarded = False if created else bring_up(bare, path, branch, base_head)
         behind, behind_remote = lag_of(bare, path, branch, base_head)
         set_up = (bench.meta_read(repo.name).get(branch) or {}).get("setup") == "ok"
     # outside the lock: npm ci takes a minute, and the repository's other
@@ -652,6 +677,7 @@ def prepare(bench, args):
             "dirty_paths": dirty[:100],
             "dropped": dropped[:100],
             "created": created,
+            "fast_forwarded": fast_forwarded,
             "default_branch": repo.default_branch,
             "behind": behind,
             "behind_remote": behind_remote,
@@ -3964,7 +3990,9 @@ TOOL_SPECS = [
         "description": (
             "Makes the clone and the worktree for one branch. Fetches first. "
             "Call prepare one time before the other tools. It is safe to call it again. "
-            "It does not move a worktree that exists: behind and behind_remote give the "
+            "A clean worktree whose branch has no commits of its own beyond the base is "
+            "fast-forwarded to the base (fast_forwarded: true); any other worktree is not "
+            "moved: behind and behind_remote give the "
             "commits the worktree lacks, and note names the pull that brings it forward. "
             "When bench.json gives the repository a setup step (npm ci), prepare runs it in "
             "the worktree until it succeeds once, and setup answers {ran, ok, exit_code, "

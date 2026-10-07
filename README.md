@@ -92,8 +92,12 @@ the list is on the repository's policy row in the engine, which gives it to
 
 ## A worktree that is old
 
-`prepare` fetches, but it does not move a worktree that exists. Its
-answer tells you how old the worktree is. `behind` counts the commits of
+`prepare` fetches first. A worktree that exists is moved only when its
+branch has no commits of its own: its head, and `origin/<branch>` when
+the branch is on the remote, are ancestors of the base. Then a clean
+worktree is fast-forwarded to the base, and `fast_forwarded` is true. A
+branch with its own commits is never rewritten, and a dirty worktree is
+never touched. The answer tells you how old the worktree is. `behind` counts the commits of
 the base that the worktree does not have, as `status` does.
 `behind_remote` counts the commits of `origin/<branch>` that the
 worktree does not have. It is `null` when the branch is not on the
