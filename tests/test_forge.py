@@ -301,5 +301,79 @@ class TestNoAnswer(unittest.TestCase):
         self.assertEqual(self.slept, [])
 
 
+class TestAskAgain(unittest.TestCase):
+    """A call that nothing answers is made again before the refusal: a read
+    always, a write only when it never left. An HTTP status is an answer."""
+
+    def setUp(self):
+        self.calls = []
+        self.slept = []
+        self.answers = []
+        for name, fake in (("http", self.http), ("_sleep", self.slept.append)):
+            patch = mock.patch.object(forge, name, fake)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.client = forge.Client("o", "r")
+
+    def http(self, method, url, headers, body=None):
+        self.calls.append(method)
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    def test_a_get_that_misses_once_gives_the_answer_and_no_refusal(self):
+        self.answers = [forge.NoAnswer("no answer from api.github.com: name resolution"),
+                        (200, '{"id": 31}')]
+        self.assertEqual(self.client.request("GET", "https://api.github.com/runs/31"), {"id": 31})
+        self.assertEqual(self.calls, ["GET", "GET"])
+        self.assertEqual(self.slept, [forge.RETRY_SECONDS])
+
+    def test_a_get_that_nothing_ever_answers_raises_no_answer_after_the_tries(self):
+        self.answers = [forge.NoAnswer("no answer from api.github.com: timed out")] * forge.TRIES
+        with self.assertRaises(forge.NoAnswer):
+            self.client.request("GET", "https://api.github.com/runs/31")
+        self.assertEqual(len(self.calls), forge.TRIES)
+        self.assertEqual(self.slept, [forge.RETRY_SECONDS] * (forge.TRIES - 1))
+
+    def test_an_http_error_is_unchanged_and_not_tried_again(self):
+        for status in (404, 500):
+            self.calls[:] = []
+            self.answers = [(status, "no")]
+            with self.assertRaises(forge.ForgeError) as raised:
+                self.client.request("GET", "https://api.github.com/runs/31")
+            self.assertNotIsInstance(raised.exception, forge.NoAnswer)
+            self.assertEqual(raised.exception.status, status)
+            self.assertEqual(self.calls, ["GET"])
+        self.assertEqual(self.slept, [])
+
+    def test_a_write_that_may_have_left_is_not_sent_again(self):
+        self.answers = [forge.NoAnswer("no answer from api.github.com: timed out"), (204, "")]
+        with self.assertRaises(forge.NoAnswer) as raised:
+            self.client.request("POST", "https://api.github.com/dispatches", {"ref": "main"})
+        self.assertIn("the call was not confirmed", str(raised.exception))
+        self.assertEqual(self.calls, ["POST"])
+        self.assertEqual(self.slept, [])
+
+    def test_a_write_that_never_left_is_sent_again(self):
+        self.answers = [forge.NoAnswer("no answer from api.github.com: name resolution", sent=False),
+                        (204, "")]
+        self.assertEqual(
+            self.client.request("POST", "https://api.github.com/dispatches", {"ref": "main"}), {})
+        self.assertEqual(self.calls, ["POST", "POST"])
+
+
+class TestNothingSent(unittest.TestCase):
+
+    def test_a_refused_connection_sent_nothing_and_token_scopes_raises_no_answer_too(self):
+        with mock.patch.dict(os.environ, {"no_proxy": "*", "NO_PROXY": "*"}):
+            with self.assertRaises(forge.NoAnswer) as raised:
+                forge.http("POST", "http://127.0.0.1:1/dispatches", {}, {"ref": "main"})
+            self.assertFalse(raised.exception.sent)
+            with self.assertRaises(forge.NoAnswer) as raised:
+                forge.token_scopes("http://127.0.0.1:1/", {})
+            self.assertFalse(raised.exception.sent)
+
+
 if __name__ == "__main__":
     unittest.main()

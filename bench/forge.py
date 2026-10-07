@@ -18,6 +18,7 @@ import base64
 import datetime
 import json
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -34,6 +35,12 @@ GITHUB = re.compile(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?$")
 RATE_LIMIT = re.compile(r"rate limit", re.IGNORECASE)
 # A throttle that names no time: GitHub asks for a minute at least.
 THROTTLE_WAIT = 60
+# How many times a call that nothing answers is made, and the pause between two.
+TRIES = 3
+RETRY_SECONDS = 2
+
+# The tests replace it.
+_sleep = time.sleep
 
 
 class ForgeError(Exception):
@@ -49,7 +56,13 @@ class ForgeError(Exception):
 
 class NoAnswer(ForgeError):
     """Nothing answered: the name did not resolve, the connection closed, or
-    the call timed out. The same call can be made again."""
+    the call timed out. A read can be made again. `sent` is False when the
+    call never left (no name, no connection), so a write can be made again
+    too; when it is True the forge may have done the write."""
+
+    def __init__(self, message, sent=True):
+        ForgeError.__init__(self, message)
+        self.sent = sent
 
 
 class NoSecretsToken(ForgeError):
@@ -142,7 +155,35 @@ def http(method, url, headers, body=None):
     except urllib.error.HTTPError as exc:
         return exc.code, _text(exc.read(), exc.headers)
     except (urllib.error.URLError, OSError) as exc:
-        raise NoAnswer("no answer from %s: %s" % (urllib.parse.urlsplit(url).netloc, exc))
+        raise _no_answer(url, exc)
+
+
+def _no_answer(url, exc):
+    """Gives the NoAnswer of a network error. A name that did not resolve and
+    a connection that was refused sent nothing."""
+    reason = getattr(exc, "reason", exc)
+    return NoAnswer("no answer from %s: %s" % (urllib.parse.urlsplit(url).netloc, exc),
+                    sent=not isinstance(reason, (socket.gaierror, ConnectionRefusedError)))
+
+
+def _retried(call, read):
+    """Makes a call that nothing answers again, TRIES times at most. A write
+    that may have left is not made again: its NoAnswer says the call was not
+    confirmed. An HTTP status is an answer, so it is never tried again."""
+    for left in range(TRIES - 1, -1, -1):
+        try:
+            return call()
+        except NoAnswer as exc:
+            if not read and exc.sent:
+                raise NoAnswer("%s; the call was not confirmed: the forge may have done it" % exc)
+            if not left:
+                raise
+            _sleep(RETRY_SECONDS)
+
+
+def ask(method, url, headers, body=None):
+    """The one HTTP call, made again when nothing answers (see _retried)."""
+    return _retried(lambda: http(method, url, headers, body), method == "GET")
 
 
 def _text(raw, headers):
@@ -155,7 +196,7 @@ def _text(raw, headers):
 def token_scopes(url, headers):
     """Gives the scopes that X-OAuth-Scopes names, as a list, or None when
     the answer has no such header: a fine-grained token names none. Raises
-    ForgeError when nothing answers."""
+    NoAnswer when nothing answers."""
     request = urllib.request.Request(url, method="GET", headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as answer:
@@ -163,7 +204,7 @@ def token_scopes(url, headers):
     except urllib.error.HTTPError as exc:
         found = exc.headers.get("X-OAuth-Scopes") if exc.headers else None
     except (urllib.error.URLError, OSError) as exc:
-        raise ForgeError("no answer from %s: %s" % (urllib.parse.urlsplit(url).netloc, exc))
+        raise _no_answer(url, exc)
     if found is None:
         return None
     return [scope.strip() for scope in found.split(",") if scope.strip()]
@@ -214,7 +255,7 @@ class Client:
         return {}
 
     def request(self, method, url, body=None, accept_text=False):
-        status, text = http(method, url, self.headers(), body)
+        status, text = ask(method, url, self.headers(), body)
         return self.judge(status, scrub(text), url, accept_text, getattr(text, "headers", None))
 
     def judge(self, status, text, url, accept_text=False, headers=None):
@@ -356,7 +397,7 @@ class Bitbucket(Client):
         if pending:
             return {"state": "waiting", "pending": pending}
         url = self.url("/pullrequests/%s/merge" % number)
-        status, text = http("POST", url, self.headers(), {
+        status, text = ask("POST", url, self.headers(), {
             "merge_strategy": BITBUCKET_STRATEGIES.get(method, "merge_commit"),
             "close_source_branch": bool(self.close_source),
         })
@@ -602,7 +643,7 @@ class GitHub(Client):
         on the branch: a refusal is a missing permission, and what only a
         write could prove is unverified."""
         try:
-            scopes = token_scopes(self.url(""), self.headers())
+            scopes = _retried(lambda: token_scopes(self.url(""), self.headers()), True)
             self.request("GET", self.url(""))
         except ForgeError as exc:
             return {"ok": False, "token": None, "missing": list(PERMISSIONS),
@@ -621,7 +662,7 @@ class GitHub(Client):
         missing = []
         for name, url in probes.items():
             try:
-                status, _ = http("GET", url, self.headers())
+                status, _ = ask("GET", url, self.headers())
             except ForgeError as exc:
                 return {"ok": False, "token": "fine_grained", "missing": [],
                         "unverified": list(PERMISSIONS), "reason": scrub(str(exc))}
@@ -639,7 +680,7 @@ class GitHub(Client):
 
         def reads(token):
             try:
-                status, _ = http("GET", url, self.headers(token))
+                status, _ = ask("GET", url, self.headers(token))
             except ForgeError as exc:
                 return {"ok": None, "reason": scrub(str(exc))}
             if status == 200:
@@ -658,7 +699,7 @@ class GitHub(Client):
 
     def secrets_request(self, method, url, body=None):
         """A request that carries the secrets token, never the main one."""
-        status, text = http(method, url, self.headers(self.secrets_credential()), body)
+        status, text = ask(method, url, self.headers(self.secrets_credential()), body)
         return self.judge(status, scrub(text), url, False, getattr(text, "headers", None))
 
     def find_pull_request(self, branch, target):
@@ -982,7 +1023,7 @@ class GitHub(Client):
         a force. Gives {state: updated|current} or {refused, reason}. The
         call names head_sha, so GitHub refuses it when the head moved."""
         url = self.url("/pulls/%s/update-branch" % number)
-        status, text = http("PUT", url, self.headers(), {"expected_head_sha": head_sha})
+        status, text = ask("PUT", url, self.headers(), {"expected_head_sha": head_sha})
         headers = getattr(text, "headers", None)
         text = scrub(text)
         if status != 422:
