@@ -20,12 +20,25 @@ jobs:
         with:
           python-version: "3.11"
       # The major version the Dockerfile's NODE_MAJOR pins, so the tests
-      # that run the real `node --check` run the image's grammar.
+      # that run the real `node --check` run the image's grammar. It is
+      # read from the Dockerfile's `ARG NODE_MAJOR=` line and named nowhere
+      # else: the job fails when that line is absent or is not a number.
+      - name: Read the node major version from the Dockerfile
+        id: node
+        run: |
+          major="$(sed -n 's/^ARG NODE_MAJOR=\([0-9][0-9]*\)$/\1/p' Dockerfile)"
+          if [ -z "$major" ]; then
+            echo "The Dockerfile has no 'ARG NODE_MAJOR=<number>' line." >&2
+            exit 1
+          fi
+          echo "major=$major" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: ${{ steps.node.outputs.major }}
       - name: Name the node the tests run
-        run: node --version | grep -E '^v22\.'
+        env:
+          NODE_MAJOR: ${{ steps.node.outputs.major }}
+        run: node --version | grep -E "^v${NODE_MAJOR}\."
       - uses: astral-sh/setup-uv@v5
       - name: Install the rig and its dependency
         run: uv sync
