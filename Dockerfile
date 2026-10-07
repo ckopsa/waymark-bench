@@ -2,8 +2,8 @@
 # over MCP. Build: make image (buildx arm64 → ghcr.io/ckopsa/waymark-bench:<tag>).
 
 # Node's major version, pinned to the one ckopsa/waymark's CI browser
-# jobs run: a bump is this one line, and the `node-version` of
-# .github/workflows/tests.yml with it.
+# jobs run: a bump is this one line. .github/workflows/tests.yml reads
+# its `node-version` from this line, so keep the form `ARG NODE_MAJOR=<number>`.
 ARG NODE_MAJOR=22
 FROM node:${NODE_MAJOR}-bookworm-slim AS node
 
