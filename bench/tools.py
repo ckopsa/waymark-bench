@@ -732,34 +732,78 @@ def status(bench, args):
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     with bench.lock(repo.name):
-        path = bench.worktree(repo, branch)
-        bare = bench.bare_dir(repo.name)
-        base = bench.base_of(repo, branch)
-        base_head = git.rev_parse(base_ref_of(bare, base), cwd=path)
-        head = head_of(path)
-        paths = status_paths(path)
-        counts = git.line(["rev-list", "--left-right", "--count", "%s...HEAD" % base_head], cwd=path)
-        behind, ahead = (counts.split() + ["0", "0"])[:2]
-        merging = git.ref_exists("MERGE_HEAD", cwd=path)
-        markers = conflict_ranges(path, unmerged_paths(path)) if merging else None
+        kept = os.path.isdir(bench.wt_dir(repo.name, branch))
+        if not kept:
+            answer = branch_status(bench, repo, branch)
+        else:
+            path = bench.worktree(repo, branch)
+            bare = bench.bare_dir(repo.name)
+            base = bench.base_of(repo, branch)
+            base_head = git.rev_parse(base_ref_of(bare, base), cwd=path)
+            head = head_of(path)
+            paths = status_paths(path)
+            counts = git.line(["rev-list", "--left-right", "--count", "%s...HEAD" % base_head],
+                              cwd=path)
+            behind, ahead = (counts.split() + ["0", "0"])[:2]
+            merging = git.ref_exists("MERGE_HEAD", cwd=path)
+            markers = conflict_ranges(path, unmerged_paths(path)) if merging else None
     item = bench.landings.get(repo, branch)
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 1024, CEILING_MAX_BYTES)
-    answer = {
+    if kept:
+        answer = {
+            "repo": repo.name,
+            "branch": branch,
+            "head": head,
+            "base": base,
+            "base_head": base_head,
+            "dirty": len(paths),
+            "paths": paths[:500],
+            "ahead": int(ahead),
+            "behind": int(behind),
+            "merge_in_progress": merging,
+            "worktree": True,
+        }
+        if markers is not None:
+            answer["markers"] = markers
+    answer["landing"] = item.view(max_bytes) if item else None
+    return answer
+
+
+def branch_status(bench, repo, branch):
+    """Gives the counts of a branch that has no worktree, from the bare clone.
+
+    The local branch comes first, then origin/<branch>. A branch that is in
+    neither is refused no_worktree, as before.
+    """
+    bare = bench.bare_dir(repo.name)
+    ref = None
+    if bench.bare_exists(repo.name):
+        for name in ("refs/heads/" + branch, "refs/remotes/origin/" + branch):
+            if git.ref_exists(name, cwd=bare):
+                ref = name
+                break
+    if ref is None:
+        raise Refusal("no_worktree", repo=repo.name, branch=branch,
+                      remedy="call prepare first")
+    base = bench.base_of(repo, branch)
+    base_head = git.rev_parse(base_ref_of(bare, base), cwd=bare)
+    head = git.rev_parse(ref, cwd=bare)
+    counts = git.line(["rev-list", "--left-right", "--count", "%s...%s" % (base_head, head)],
+                      cwd=bare)
+    behind, ahead = (counts.split() + ["0", "0"])[:2]
+    return {
         "repo": repo.name,
         "branch": branch,
         "head": head,
         "base": base,
         "base_head": base_head,
-        "dirty": len(paths),
-        "paths": paths[:500],
+        "dirty": 0,
+        "paths": [],
         "ahead": int(ahead),
         "behind": int(behind),
-        "merge_in_progress": merging,
-        "landing": item.view(max_bytes) if item else None,
+        "merge_in_progress": False,
+        "worktree": False,
     }
-    if markers is not None:
-        answer["markers"] = markers
-    return answer
 
 
 def _find_tree(bench, repo, worktree, args, max_bytes, allow=None):

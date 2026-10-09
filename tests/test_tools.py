@@ -251,6 +251,25 @@ class TestStatus(BenchCase):
         dirty = self.ok("status", branch="work")
         self.assertEqual(dirty["dirty"], 1)
         self.assertEqual(dirty["paths"], ["docs/a.txt"])
+        self.assertTrue(dirty["worktree"])
+
+    def test_status_reads_a_branch_that_has_no_worktree(self):
+        path = self.prepared()
+        self.ok("edit", branch="work", path="docs/a.txt", old="bravo", new="delta")
+        self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
+        head = self.ok("status", branch="work")["head"]
+        bare = self.bench.bare_dir("demo")
+        tools.git.run(["worktree", "remove", "--force", path], cwd=bare)
+        self.assertFalse(os.path.isdir(path))
+        local = self.ok("status", branch="work")
+        self.assertFalse(local["worktree"])
+        self.assertEqual((local["head"], local["ahead"], local["behind"]), (head, 1, 0))
+        self.assertEqual((local["dirty"], local["paths"]), (0, []))
+        tools.git.run(["branch", "-D", "work"], cwd=bare)
+        remote = self.ok("status", branch="work")
+        self.assertEqual((remote["head"], remote["ahead"]), (head, 1), "origin/work answers")
+        missing = self.refused("status", branch="never")
+        self.assertEqual(missing["refused"], "no_worktree")
 
 
 class TestFind(BenchCase):
