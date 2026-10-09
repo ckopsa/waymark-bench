@@ -340,7 +340,13 @@ most) and answers `success`, `cancelled`, `failure` with
 A run that is done also answers `tests`: `{ran, failures, errors, skipped,
 skips: [{test, reason}]}`, the counts the runner printed in the job logs
 and the first 5 skips, so a green run says whether a `skipUnless` test
-ran. `tests` is `null` when no job log holds a `Ran N tests` line.
+ran. `tests` also holds `assertions` when the runner printed them, as
+clojure.test does. `tests` is `null` when no job log holds a `Ran N tests`
+line, and `tests_missing` then says why in one sentence: the run has no
+job, no job log was read (with the forge's reason), or no log holds the
+line. The log reads have what is left of the call's 28 seconds, so a log
+the forge is slow to give is a `tests_missing` that says to ask again,
+and never a call that the engine's gate gives up on.
 `test_result {run_id, pattern}` also answers the lines of the run's job
 logs that the regex `pattern` matches, for a green run as for a red one:
 `matches: [{job, line, text}]` (`limit` at most, 40 by default), `count`
