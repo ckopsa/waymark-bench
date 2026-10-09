@@ -90,6 +90,19 @@ with `allowed`: true when its file is in the list. An absent or null
 the list is on the repository's policy row in the engine, which gives it to
 `enroll`, and no seat's change can add to it.
 
+## A branch with no worktree
+
+`status` for a branch with no worktree answers from the bare clone, with
+no fetch: `head`, `ahead` and `behind` from the local branch, or from
+`origin/<branch>` when there is no local branch, with `dirty` 0, `paths`
+`[]` and `worktree` false. It refuses `no_worktree` only when the branch
+is in neither. Every other answer of `status` has `worktree` true.
+
+The rig never removes a change's worktree on its own, after a stall or
+at any other time. Only `discard` with `drop_branch` removes one, and it
+deletes the local branch with it; `train_build` removes and remakes the
+worktree of a `train/*` branch only.
+
 ## A worktree that is old
 
 `prepare` fetches first. A worktree that exists is moved only when its
