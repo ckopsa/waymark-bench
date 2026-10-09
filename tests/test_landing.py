@@ -1159,6 +1159,49 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual(answer["jobs"], ["unit"])
         self.assertEqual(self.reruns(), [])
 
+    # the containers did not start, and the crash report ran on no checkout
+    UNSTARTED_JOBS = [
+        {"id": 21, "name": "test-queue (shard 1)", "status": "completed", "conclusion": "failure",
+         "steps": [{"name": "Set up job", "conclusion": "success"},
+                   {"name": "Initialize containers", "conclusion": "failure"},
+                   {"name": "Run actions/checkout@v4", "conclusion": "skipped"},
+                   {"name": "Run tests", "conclusion": "skipped"},
+                   {"name": "JVM crash report", "conclusion": "failure"},
+                   {"name": "Stop containers", "conclusion": "success"},
+                   {"name": "Complete job", "conclusion": "success"}]}]
+    # the tests ran and went red, and the crash report after them failed too
+    RED_REPORT_JOBS = [
+        {"id": 21, "name": "test-queue (shard 1)", "status": "completed", "conclusion": "failure",
+         "steps": [{"name": "Set up job", "conclusion": "success"},
+                   {"name": "Initialize containers", "conclusion": "success"},
+                   {"name": "Run actions/checkout@v4", "conclusion": "success"},
+                   {"name": "Run tests", "conclusion": "failure"},
+                   {"name": "JVM crash report", "conclusion": "failure"}]}]
+
+    def test_rerun_starts_a_job_that_failed_before_its_test_step(self):
+        head = self.submitted()
+        self.one_run(head, self.UNSTARTED_JOBS)
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["run_id"], 11)
+        self.assertEqual(answer["runs"][0]["jobs"], ["test-queue (shard 1)"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_rerun_with_run_id_answers_the_same_for_a_job_that_failed_before_its_test_step(self):
+        head = self.submitted()
+        self.one_run(head, self.UNSTARTED_JOBS)
+        answer = self.ok("rerun", branch="work", run_id=11)
+        self.assertEqual(answer["run_id"], 11)
+        self.assertEqual(answer["runs"][0]["jobs"], ["test-queue (shard 1)"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_rerun_refuses_a_red_test_step_with_a_failed_crash_report_after_it(self):
+        head = self.submitted()
+        self.one_run(head, self.RED_REPORT_JOBS)
+        answer = self.refused("rerun", branch="work")
+        self.assertEqual(answer["refused"], "red")
+        self.assertEqual(answer["jobs"], ["test-queue (shard 1)"])
+        self.assertEqual(self.reruns(), [])
+
     GATE = {"id": 23, "name": "gate", "status": "completed", "conclusion": "failure",
             "steps": [{"name": "Set up job", "conclusion": "success"},
                       {"name": "Every suite passed", "conclusion": "failure"}]}

@@ -291,7 +291,9 @@ refusal (`update_refused`) and a forge that is not GitHub
 
 CI can die with the code sound: a runner freezes, a job is cancelled or
 times out, or it fails in checkout or container set-up before any test
-runs. `feedback` gives such a run one finding of severity `interrupted`
+runs. A step that runs after the failed set-up step all the same (a crash
+report with `if: always()`) does not change that: the job ran no test.
+`feedback` gives such a run one finding of severity `interrupted`
 (not `error`) whose message starts `ci: interrupted`. A job that only
 gathers the others counts with them: its own step failed, and each job
 its workflow file says it `needs` is success, skipped or interrupted (a

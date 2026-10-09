@@ -581,15 +581,22 @@ SETUP_STEP = re.compile(r"(?i)^(set ?up\b|run actions/checkout\b|checkout\b|init
 
 def job_interrupted(job):
     """Tells if a GitHub job stopped before its own work: cancelled, timed
-    out, or failed with no step past setup."""
+    out, or failed with no step past setup. A setup step that failed before
+    any other step ran ends the question: a step after it (a crash report
+    with `if: always()`) ran on nothing, and its failure is the setup's."""
     conclusion = job.get("conclusion")
     if conclusion in ("cancelled", "timed_out"):
         return True
     if conclusion != "failure":
         return False
-    return not any(step.get("conclusion") not in (None, "skipped")
-                   and not SETUP_STEP.match(step.get("name") or "")
-                   for step in job.get("steps") or [])
+    for step in job.get("steps") or []:
+        if step.get("conclusion") in (None, "skipped"):
+            continue
+        if not SETUP_STEP.match(step.get("name") or ""):
+            return False
+        if step.get("conclusion") == "failure":
+            return True
+    return True
 
 
 def workflow_needs(text):
