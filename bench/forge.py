@@ -128,8 +128,8 @@ def detect(clone_url):
 
 class _KeepCredentialOnHost(urllib.request.HTTPRedirectHandler):
     """Follows a redirect, but sends the credential only to the host it was
-    meant for. GitHub answers the log of a job with a 302 to a signed URL
-    on a blob store; that store refuses a request that carries both its
+    meant for. GitHub answers the log of a job, and Bitbucket the log of a
+    step, with a 302 to a signed URL on a blob store; that store refuses a request that carries both its
     signature and our Authorization, and the token must never leave the
     forge's own host (api.github.com, api.bitbucket.org) in any case."""
 
@@ -285,8 +285,12 @@ class Client:
     def headers(self):  # Each forge gives its own.
         return {}
 
-    def request(self, method, url, body=None, accept_text=False):
-        status, text = ask(method, url, self.headers(), body)
+    def request(self, method, url, body=None, accept_text=False, accept=None):
+        # accept replaces the forge's Accept for an endpoint that serves no JSON.
+        headers = self.headers()
+        if accept:
+            headers = dict(headers, Accept=accept)
+        status, text = ask(method, url, headers, body)
         return self.judge(status, scrub(text), url, accept_text, getattr(text, "headers", None))
 
     def judge(self, status, text, url, accept_text=False, headers=None):
@@ -542,9 +546,12 @@ class Bitbucket(Client):
         return found
 
     def step_log(self, pipeline_id, step_id):
+        # The log is plain text: Accept application/json gets a 406. It comes
+        # as a redirect to a signed URL, which the opener follows without the
+        # credential (see _KeepCredentialOnHost).
         try:
             return self.request("GET", self.url("/pipelines/%s/steps/%s/log" % (pipeline_id, step_id)),
-                                accept_text=True)
+                                accept_text=True, accept="*/*")
         except ForgeError as exc:
             return "(no log: %s)" % exc
 
