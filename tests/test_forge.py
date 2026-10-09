@@ -105,6 +105,73 @@ class TestRedirect(unittest.TestCase):
         self.assertEqual(seen, ["Bearer fake-token", "Bearer fake-token"])
 
 
+class TestBitbucketLog(unittest.TestCase):
+    """Bitbucket serves the log of a step as text, not JSON: it answers 406
+    to Accept application/json, and 302 to a signed URL otherwise."""
+
+    def setUp(self):
+        env = {name: "" for name in PROXIES}
+        env.update({"BENCH_BITBUCKET_USER": "someone", "BENCH_BITBUCKET_TOKEN": "fake-token",
+                    "no_proxy": "*", "NO_PROXY": "*"})
+        patch = mock.patch.dict(os.environ, env)
+        patch.start()
+        self.addCleanup(patch.stop)
+        for name in PROXIES:
+            os.environ.pop(name, None)
+
+        self.store_status = 200
+        store, self.store_url, self.store_seen = serve(
+            lambda h: (self.store_status, {"Content-Type": "application/octet-stream"},
+                       "+ make test\nFAILED test_one\n" if self.store_status == 200 else "denied"))
+        self.addCleanup(store.server_close)
+        self.addCleanup(store.shutdown)
+
+        good = "Basic " + forge.base64.b64encode(b"someone:fake-token").decode("ascii")
+
+        def api_answer(handler):
+            if handler.headers.get("Authorization") != good:
+                return 401, {}, '{"type":"error"}'
+            if "/pipelines/9/steps/%7Bs%7D/log" not in handler.path:
+                return 404, {}, "{}"
+            if "application/json" in (handler.headers.get("Accept") or ""):
+                return 406, {}, ""
+            return 302, {"Location": self.store_url + "/logs/s?X-Amz-Signature=signed"}, ""
+
+        api, self.api_url, self.api_seen = serve(api_answer)
+        self.addCleanup(api.server_close)
+        self.addCleanup(api.shutdown)
+        self.client = forge.Bitbucket("o", "r")
+        self.client.api = self.api_url + "/2.0/repositories"
+
+    def test_the_log_asks_for_no_json(self):
+        self.client.step_log(9, "%7Bs%7D")
+        self.assertNotIn("application/json", self.api_seen[0].get("Accept"))
+
+    def test_the_log_follows_the_redirect_without_the_credential(self):
+        text = self.client.step_log(9, "%7Bs%7D")
+        self.assertEqual(text, "+ make test\nFAILED test_one\n")
+        self.assertTrue(self.api_seen[0].get("Authorization", "").startswith("Basic "))
+        self.assertEqual(len(self.store_seen), 1)
+        self.assertNotIn("Authorization", self.store_seen[0])
+        self.assertNotIn("Cookie", self.store_seen[0])
+        self.assertNotIn(forge.base64.b64encode(b"someone:fake-token").decode("ascii"),
+                         repr(self.store_seen[0]))
+
+    def test_other_calls_still_ask_for_json(self):
+        self.assertEqual(self.client.headers()["Accept"], "application/json")
+
+    def test_a_refusal_on_the_first_hop_still_reads_as_refused(self):
+        os.environ["BENCH_BITBUCKET_TOKEN"] = "another-token"
+        text = self.client.step_log(9, "%7Bs%7D")
+        self.assertEqual(text, "(no log: bitbucket refused the credential (401))")
+        self.assertEqual(self.store_seen, [])
+
+    def test_a_refusal_by_the_store_is_no_log(self):
+        self.store_status = 400
+        text = self.client.step_log(9, "%7Bs%7D")
+        self.assertEqual(text, "(no log: bitbucket answered 400: denied)")
+
+
 class TestThrottle(unittest.TestCase):
     """A spent rate limit is a throttle with its reset, not a refused credential."""
 
