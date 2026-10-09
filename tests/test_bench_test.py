@@ -161,6 +161,58 @@ class TestTheTestTool(LandingCase):
         self.ok("test", branch="work", select="waymark.core-test")
         self.assertIsNone(self.ok("test_result", run_id=31)["tests"])
 
+    def test_a_run_with_no_counts_says_why(self):
+        head = self.make_test()
+        self.serve(head, "completed", "success")
+        self.ok("test", branch="work", select="waymark.core-test")
+        self.assertEqual(self.ok("test_result", run_id=31)["tests_missing"],
+                         "the run has no job, so it has no log")
+        green = [{"id": 41, "name": "unit", "status": "completed", "conclusion": "success",
+                  "steps": []}]
+        self.serve(head, "completed", "success", green)
+        self.answers["/actions/jobs/41/logs"] = ("GET", "lein test\nall done\n")
+        answer = self.ok("test_result", run_id=31)
+        self.assertIsNone(answer["tests"])
+        self.assertEqual(answer["tests_missing"], tools.NO_RAN_LINE)
+
+    def test_a_run_with_counts_has_no_tests_missing(self):
+        head = self.make_test()
+        green = [{"id": 41, "name": "unit", "status": "completed", "conclusion": "success",
+                  "steps": []}]
+        self.serve(head, "completed", "success", green)
+        self.ok("test", branch="work", select="waymark.core-test")
+        answer = self.ok("test_result", run_id=31)
+        self.assertEqual(answer["tests"]["ran"], 12)
+        self.assertNotIn("tests_missing", answer)
+
+    def test_a_clojure_run_answers_its_assertions_and_an_unread_log_says_so(self):
+        self.make_test()
+        logs = {1: "Ran 12 tests containing 40 assertions.\n0 failures, 0 errors.\n"}
+        asked = []
+
+        class Client:
+            def steps(self, run_id):
+                return [{"id": 1, "name": "unit"}, {"id": 2, "name": "more"}][:run_id - 30]
+
+            def step_log(self, run_id, job_id):
+                asked.append(job_id)
+                if run_id != 31:
+                    raise tools.forge.NoAnswer("no answer from api.github.com: timed out")
+                return logs[job_id]
+
+        repo = self.bench.repo("demo")
+        self.assertEqual(tools._run_counts(self.bench, repo, Client(), 31),
+                         {"ran": 12, "assertions": 40, "failures": 0, "errors": 0,
+                          "skipped": 0, "skips": []})
+        missing, asked[:] = [], []
+        self.assertIsNone(tools._run_counts(self.bench, repo, Client(), 32, missing))
+        # the forge did not answer for the first log, so the second is not asked for
+        self.assertEqual(asked, [1])
+        self.assertEqual(len(missing), 1)
+        self.assertIn("no job log was read", missing[0])
+        self.assertIn("no answer from api.github.com: timed out", missing[0])
+        self.assertIn("call test_result again", missing[0])
+
     def test_a_red_run_answers_the_failing_tests_with_their_lines(self):
         head = self.make_test()
         self.serve(head, "completed", "failure", RED_JOBS)

@@ -3307,7 +3307,8 @@ def test_result(bench, args):
         except re.error as exc:
             raise Refusal("input", field="pattern", reason=str(exc))
     limit = _int(args, "limit", 40, 1, 100)
-    deadline = _clock() + wait
+    started = _clock()
+    deadline = started + wait
     run_id = None
     try:
         client = forge.client(repo)
@@ -3333,11 +3334,17 @@ def test_result(bench, args):
         end = _stamp_seconds(run.get("completed"))
         answer["conclusion"] = run.get("result") or "unknown"
         answer["duration_s"] = None if None in (start, end) else max(0, end - start)
-        if answer["conclusion"] not in ("success", "cancelled", "skipped", "neutral"):
-            answer["failures"] = _failures(bench, repo, client, run["id"])
-        answer["tests"] = _run_counts(bench, repo, client, run["id"])
-        if pattern is not None:
-            answer.update(_run_matches(bench, repo, client, run["id"], pattern, limit))
+        missing = []
+        # the log reads have what is left of the call: with no window each may take
+        # forge.TIMEOUT, and the gate gives up on the call long before that
+        with forge.within(max(TEST_LOOKUP_FLOOR, started + CEILING_TEST_WAIT - _clock())):
+            if answer["conclusion"] not in ("success", "cancelled", "skipped", "neutral"):
+                answer["failures"] = _failures(bench, repo, client, run["id"])
+            answer["tests"] = _run_counts(bench, repo, client, run["id"], missing)
+            if pattern is not None:
+                answer.update(_run_matches(bench, repo, client, run["id"], pattern, limit))
+        if answer["tests"] is None:
+            answer["tests_missing"] = missing[0] if missing else NO_RAN_LINE
     except forge.NoAnswer as exc:
         # the forge was not reached, so this says nothing about the run
         return {"repo": repo.name, "conclusion": "pending", "run_id": run_id, "run_url": None,
@@ -3373,31 +3380,43 @@ def _run_matches(bench, repo, client, run_id, pattern, limit):
 # and `OK (skipped=1)` or `FAILED (failures=1, errors=1)`, clojure.test's
 # `Ran 12 tests containing 40 assertions.` and `0 failures, 0 errors.`, and
 # unittest -v's `test_x (module.Class.test_x) ... skipped 'the reason'`.
-_RAN = re.compile(r"\bRan (\d+) tests?\b")
+_RAN = re.compile(r"\bRan (\d+) tests?\b(?: containing (\d+) assertions?\b)?")
 _TALLY = re.compile(r"\b(?:OK|FAILED)(?: \(([^)]*)\))?\s*$")
 _TALLY_PART = re.compile(r"(?<!expected )\b(failures|errors|skipped)=(\d+)")
 _CLOJURE_TALLY = re.compile(r"\b(\d+) failures, (\d+) errors\b")
 _SKIPPED = re.compile(r"(?:\(([\w.]+)\))?\s*\.\.\. skipped (.*)$")
 SKIPS_SHOWN = 5
+NO_RAN_LINE = "no job log holds a `Ran N tests` line"
 
 
-def _run_counts(bench, repo, client, run_id):
+def _run_counts(bench, repo, client, run_id, missing=None):
     """Gives the counts the runner printed in a run's job logs, summed over the
     jobs: {ran, failures, errors, skipped, skips: [{test, reason}]}, the first
-    SKIPS_SHOWN skips. None when no job log holds a `Ran N tests` line, so no
-    count is never read as zero."""
+    SKIPS_SHOWN skips, and `assertions` when the runner printed them. None when
+    no job log holds a `Ran N tests` line, so no count is never read as zero;
+    the list `missing` then gets one sentence that says why."""
     counts = {"ran": 0, "failures": 0, "errors": 0, "skipped": 0}
     skips, found = [], False
-    for job in client.steps(run_id):
+    jobs = list(client.steps(run_id))
+    read, unread, unanswered = 0, [], False
+    for job in jobs:
         try:
             lines = job_lines(bench, repo, client, run_id, job["id"])
-        except Refusal:
+        except Refusal as exc:
+            unread.append(cut_line(str(exc.data.get("reason")), 200))
+            if "no answer from" in unread[-1]:
+                # the forge does not answer now: the next log would wait as long
+                unanswered = True
+                break
             continue
+        read += 1
         tally_next = False
         for line in lines:
             ran = _RAN.search(line)
             if ran:
                 counts["ran"] += int(ran.group(1))
+                if ran.group(2):
+                    counts["assertions"] = counts.get("assertions", 0) + int(ran.group(2))
                 found = tally_next = True
                 continue
             skip = _SKIPPED.search(line)
@@ -3416,6 +3435,19 @@ def _run_counts(bench, repo, client, run_id):
                 counts["errors"] += int(clojure.group(2))
             tally_next = not (tally or clojure)
     if not found:
+        if not jobs:
+            why = "the run has no job, so it has no log"
+        elif not read:
+            why = "no job log was read: %s" % unread[0]
+        elif unread:
+            why = "%s; %d of %d job logs were not read: %s" % (
+                NO_RAN_LINE, len(jobs) - read, len(jobs), unread[0])
+        else:
+            why = NO_RAN_LINE
+        if unanswered:
+            why += "; the run is done, so call test_result again"
+        if missing is not None:
+            missing.append(why)
         return None
     counts["skips"] = skips[:SKIPS_SHOWN]
     return counts
@@ -4910,8 +4942,10 @@ TOOL_SPECS = [
             "it answers pending. When the forge does not answer inside the wait, it answers "
             "pending with a note, not a refusal. It deletes the scratch ref when the run is done. A run "
             "that is done also answers tests: {ran, failures, errors, skipped, skips: "
-            "[{test, reason}]}, the counts the runner printed and the first 5 skips, or "
-            "null when no job log holds a 'Ran N tests' line. With "
+            "[{test, reason}]}, the counts the runner printed and the first 5 skips, with "
+            "assertions when the runner printed them, or null with tests_missing, one sentence "
+            "that says why: no job log holds a 'Ran N tests' line, or no job log was read. "
+            "The log reads end inside the call's 28 seconds. With "
             "pattern, a run that is done, green or red, also answers the lines of its job "
             "logs the regex matches: {matches: [{job, line, text}], count, truncated}; ask "
             "again with another pattern at any time. The refusals are no_test_workflow, "
