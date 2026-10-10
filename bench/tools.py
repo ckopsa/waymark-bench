@@ -3378,17 +3378,24 @@ def test_result(bench, args):
         end = _stamp_seconds(run.get("completed"))
         answer["conclusion"] = run.get("result") or "unknown"
         answer["duration_s"] = None if None in (start, end) else max(0, end - start)
-        missing = []
+        missing, facts = [], {}
         # the log reads have what is left of the call: with no window each may take
         # forge.TIMEOUT, and the gate gives up on the call long before that
         with forge.within(max(TEST_LOOKUP_FLOOR, started + CEILING_TEST_WAIT - _clock())):
             if answer["conclusion"] not in ("success", "cancelled", "skipped", "neutral"):
                 answer["failures"] = _failures(bench, repo, client, run["id"])
-            answer["tests"] = _run_counts(bench, repo, client, run["id"], missing)
+            answer["tests"] = _run_counts(bench, repo, client, run["id"], missing, facts)
             if pattern is not None:
                 answer.update(_run_matches(bench, repo, client, run["id"], pattern, limit))
         if answer["tests"] is None:
             answer["tests_missing"] = missing[0] if missing else NO_RAN_LINE
+            # every log was read and none holds the line: no test ran, whatever the
+            # conclusion says; a log that was not read leaves it unknown
+            answer["tests_ran"] = None if facts.get("unread") else False
+        else:
+            answer["tests_ran"] = answer["tests"]["ran"] > 0
+        if facts.get("skipped"):
+            answer["jobs_skipped"] = facts["skipped"]
     except forge.NoAnswer as exc:
         # the forge was not reached, so this says nothing about the run
         return {"repo": repo.name, "conclusion": "pending", "run_id": run_id, "run_url": None,
@@ -3433,15 +3440,20 @@ SKIPS_SHOWN = 5
 NO_RAN_LINE = "no job log holds a `Ran N tests` line"
 
 
-def _run_counts(bench, repo, client, run_id, missing=None):
+def _run_counts(bench, repo, client, run_id, missing=None, facts=None):
     """Gives the counts the runner printed in a run's job logs, summed over the
     jobs: {ran, failures, errors, skipped, skips: [{test, reason}]}, the first
     SKIPS_SHOWN skips, and `assertions` when the runner printed them. None when
     no job log holds a `Ran N tests` line, so no count is never read as zero;
-    the list `missing` then gets one sentence that says why."""
+    the list `missing` then gets one sentence that says why. A skipped job ran
+    nothing and the forge holds no log for it, so its log is not asked for; the
+    dict `facts` gets `skipped`, those jobs' names, and `unread`, the count of
+    the other jobs whose log was not read."""
     counts = {"ran": 0, "failures": 0, "errors": 0, "skipped": 0}
     skips, found = [], False
     jobs = list(client.steps(run_id))
+    idle = [str(job.get("name")) for job in jobs if job.get("result") == "skipped"]
+    jobs = [job for job in jobs if job.get("result") != "skipped"]
     read, unread, unanswered = 0, [], False
     for job in jobs:
         try:
@@ -3478,8 +3490,12 @@ def _run_counts(bench, repo, client, run_id, missing=None):
                 counts["failures"] += int(clojure.group(1))
                 counts["errors"] += int(clojure.group(2))
             tally_next = not (tally or clojure)
+    if facts is not None:
+        facts.update(skipped=idle, unread=len(jobs) - read)
     if not found:
-        if not jobs:
+        if idle and not jobs:
+            why = "every job of the run was skipped, so no test ran"
+        elif not jobs:
             why = "the run has no job, so it has no log"
         elif not read:
             why = "no job log was read: %s" % unread[0]
@@ -3488,6 +3504,8 @@ def _run_counts(bench, repo, client, run_id, missing=None):
                 NO_RAN_LINE, len(jobs) - read, len(jobs), unread[0])
         else:
             why = NO_RAN_LINE
+        if idle:
+            why += "; skipped jobs: %s" % cut_line(", ".join(idle), 200)
         if unanswered:
             why += "; the run is done, so call test_result again"
         if missing is not None:
@@ -4989,6 +5007,9 @@ TOOL_SPECS = [
             "[{test, reason}]}, the counts the runner printed and the first 5 skips, with "
             "assertions when the runner printed them, or null with tests_missing, one sentence "
             "that says why: no job log holds a 'Ran N tests' line, or no job log was read. "
+            "tests_ran says it plainly: true when a test ran, false when none did (a success "
+            "with tests_ran false is not a pass), null when a job log was not read. "
+            "jobs_skipped names the jobs the run skipped; their logs are not asked for. "
             "The log reads end inside the call's 28 seconds. With "
             "pattern, a run that is done, green or red, also answers the lines of its job "
             "logs the regex matches: {matches: [{job, line, text}], count, truncated}; ask "
