@@ -3390,8 +3390,9 @@ def test_result(bench, args):
         if answer["tests"] is None:
             answer["tests_missing"] = missing[0] if missing else NO_RAN_LINE
             # every log was read and none holds the line: no test ran, whatever the
-            # conclusion says; a log that was not read leaves it unknown
-            answer["tests_ran"] = None if facts.get("unread") else False
+            # conclusion says; a log that was not read, or a test job's log that
+            # holds no count, leaves it unknown
+            answer["tests_ran"] = None if facts.get("unread") or facts.get("uncounted") else False
         else:
             answer["tests_ran"] = answer["tests"]["ran"] > 0
         if facts.get("skipped"):
@@ -3430,8 +3431,13 @@ def _run_matches(bench, repo, client, run_id, pattern, limit):
 # The lines a test runner prints at its end: unittest's `Ran 12 tests in 0.5s`
 # and `OK (skipped=1)` or `FAILED (failures=1, errors=1)`, clojure.test's
 # `Ran 12 tests containing 40 assertions.` and `0 failures, 0 errors.`, and
-# unittest -v's `test_x (module.Class.test_x) ... skipped 'the reason'`.
+# unittest -v's `test_x (module.Class.test_x) ... skipped 'the reason'`. kaocha,
+# the runner of ckopsa/waymark's test jobs, prints one line that holds its tally:
+# `171 tests, 983 assertions, 1 errors, 2 pending, 0 failures.`, with `errors`
+# and `pending` only when they are not zero.
 _RAN = re.compile(r"\bRan (\d+) tests?\b(?: containing (\d+) assertions?\b)?")
+_KAOCHA = re.compile(r"\b(\d+) tests?, (\d+) assertions?,((?: \d+ (?:errors?|pending),)*) (\d+) failures?\b")
+_KAOCHA_PART = re.compile(r"(\d+) (errors?|pending)")
 _TALLY = re.compile(r"\b(?:OK|FAILED)(?: \(([^)]*)\))?\s*$")
 _TALLY_PART = re.compile(r"(?<!expected )\b(failures|errors|skipped)=(\d+)")
 _CLOJURE_TALLY = re.compile(r"\b(\d+) failures, (\d+) errors\b")
@@ -3444,17 +3450,20 @@ def _run_counts(bench, repo, client, run_id, missing=None, facts=None):
     """Gives the counts the runner printed in a run's job logs, summed over the
     jobs: {ran, failures, errors, skipped, skips: [{test, reason}]}, the first
     SKIPS_SHOWN skips, and `assertions` when the runner printed them. None when
-    no job log holds a `Ran N tests` line, so no count is never read as zero;
+    no job log holds a `Ran N tests` line or kaocha's `N tests, N assertions`
+    line, so no count is never read as zero;
     the list `missing` then gets one sentence that says why. A skipped job ran
     nothing and the forge holds no log for it, so its log is not asked for; the
-    dict `facts` gets `skipped`, those jobs' names, and `unread`, the count of
-    the other jobs whose log was not read."""
+    dict `facts` gets `skipped`, those jobs' names, `unread`, the count of
+    the other jobs whose log was not read, and `uncounted` when there is one,
+    the names of the `test*` jobs whose log was read and holds no count."""
     counts = {"ran": 0, "failures": 0, "errors": 0, "skipped": 0}
     skips, found = [], False
     jobs = list(client.steps(run_id))
     idle = [str(job.get("name")) for job in jobs if job.get("result") == "skipped"]
     jobs = [job for job in jobs if job.get("result") != "skipped"]
     read, unread, unanswered = 0, [], False
+    quiet = []
     for job in jobs:
         try:
             lines = job_lines(bench, repo, client, run_id, job["id"])
@@ -3466,8 +3475,18 @@ def _run_counts(bench, repo, client, run_id, missing=None, facts=None):
                 break
             continue
         read += 1
-        tally_next = False
+        tally_next, before = False, counts["ran"] if found else None
         for line in lines:
+            kaocha = _KAOCHA.search(line)
+            if kaocha:
+                counts["ran"] += int(kaocha.group(1))
+                counts["assertions"] = counts.get("assertions", 0) + int(kaocha.group(2))
+                counts["failures"] += int(kaocha.group(4))
+                for number, name in _KAOCHA_PART.findall(kaocha.group(3)):
+                    counts["skipped" if name == "pending" else "errors"] += int(number)
+                # the line holds its own tally, so no tally line follows it
+                found, tally_next = True, False
+                continue
             ran = _RAN.search(line)
             if ran:
                 counts["ran"] += int(ran.group(1))
@@ -3490,8 +3509,13 @@ def _run_counts(bench, repo, client, run_id, missing=None, facts=None):
                 counts["failures"] += int(clojure.group(1))
                 counts["errors"] += int(clojure.group(2))
             tally_next = not (tally or clojure)
+        name = str(job.get("name"))
+        if name.startswith("test") and (counts["ran"] if found else None) == before:
+            quiet.append(name)
     if facts is not None:
         facts.update(skipped=idle, unread=len(jobs) - read)
+        if quiet:
+            facts["uncounted"] = quiet
     if not found:
         if idle and not jobs:
             why = "every job of the run was skipped, so no test ran"
@@ -3502,6 +3526,9 @@ def _run_counts(bench, repo, client, run_id, missing=None, facts=None):
         elif unread:
             why = "%s; %d of %d job logs were not read: %s" % (
                 NO_RAN_LINE, len(jobs) - read, len(jobs), unread[0])
+        elif quiet:
+            # a test job ran and its runner's count is in a shape the rig does not read
+            why = "%s ran and printed no count" % cut_line(", ".join(quiet), 200)
         else:
             why = NO_RAN_LINE
         if idle:
@@ -5009,9 +5036,11 @@ TOOL_SPECS = [
             "that is done also answers tests: {ran, failures, errors, skipped, skips: "
             "[{test, reason}]}, the counts the runner printed and the first 5 skips, with "
             "assertions when the runner printed them, or null with tests_missing, one sentence "
-            "that says why: no job log holds a 'Ran N tests' line, or no job log was read. "
+            "that says why: no job log holds a 'Ran N tests' line or kaocha's 'N tests, N "
+            "assertions' line, a test job ran and printed no count, or no job log was read. "
             "tests_ran says it plainly: true when a test ran, false when none did (a success "
-            "with tests_ran false is not a pass), null when a job log was not read. "
+            "with tests_ran false is not a pass), null when a job log was not read or a test "
+            "job printed no count. "
             "jobs_skipped names the jobs the run skipped; their logs are not asked for. "
             "The log reads end inside the call's 28 seconds. With "
             "pattern, a run that is done, green or red, also answers the lines of its job "

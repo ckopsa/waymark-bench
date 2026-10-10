@@ -368,12 +368,18 @@ A run that is done also answers `tests`: `{ran, failures, errors, skipped,
 skips: [{test, reason}]}`, the counts the runner printed in the job logs
 and the first 5 skips, so a green run says whether a `skipUnless` test
 ran. `tests` also holds `assertions` when the runner printed them, as
-clojure.test does. `tests` is `null` when no job log holds a `Ran N tests`
-line, and `tests_missing` then says why in one sentence: the run has no
+clojure.test does. The rig also reads kaocha's line, `171 tests, 983
+assertions, 1 errors, 0 failures.`, which ckopsa/waymark's test jobs print:
+its `pending` count is `skipped`. `tests` is `null` when no job log holds a
+`Ran N tests` line or kaocha's line, and `tests_missing` then says why in
+one sentence: the run has no
 job, no job log was read (with the forge's reason), or no log holds the
-line. `tests_ran` says it plainly: `true` when the runner counted one test
+line. When a job whose name starts with `test` ran and its log holds no
+count, `tests_missing` names it: `test-factory ran and printed no count`.
+`tests_ran` says it plainly: `true` when the runner counted one test
 or more, `false` when every job log was read and none holds the line or
-the count is zero, and `null` when a job log was not read. A `success`
+the count is zero, and `null` when a job log was not read or a `test*` job
+printed no count. A `success`
 with `tests_ran: false` ran no test and is not a pass. A job the run
 skipped has no log, so the rig does not ask for one: `jobs_skipped` names
 those jobs, and `tests_missing` names them too.
