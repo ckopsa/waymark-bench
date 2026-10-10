@@ -185,6 +185,40 @@ class TestTheTestTool(LandingCase):
         self.assertEqual(answer["tests"]["ran"], 12)
         self.assertNotIn("tests_missing", answer)
 
+    def factory_run(self, log):
+        """Serves a green run whose one job that ran is test-factory, with this log."""
+        head = self.make_test()
+        jobs = [{"id": 41, "name": "test-factory", "status": "completed", "conclusion": "success",
+                 "steps": []},
+                {"id": 42, "name": "test10", "status": "completed", "conclusion": "skipped",
+                 "steps": []}]
+        self.serve(head, "completed", "success", jobs)
+        self.answers["/actions/jobs/41/logs"] = ("GET", log)
+        self.ok("test", branch="work", select="waymark.core-test")
+        return self.ok("test_result", run_id=31)
+
+    def test_a_kaocha_summary_line_is_the_count(self):
+        stamp = "2026-10-10T10:00:01.0000000Z "
+        answer = self.factory_run(
+            stamp + "[(.....)(..)]\n"
+            + stamp + "\x1b[32m7 tests, 31 assertions, 0 failures.\x1b[m\n")
+        self.assertEqual(answer["tests"], {"ran": 7, "assertions": 31, "failures": 0, "errors": 0,
+                                           "skipped": 0, "skips": []})
+        self.assertIs(answer["tests_ran"], True)
+        self.assertNotIn("tests_missing", answer)
+
+    def test_a_kaocha_summary_line_gives_its_errors_and_pending(self):
+        answer = self.factory_run("171 tests, 983 assertions, 1 errors, 2 pending, 3 failures.\n")
+        self.assertEqual(answer["tests"], {"ran": 171, "assertions": 983, "failures": 3, "errors": 1,
+                                           "skipped": 2, "skips": []})
+
+    def test_a_test_job_that_printed_no_count_is_named(self):
+        answer = self.factory_run("clojure -M:test\nall done\n")
+        self.assertIsNone(answer["tests"])
+        self.assertIsNone(answer["tests_ran"])
+        self.assertEqual(answer["tests_missing"],
+                         "test-factory ran and printed no count; skipped jobs: test10")
+
     def skipped_beside(self, *jobs):
         """Gives these jobs and one skipped job, factory, that the forge has no log for."""
         return [{"id": job, "name": "unit%d" % job, "status": "completed",
