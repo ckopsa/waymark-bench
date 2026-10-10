@@ -1049,12 +1049,29 @@ class GitHub(Client):
         pending = [name for name in required_checks if states.get(name) != "success"]
         if pending:
             return {"state": "waiting", "pending": pending}
+        for _ in range(TRIES - 1):
+            if data.get("mergeable") is not None or data.get("mergeable_state") == "behind":
+                break
+            # GitHub judges a pull request again when its base moves, and the
+            # read that finds no judgment starts it: read again, so a green
+            # head that is only behind is `behind` and not `waiting`.
+            _sleep(RETRY_SECONDS)
+            data = self.request("GET", self.url("/pulls/%s" % number))
+            if (data.get("merged") or data.get("merged_at") or data.get("state") == "closed"
+                    or (data.get("head") or {}).get("sha") != head_sha
+                    or data.get("draft") or data.get("mergeable") is False):
+                return self.merge_when_green(number, head_sha, required_checks, method)
         if data.get("mergeable_state") == "behind":
             # Branch protection wants the branch up to date: update_branch first.
             return {"state": "behind",
                     "reason": "the branch is behind its base: update the branch first"}
         if data.get("mergeable") is None:
-            # GitHub has not yet computed whether it merges cleanly.
+            # GitHub has not yet computed whether it merges cleanly. A base
+            # that moved is what starts that computing, so a head that lacks
+            # commits of its base is behind, not waiting.
+            if self.behind_base(data):
+                return {"state": "behind",
+                        "reason": "the branch is behind its base: update the branch first"}
             return {"state": "waiting", "pending": [],
                     "reason": "github has not yet computed whether the pull request merges"}
         try:
@@ -1062,6 +1079,20 @@ class GitHub(Client):
         except ForgeError as exc:
             return {"refused": "merge_refused", "reason": str(exc)}
         return {"state": "merged", "sha": merged.get("sha")}
+
+    def behind_base(self, pr):
+        """True when the pull request's head lacks commits of its base branch,
+        by the compare. A compare GitHub refuses is not behind."""
+        base = (pr.get("base") or {}).get("ref")
+        head = (pr.get("head") or {}).get("sha")
+        if not base or not head:
+            return False
+        try:
+            data = self.request("GET", self.url("/compare/%s...%s" % (
+                urllib.parse.quote(base), head)))
+        except ForgeError:
+            return False
+        return (data.get("behind_by") or 0) > 0
 
     def update_branch(self, number, head_sha):
         """Merges the base into a pull request's branch; never a rebase, never
