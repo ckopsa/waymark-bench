@@ -68,7 +68,10 @@ findings with `pending: true`, `ok: null` and a `check_id`. Call `check`
 again with that `check_id` until it is not pending: the answer then
 carries `state` (`finished`, or `timed_out` when the step passed its
 `timeout`), `exit_code`, and the step's findings after the lint's. A
-repository with no check step answers in one call, as before.
+repository with no check step answers in one call, as before. The rig
+holds a pending step in memory only: after the bench server restarts,
+`check` with the old `check_id` refuses `unknown_check`, and its `reason`
+says the step was lost to a restart. Call `check` again with no `check_id`.
 
 CI runs on the house's runners only (`self-hosted`, `waymark`). `submit`
 refuses `hosted_runner`, and `check` gives a finding, when a change adds

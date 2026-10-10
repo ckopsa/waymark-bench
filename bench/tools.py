@@ -1611,7 +1611,11 @@ def check(bench, args):
         with bench._guard:
             entry = bench.checks.get(check_id)
         if entry is None or entry["repo"] != repo.name or entry["branch"] != branch:
+            # The steps are held in memory only, so a restart loses every one.
             raise Refusal("unknown_check", check_id=check_id, repo=repo.name, branch=branch,
+                          reason="the rig does not hold this check_id: its check step was "
+                                 "lost when the bench server restarted, or the id is of "
+                                 "another repository or branch",
                           remedy="call check with no check_id to start the check again")
         return check_answer(check_id, entry, wait)
     given = args.get("paths")
