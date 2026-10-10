@@ -838,6 +838,15 @@ class TestTrain(LandingCase):
         self.assertEqual((answer["state"], answer["number"]), ("waiting", 9))
         self.assertNotIn("landed", answer)
 
+    def test_land_waiting_says_whether_it_waits_on_checks_or_on_github(self):
+        base = self.base_head()
+        head = self.build([1])["head"]
+        self.train_pr(mergeable=None)
+        self.assertEqual(self.land(base, head)["waits_on"], "github")
+        self.train_pr()
+        self.merge_refusal = (405, '{"message":"Required status check \\"gate\\" is expected."}')
+        self.assertEqual(self.land(base, head)["waits_on"], "checks")
+
     def test_land_refuses_a_short_sha_as_input(self):
         base = self.base_head()
         head = self.build([1])["head"]

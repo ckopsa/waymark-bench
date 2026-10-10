@@ -286,7 +286,11 @@ a pull request again each time its base moves, and until it has, it says
 neither `behind` nor mergeable: with the checks green the rig then reads
 the pull request again, two times at most with 2 s between, before it
 answers. Only when GitHub still has no judgment is the answer `waiting`,
-with `pending` `[]` and a `reason`: no check is waited on.
+with `pending` `[]` and a `reason`: no check is waited on. Every
+`waiting` answer says what it waits on in `waits_on`: `checks` when a
+required check is missing or running, and `github` when the checks are
+green and GitHub has not judged the pull request. Read `waits_on`, never
+`reason`.
 
 `update_branch` brings such a branch up to date: give `number` and
 `head_sha` (the head the engine saw). GitHub merges the base into the
@@ -620,9 +624,11 @@ branch is refused `not_train`. None of them force-pushes a base.
   merge commits), or reuses the open one on a retry. It merges it at
   sha `head` with a merge commit, never squash or rebase, so each
   rider's commits stay reachable and GitHub marks each rider merged. It
-  answers `{landed: true, number, sha}`, or `{state: waiting, number,
-  pending}` while GitHub has not computed mergeability or a required
-  check is pending: ask again. A moved base is refused `base_moved` with
+  answers `{landed: true, number, sha}`, or `{state: waiting, waits_on,
+  number, pending}` while GitHub has not computed mergeability
+  (`waits_on` `github`) or a required check is pending (`waits_on`
+  `checks`): ask again. It does not read the pull request a second time
+  in one call, as `merge` does. A moved base is refused `base_moved` with
   the `base_head` it is at, before any pull request is opened, and so is
   GitHub's refusal that the base was modified: build the train again.
   Any other GitHub refusal is `merge_refused` with its words in

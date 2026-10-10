@@ -430,7 +430,7 @@ class Bitbucket(Client):
             return {"state": "red", "failed": failed}
         pending = [name for name in required_checks if states.get(name) != "SUCCESSFUL"]
         if pending:
-            return {"state": "waiting", "pending": pending}
+            return {"state": "waiting", "waits_on": "checks", "pending": pending}
         url = self.url("/pullrequests/%s/merge" % number)
         status, text = ask("POST", url, self.headers(), {
             "merge_strategy": BITBUCKET_STRATEGIES.get(method, "merge_commit"),
@@ -770,13 +770,15 @@ class GitHub(Client):
     def land_pull_request(self, number, sha):
         """Merges one pull request at sha with a merge commit, without reading
         its checks: branch protection judges them. Gives {state: merged, sha},
-        or {state: waiting, reason} while GitHub has not computed whether it
-        merges. GitHub's refusal raises ForgeError."""
+        or {state: waiting, waits_on: github, reason} while GitHub has not
+        computed whether it merges. It does not read a second time, as
+        merge_when_green does: it has no `behind` to tell from `waiting`, and
+        its caller asks again. GitHub's refusal raises ForgeError."""
         data = self.request("GET", self.url("/pulls/%s" % number))
         if data.get("merged") or data.get("merged_at"):
             return {"state": "merged", "sha": data.get("merge_commit_sha")}
         if data.get("mergeable") is None:
-            return {"state": "waiting",
+            return {"state": "waiting", "waits_on": "github",
                     "reason": "github has not yet computed whether the pull request merges"}
         return {"state": "merged", "sha": self.merge_pull_request(number, sha).get("sha")}
 
@@ -1022,8 +1024,11 @@ class GitHub(Client):
     def merge_when_green(self, number, head_sha, required_checks, method="merge"):
         """Merges one pull request when every required check is green on its
         head. Gives one answer: {state: merged|closed|waiting|red, ...} or
-        {refused, reason}. The merge names head_sha, so GitHub refuses it when
-        the head moved in between."""
+        {refused, reason}. A waiting answer names what it waits on in
+        waits_on: `checks` (a required check, named in pending) or `github`
+        (the checks are green and GitHub has not judged the pull request).
+        The merge names head_sha, so GitHub refuses it when the head moved in
+        between."""
         if not required_checks:
             return {"refused": "no_required_checks",
                     "reason": "the rig never merges a change nothing has tested"}
@@ -1048,7 +1053,7 @@ class GitHub(Client):
             return {"state": "red", "failed": failed}
         pending = [name for name in required_checks if states.get(name) != "success"]
         if pending:
-            return {"state": "waiting", "pending": pending}
+            return {"state": "waiting", "waits_on": "checks", "pending": pending}
         for _ in range(TRIES - 1):
             if data.get("mergeable") is not None or data.get("mergeable_state") == "behind":
                 break
@@ -1072,7 +1077,7 @@ class GitHub(Client):
             if self.behind_base(data):
                 return {"state": "behind",
                         "reason": "the branch is behind its base: update the branch first"}
-            return {"state": "waiting", "pending": [],
+            return {"state": "waiting", "waits_on": "github", "pending": [],
                     "reason": "github has not yet computed whether the pull request merges"}
         try:
             merged = self.merge_pull_request(number, head_sha, method)
