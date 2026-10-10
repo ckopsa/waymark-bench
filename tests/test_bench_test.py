@@ -185,6 +185,60 @@ class TestTheTestTool(LandingCase):
         self.assertEqual(answer["tests"]["ran"], 12)
         self.assertNotIn("tests_missing", answer)
 
+    def skipped_beside(self, *jobs):
+        """Gives these jobs and one skipped job, factory, that the forge has no log for."""
+        return [{"id": job, "name": "unit%d" % job, "status": "completed",
+                 "conclusion": "success", "steps": []} for job in jobs] + [
+            {"id": 42, "name": "factory", "status": "completed", "conclusion": "skipped",
+             "steps": []}]
+
+    def test_a_green_run_whose_tests_ran_says_so_and_names_the_skipped_job(self):
+        head = self.make_test()
+        self.serve(head, "completed", "success", self.skipped_beside(41))
+        self.ok("test", branch="work", select="waymark.core-test")
+        answer = self.ok("test_result", run_id=31)
+        self.assertEqual(answer["tests"]["ran"], 12)
+        self.assertIs(answer["tests_ran"], True)
+        self.assertEqual(answer["jobs_skipped"], ["factory"])
+        self.assertFalse([call for call in self.calls if "/jobs/42/logs" in str(call)])
+
+    def test_a_green_run_that_ran_no_test_says_so(self):
+        head = self.make_test()
+        self.serve(head, "completed", "success", self.skipped_beside(41))
+        self.answers["/actions/jobs/41/logs"] = ("GET", "lein test\nall done\n")
+        self.ok("test", branch="work", select="waymark.core-test")
+        answer = self.ok("test_result", run_id=31)
+        self.assertEqual(answer["conclusion"], "success")
+        self.assertIsNone(answer["tests"])
+        self.assertIs(answer["tests_ran"], False)
+        self.assertEqual(answer["tests_missing"],
+                         tools.NO_RAN_LINE + "; skipped jobs: factory")
+
+    def test_a_run_whose_jobs_were_all_skipped_ran_no_test(self):
+        head = self.make_test()
+        self.serve(head, "completed", "success", self.skipped_beside())
+        self.ok("test", branch="work", select="waymark.core-test")
+        answer = self.ok("test_result", run_id=31)
+        self.assertIs(answer["tests_ran"], False)
+        self.assertEqual(answer["tests_missing"], "every job of the run was skipped, so "
+                         "no test ran; skipped jobs: factory")
+
+    def test_a_log_that_was_not_read_leaves_tests_ran_unknown(self):
+        self.make_test()
+
+        class Client:
+            def steps(self, run_id):
+                return [{"id": 1, "name": "unit", "result": "success"},
+                        {"id": 2, "name": "idle", "result": "skipped"}]
+
+            def step_log(self, run_id, job_id):
+                raise tools.forge.ForgeError("no log: github has no /jobs/%s/logs" % job_id)
+
+        facts = {}
+        repo = self.bench.repo("demo")
+        self.assertIsNone(tools._run_counts(self.bench, repo, Client(), 33, [], facts))
+        self.assertEqual(facts, {"skipped": ["idle"], "unread": 1})
+
     def test_a_clojure_run_answers_its_assertions_and_an_unread_log_says_so(self):
         self.make_test()
         logs = {1: "Ran 12 tests containing 40 assertions.\n0 failures, 0 errors.\n"}

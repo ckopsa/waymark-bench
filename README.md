@@ -367,7 +367,13 @@ ran. `tests` also holds `assertions` when the runner printed them, as
 clojure.test does. `tests` is `null` when no job log holds a `Ran N tests`
 line, and `tests_missing` then says why in one sentence: the run has no
 job, no job log was read (with the forge's reason), or no log holds the
-line. The log reads have what is left of the call's 28 seconds, so a log
+line. `tests_ran` says it plainly: `true` when the runner counted one test
+or more, `false` when every job log was read and none holds the line or
+the count is zero, and `null` when a job log was not read. A `success`
+with `tests_ran: false` ran no test and is not a pass. A job the run
+skipped has no log, so the rig does not ask for one: `jobs_skipped` names
+those jobs, and `tests_missing` names them too.
+The log reads have what is left of the call's 28 seconds, so a log
 the forge is slow to give is a `tests_missing` that says to ask again,
 and never a call that the engine's gate gives up on.
 `test_result {run_id, pattern}` also answers the lines of the run's job
