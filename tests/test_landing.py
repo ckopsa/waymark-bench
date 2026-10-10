@@ -550,6 +550,60 @@ class TestHouseMerge(LandingCase):
         self.assertEqual(answer["state"], "behind")
         self.assertEqual(self.merges(), [])
 
+    def unjudged(self, then=None):
+        """A green head GitHub has not judged; after one pause it answers `then`."""
+        self.forge_with(pr=dict(OPEN_PR, mergeable=None, mergeable_state="unknown"),
+                        runs=check_runs(("tests", "completed", "success")))
+        self.slept = []
+
+        def sleep(seconds):
+            self.slept.append(seconds)
+            if then:
+                self.answers["/pulls/7"] = ("GET", then)
+        self.addCleanup(setattr, forge, "_sleep", forge._sleep)
+        forge._sleep = sleep
+
+    def test_a_green_head_github_has_not_judged_is_read_again_and_is_behind(self):
+        self.unjudged(then=dict(OPEN_PR, mergeable=None, mergeable_state="behind"))
+        answer = self.green()
+        self.assertEqual(answer["state"], "behind")
+        self.assertEqual(self.slept, [forge.RETRY_SECONDS])
+        self.assertEqual(self.merges(), [])
+
+    def test_a_green_head_github_judges_clean_on_the_second_read_is_merged(self):
+        self.unjudged(then=dict(OPEN_PR, mergeable_state="clean"))
+        self.assertEqual(self.green()["state"], "merged")
+        self.assertEqual(self.merges(), [{"sha": "abc123", "merge_method": "merge"}])
+
+    def test_a_head_that_moved_before_the_second_read_is_refused(self):
+        self.unjudged(then=dict(OPEN_PR, head={"ref": "work", "sha": "def456"}))
+        self.assertEqual(self.refusal()["refused"], "head_moved")
+
+    def test_a_green_head_github_never_judges_is_waiting_with_a_reason(self):
+        self.unjudged()
+        answer = self.green()
+        self.assertEqual((answer["state"], answer["pending"]), ("waiting", []))
+        self.assertIn("not yet computed", answer["reason"])
+        self.assertEqual(self.slept, [forge.RETRY_SECONDS] * (forge.TRIES - 1))
+        self.assertEqual(self.merges(), [])
+
+    def test_a_green_head_behind_its_base_is_behind_while_github_computes(self):
+        self.forge_with(pr=dict(OPEN_PR, mergeable=None, mergeable_state="unknown"),
+                        runs=check_runs(("tests", "completed", "success")))
+        self.answers["/compare/main...abc123"] = ("GET", {"behind_by": 2, "ahead_by": 1})
+        answer = self.green()
+        self.assertEqual(answer["state"], "behind")
+        self.assertEqual(self.merges(), [])
+
+    def test_a_green_current_head_waits_while_github_computes(self):
+        self.forge_with(pr=dict(OPEN_PR, mergeable=None, mergeable_state="unknown"),
+                        runs=check_runs(("tests", "completed", "success")))
+        self.answers["/compare/main...abc123"] = ("GET", {"behind_by": 0, "ahead_by": 1})
+        answer = self.green()
+        self.assertEqual(answer["state"], "waiting")
+        self.assertEqual(answer["pending"], [])
+        self.assertEqual(self.merges(), [])
+
     def update_branch(self, status, message):
         def answer(method, url, headers, body=None):
             self.calls.append((method, url.split("/repos/o/r", 1)[-1], body))

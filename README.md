@@ -278,7 +278,15 @@ in the merge so GitHub refuses a moved head. It refuses a moved head
 (`head_moved`), a draft, a conflict (`not_mergeable`) and an empty
 `required_checks`: the rig never merges a change nothing has tested.
 When the checks are green but GitHub says the branch is `behind` its
-base, `merge` answers `behind` and does not try the merge.
+base, `merge` answers `behind` and does not try the merge. While GitHub
+has not yet computed whether the pull request merges (a base that moved
+starts that), the rig asks the compare: a head that lacks commits of its
+base answers `behind`, and any other head answers `waiting`. GitHub judges
+a pull request again each time its base moves, and until it has, it says
+neither `behind` nor mergeable: with the checks green the rig then reads
+the pull request again, two times at most with 2 s between, before it
+answers. Only when GitHub still has no judgment is the answer `waiting`,
+with `pending` `[]` and a `reason`: no check is waited on.
 
 `update_branch` brings such a branch up to date: give `number` and
 `head_sha` (the head the engine saw). GitHub merges the base into the
