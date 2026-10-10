@@ -1785,6 +1785,16 @@ class TestCheck(BenchCase):
         answer = self.refused("check", branch="work", check_id="nope")
         self.assertEqual(answer["refused"], "unknown_check")
 
+    def test_a_check_id_lost_to_a_restart_says_to_check_again(self):
+        self.prepared()
+        with self.bench._guard:
+            self.bench.checks["lost"] = {"repo": "demo", "branch": "work"}
+            self.bench.checks.clear()
+        answer = self.refused("check", branch="work", check_id="lost")
+        self.assertEqual(answer["refused"], "unknown_check")
+        self.assertIn("restarted", answer["reason"])
+        self.assertEqual(answer["remedy"], "call check with no check_id to start the check again")
+
     ODD_LET = "(ns demo.core)\n\n(defn f []\n  (let [x] x))\n"
 
     def test_check_says_when_clj_kondo_is_not_installed(self):
