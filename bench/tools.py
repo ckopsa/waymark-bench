@@ -4080,13 +4080,13 @@ def train_land(bench, args):
             raise Refusal("base_moved", repo=repo.name, base=base, base_head=now,
                           number=answer.get("number"), reason=said[:400])
         if "required status check" in said.lower() and answer.get("number"):
-            return dict(answer, state="waiting", pending=_train_pending(client, head),
-                        reason=said[:400])
+            return dict(answer, state="waiting", waits_on="checks",
+                        pending=_train_pending(client, head), reason=said[:400])
         raise Refusal("merge_refused", repo=repo.name, base=base,
                       number=answer.get("number"), reason=said[:400])
     if landed.get("state") == "waiting":
-        return dict(answer, state="waiting", pending=_train_pending(client, head),
-                    reason=landed.get("reason"))
+        return dict(answer, state="waiting", waits_on=landed.get("waits_on"),
+                    pending=_train_pending(client, head), reason=landed.get("reason"))
     return dict(answer, landed=True, sha=landed.get("sha"))
 
 
@@ -4748,8 +4748,11 @@ TOOL_SPECS = [
             "merged - the pull request is merged, now or before, e.g. "
             "{\"state\": \"merged\", \"sha\": \"9f1c...\"}; "
             "closed - it was closed without a merge, e.g. {\"state\": \"closed\"}; "
-            "waiting - a required check is missing or still running (or GitHub has not yet "
-            "computed mergeability), e.g. {\"state\": \"waiting\", \"pending\": [\"tests\"]}; "
+            "waiting - with waits_on, which says on what: checks - a required check is "
+            "missing or still running, e.g. {\"state\": \"waiting\", \"waits_on\": "
+            "\"checks\", \"pending\": [\"tests\"]}; github - every check is green and GitHub "
+            "has not yet computed mergeability, e.g. {\"state\": \"waiting\", \"waits_on\": "
+            "\"github\", \"pending\": [], \"reason\": \"...\"}; "
             "red - a required check failed, e.g. {\"state\": \"red\", \"failed\": [\"tests\"]}; "
             "a refusal - nothing was merged, e.g. {\"refused\": \"head_moved\", \"reason\": "
             "\"the head is b2..., not a1...: something was pushed since\"}. The refusals are "
@@ -5210,8 +5213,9 @@ TOOL_SPECS = [
             "reuses) a pull request from the train branch into the base, titled 'Merge train: "
             "#a #b', and merges it at sha head with a merge commit (never squash or rebase), "
             "so branch protection stays on and GitHub shows each rider merged. Answers "
-            "{landed: true, number, sha}, or {state: waiting, number, pending} while GitHub "
-            "has not computed mergeability or a required check is pending: ask again later. "
+            "{landed: true, number, sha}, or {state: waiting, waits_on, number, pending} while "
+            "GitHub has not computed mergeability (waits_on github) or a required check is "
+            "pending (waits_on checks): ask again later. "
             "The refusals are base_moved (the base is not at expect_base_head, or GitHub says "
             "the base was modified, with base_head: build the train again), merge_refused "
             "(any other GitHub refusal, with its words in reason), head_moved, "

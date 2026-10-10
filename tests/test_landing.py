@@ -604,6 +604,14 @@ class TestHouseMerge(LandingCase):
         self.assertEqual(answer["pending"], [])
         self.assertEqual(self.merges(), [])
 
+    def test_waiting_says_whether_it_waits_on_checks_or_on_github(self):
+        self.forge_with(runs=check_runs(("tests", "in_progress", None)))
+        answer = self.green()
+        self.assertEqual((answer["state"], answer["waits_on"]), ("waiting", "checks"))
+        self.unjudged()
+        answer = self.green()
+        self.assertEqual((answer["state"], answer["waits_on"]), ("waiting", "github"))
+
     def update_branch(self, status, message):
         def answer(method, url, headers, body=None):
             self.calls.append((method, url.split("/repos/o/r", 1)[-1], body))
