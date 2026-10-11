@@ -1435,6 +1435,8 @@ NODE_MODULE = re.compile(r"\b(import|export|modules?)\b")
 CHECK_MARK = "✗"
 CHECK_KIND = re.compile(r"\[([^\]]+)\]\s*")
 CHECK_FIELD = re.compile(r"(\S+?):(?:\s+|$)")
+CHECK_WARNING = re.compile(r"\busability warning\s+\[([^\]]+)\]\s*")
+CEILING_CHECK_WARNINGS = 100
 
 
 def check_command_findings(result):
@@ -1465,13 +1467,37 @@ def check_command_findings(result):
     return findings
 
 
+def check_command_warnings(result):
+    """Gives the `usability warning [check] ...` lines of the check step's
+    output as {warnings, warning_counts}: each warning is {kind, field,
+    sentence}, where kind is its [check] and field the word before its colon,
+    when it has one. warning_counts counts every line by its check; warnings
+    holds the first hundred. A warning is not a finding and does not fail the check."""
+    warnings, counts = [], {}
+    for line in result["output"].splitlines():
+        match = CHECK_WARNING.search(line)
+        if not match:
+            continue
+        kind, text, field = match.group(1), line[match.end():].strip(), None
+        counts[kind] = counts.get(kind, 0) + 1
+        if len(warnings) >= CEILING_CHECK_WARNINGS:
+            continue
+        match = CHECK_FIELD.match(text)
+        if match:
+            field, text = match.group(1), text[match.end():]
+        warnings.append({"kind": kind, "field": field, "sentence": text.strip(),
+                         "message": line.strip()})
+    return {"warnings": warnings, "warning_counts": counts}
+
+
 def step_timed_out(result):
     """True when run_step killed the step at its timeout."""
     return result["exit_code"] == -1 and "(killed after " in result["output"][-200:]
 
 
 def check_step_findings(repo, branch, worktree, step):
-    """Runs the repository's check step. Gives {findings, exit_code, timed_out}.
+    """Runs the repository's check step. Gives {findings, exit_code, timed_out}
+    and, when the command ran, its {warnings, warning_counts}.
     Its prepare command runs first, when it has one, and the command gets what
     is left of the one timeout. A failed prepare is one finding that carries
     the tail of its output, and the command does not run."""
@@ -1489,8 +1515,9 @@ def check_step_findings(repo, branch, worktree, step):
         budget = max(1, budget - int(time.monotonic() - started))
     command = config_module.StageConfig(step.name, step.command, timeout=budget)
     result = run_step(repo, branch, worktree, command)
-    return {"findings": check_command_findings(result), "exit_code": result["exit_code"],
-            "timed_out": step_timed_out(result)}
+    return dict(check_command_warnings(result),
+                findings=check_command_findings(result), exit_code=result["exit_code"],
+                timed_out=step_timed_out(result))
 
 
 CHECK_WAIT = 5
@@ -1540,7 +1567,9 @@ def check_answer(check_id, entry, wait):
     result = entry["result"]
     findings = list(answer["findings"]) + result["findings"]
     answer.update(pending=False, state="timed_out" if result["timed_out"] else "finished",
-                  exit_code=result["exit_code"], ok=not findings, findings=findings)
+                  exit_code=result["exit_code"], ok=not findings, findings=findings,
+                  warnings=result.get("warnings", []),
+                  warning_counts=result.get("warning_counts", {}))
     return answer
 
 
@@ -4420,7 +4449,9 @@ TOOL_SPECS = [
             "seconds: a step that has not ended answers pending: true, ok: null and a check_id. "
             "Call check again with that check_id until it is not pending; the finished answer "
             "carries state (finished, or timed_out past the step's timeout), exit_code and "
-            "the step's findings. It never writes."
+            "the step's findings. It also carries warnings, one {kind, field, sentence} for "
+            "each `usability warning [check] ...` line the step printed, and warning_counts, "
+            "the count of those lines by check; a warning does not change ok. It never writes."
         ),
         "schema": {
             "type": "object",

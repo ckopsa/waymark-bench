@@ -59,7 +59,12 @@ finding that carries the tail of its output, and `command` does not run. Each ou
 that opens with `✗` is one finding, `{kind, field, sentence}`: `kind` is
 its `[tag]` and `field` the word before its colon, when the line has
 them. A command that exits non-zero with no `✗` line is one finding that
-carries the tail of its output.
+carries the tail of its output. Each output line that holds
+`usability warning [check] ...` is one entry of `warnings`,
+`{kind, field, sentence}`: `kind` is its `[check]` and `field` the word
+before its colon, when the line has one. `warning_counts` counts those
+lines by check; `warnings` holds the first hundred. A warning is not a
+finding, and it does not change `ok`.
 
 The check step runs in the background, so a slow one does not pass the
 engine's 30 s limit on a call. `check` waits for it up to `wait` seconds
