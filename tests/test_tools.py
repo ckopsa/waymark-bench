@@ -1751,6 +1751,25 @@ class TestCheck(BenchCase):
         answer = self.ok("check", branch="work")
         self.assertTrue(answer["ok"], answer)
         self.assertEqual(answer["findings"], [])
+        self.assertEqual((answer["warnings"], answer["warning_counts"]), ([], {}))
+
+    def test_the_check_step_gives_its_usability_warnings_and_stays_ok(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "check.out"),
+                   "waymark10 usability warning [owned-surface] ticket: has no owner view\n"
+                   "  waymark10 usability warning [owned-surface] seat: has no owner view\n"
+                   "waymark10 usability warning [no-summary] every kind is named\n"
+                   "all kinds assemble\n")
+        self.config.repo("demo").check = config_module.check_from_dict(
+            "demo", {"command": "cat check.out"})
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["findings"], [])
+        self.assertEqual([(w["kind"], w["field"], w["sentence"]) for w in answer["warnings"]],
+                         [("owned-surface", "ticket", "has no owner view"),
+                          ("owned-surface", "seat", "has no owner view"),
+                          ("no-summary", None, "every kind is named")])
+        self.assertEqual(answer["warning_counts"], {"owned-surface": 2, "no-summary": 1})
 
     def test_a_slow_check_step_answers_pending_then_finished(self):
         self.prepared()
