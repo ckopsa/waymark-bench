@@ -1273,11 +1273,11 @@ class TestPullRequestAndFeedback(LandingCase):
     WORKFLOW = ("jobs:\n  unit:\n    steps: []\n  lint:\n    steps: []\n"
                 "  gate:\n    needs: [unit, lint]\n    if: always()\n    steps: []\n")
 
-    def gated_run(self, head, jobs):
+    def gated_run(self, head, jobs, workflow=None):
         """Answers one failed run on head: these jobs, and a gate job that needs them."""
         self.one_run(head, jobs + [self.GATE])
         self.answers["/contents/.github/workflows/tests.yml"] = ("GET", {
-            "content": base64.b64encode(self.WORKFLOW.encode()).decode()})
+            "content": base64.b64encode((workflow or self.WORKFLOW).encode()).decode()})
         self.answers["/actions/runs/11"] = ("GET", {
             "id": 11, "head_sha": head, "path": ".github/workflows/tests.yml"})
 
@@ -1297,6 +1297,25 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual(answer["refused"], "red")
         self.assertEqual(answer["jobs"], ["unit", "gate"])
         self.assertEqual(self.reruns(), [])
+
+    def test_rerun_starts_a_gate_over_a_cancelled_job_of_a_reusable_workflow(self):
+        head = self.submitted()
+        self.gated_run(head, [
+            {"id": 21, "name": "suites / unit", "status": "completed", "conclusion": "success", "steps": []},
+            {"id": 22, "name": "suites / lint", "status": "completed", "conclusion": "cancelled", "steps": []}],
+            workflow=("jobs:\n  suites:\n    uses: ./.github/workflows/suites.yml\n"
+                      "  gate:\n    needs: suites\n    if: always()\n    steps: []\n"))
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["runs"][0]["jobs"], ["suites / lint", "gate"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_rerun_starts_a_gate_over_a_gate_that_github_lists_first(self):
+        head = self.submitted()
+        self.gated_run(head, [dict(self.GATE, id=24, name="all")] + self.CUT_JOBS,
+                       workflow=self.WORKFLOW + "  all:\n    needs: gate\n    if: always()\n    steps: []\n")
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["runs"][0]["jobs"], ["all", "lint", "gate"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
 
     def test_feedback_names_the_cancellation_of_a_run_red_only_by_cancelled_suites(self):
         self.submitted()

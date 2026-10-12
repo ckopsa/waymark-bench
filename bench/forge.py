@@ -622,30 +622,40 @@ def workflow_needs(text):
     return found
 
 
-def job_named(job_name, name):
+def job_named(job_name, name, called=False):
     """Tells if a run's job is the workflow's job of this name. A matrix job
-    carries its values after the name, or in the place of an expression."""
+    carries its values after the name, or in the place of an expression. With
+    called, a job of the reusable workflow this job calls is it too: GitHub
+    names that one `caller / job`."""
     if "${{" in name:
         return job_name.startswith(name.split("${{")[0])
-    return job_name == name or job_name.startswith(name + " (")
+    if job_name == name or job_name.startswith(name + " ("):
+        return True
+    return called and job_name.startswith(name + " / ")
 
 
 def mark_aggregates(steps, needs):
     """Marks interrupted each failed job that only gathers the others: every
     job it needs is success, skipped or interrupted, and one is interrupted.
-    No test of its own failed, so its red is the runner's too."""
-    for step in steps:
-        if step.get("result") != "failure" or step.get("interrupted"):
-            continue
-        wanted = [need for name, listed in needs.items()
-                  if job_named(step.get("name") or "", name) for need in listed]
-        needed = [s for s in steps
-                  if s is not step and any(job_named(s.get("name") or "", need) for need in wanted)]
-        if (any(s.get("interrupted") for s in needed)
-                and all(s.get("interrupted") or s.get("result") in ("success", "skipped")
-                        for s in needed)):
-            step["interrupted"] = True
-            step["aggregate"] = True
+    No test of its own failed, so its red is the runner's too. A job it needs
+    can be one that gathers, in any order, so it runs until nothing changes."""
+    changed = True
+    while changed:
+        changed = False
+        for step in steps:
+            if step.get("result") != "failure" or step.get("interrupted"):
+                continue
+            wanted = [need for name, listed in needs.items()
+                      if job_named(step.get("name") or "", name) for need in listed]
+            needed = [s for s in steps
+                      if s is not step and any(job_named(s.get("name") or "", need, called=True)
+                                               for need in wanted)]
+            if (any(s.get("interrupted") for s in needed)
+                    and all(s.get("interrupted") or s.get("result") in ("success", "skipped")
+                            for s in needed)):
+                step["interrupted"] = True
+                step["aggregate"] = True
+                changed = True
     return steps
 
 
