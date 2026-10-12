@@ -47,6 +47,9 @@ CEILING_TEST_WAIT = 28
 TEST_POLL_SECONDS = 5
 # The window of test_result's lookups is never shorter: a wait of 0 still reads the run.
 TEST_LOOKUP_FLOOR = 5
+# a run not done this long after the forge made it is refused test_overdue: a
+# selection takes minutes, and a seat that asks past half an hour learns nothing new
+TEST_RUN_CEILING = 1800
 # test looks for the run it started about fifteen seconds: 8 reads, 2 s apart.
 TEST_FIND_TRIES = 8
 TEST_FIND_SECONDS = 2
@@ -3406,7 +3409,20 @@ def test_result(bench, args):
                                                     run.get("commit"))}
         start = _stamp_seconds(run.get("created"))
         if run.get("state") != "completed":
-            answer.update(conclusion="pending", elapsed_s=_age(start))
+            elapsed = _age(start)
+            answer.update(conclusion="pending", status=run.get("state") or "unknown",
+                          elapsed_s=elapsed)
+            # the jobs read has what is left of the call, and a second at least
+            with forge.within(max(1, started + CEILING_TEST_WAIT - _clock())):
+                answer.update(_run_going(client, run["id"]))
+            if elapsed is not None and elapsed > TEST_RUN_CEILING:
+                raise Refusal("test_overdue", ceiling_s=TEST_RUN_CEILING,
+                              reason="the run is %s %d s after the forge made it, past the "
+                                     "ceiling of %d s" % (answer["status"], elapsed,
+                                                          TEST_RUN_CEILING),
+                              remedy="stop asking: submit, and say in the sentence that the "
+                                     "test run did not end, with its run_url; the pull "
+                                     "request's checks run the tests", **answer)
             return answer
         end = _stamp_seconds(run.get("completed"))
         answer["conclusion"] = run.get("result") or "unknown"
@@ -3763,6 +3779,29 @@ def _failed_step_lines(lines):
             start = index + 1
             break
     return lines[start:end + 1][-LOG_STEP_LINES:]
+
+
+def _run_going(client, run_id):
+    """Gives what a run that is not done waits on: jobs counts its jobs by status,
+    and waiting_on names the job that has run longest, or the first queued one
+    when none runs. A jobs read the forge refuses gives nothing: the run's own
+    status stands."""
+    try:
+        jobs = client.steps(run_id)
+    except forge.ForgeError:
+        return {}
+    counts = {}
+    for job in jobs:
+        state = job.get("state") or "unknown"
+        counts[state] = counts.get(state, 0) + 1
+    going = sorted((job for job in jobs if job.get("state") != "completed"),
+                   key=lambda job: (job.get("state") != "in_progress", job.get("started") or "~"))
+    if not going:
+        return {"jobs": counts} if counts else {}
+    slow = going[0]
+    return {"jobs": counts,
+            "waiting_on": {"job": slow.get("name"), "status": slow.get("state") or "unknown",
+                           "elapsed_s": _age(_stamp_seconds(slow.get("started")))}}
 
 
 def _wait_for_run(client, run_id, wait):
@@ -5065,8 +5104,12 @@ TOOL_SPECS = [
             "Reads one run that test started, every 5 s for up to wait_seconds (default 25, "
             "at most 28), and answers {conclusion: success or cancelled, run_url, duration_s}, "
             "{conclusion: failure, run_url, duration_s, failures: [{test, job, lines}]} or "
-            "{conclusion: pending, run_url, elapsed_s}. It never dispatches: ask again while "
-            "it answers pending. When the forge does not answer inside the wait, it answers "
+            "{conclusion: pending, run_url, elapsed_s, status, jobs, waiting_on}. status is the "
+            "run's own (queued, in_progress), jobs counts its jobs by status, and waiting_on: "
+            "{job, status, elapsed_s} names the job that has run longest, or the first queued "
+            "one. It never dispatches: ask again while it answers pending. A run not done 1800 s "
+            "after the forge made it refuses test_overdue with the same fields and a remedy: "
+            "stop asking and submit. When the forge does not answer inside the wait, it answers "
             "pending with a note, not a refusal. It deletes the scratch ref when the run is done. A run "
             "that is done also answers tests: {ran, failures, errors, skipped, skips: "
             "[{test, reason}]}, the counts the runner printed and the first 5 skips, with "
@@ -5081,7 +5124,7 @@ TOOL_SPECS = [
             "pattern, a run that is done, green or red, also answers the lines of its job "
             "logs the regex matches: {matches: [{job, line, text}], count, truncated}; ask "
             "again with another pattern at any time. The refusals are no_test_workflow, "
-            "input and forge."
+            "input, test_overdue and forge."
         ),
         "schema": {
             "type": "object",

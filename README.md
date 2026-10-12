@@ -374,6 +374,15 @@ pull request) and answers `head` (the scratch commit),
 up to `wait_seconds` (25 by default, the setting `BENCH_TEST_WAIT`; 28 at
 most) and answers `success`, `cancelled`, `failure` with
 `failures: [{test, job, lines}]` (4 KB in all), or `pending`: ask again.
+A `pending` answer also says what the run waits on: `status` is the run's
+own (`queued`, `in_progress`), `jobs` counts its jobs by status, and
+`waiting_on: {job, status, elapsed_s}` names the job that has run longest,
+or the first queued one when none runs. A run that is not done 1800
+seconds after the forge made it refuses `test_overdue`, with the same
+fields, `ceiling_s` and a remedy: stop asking, submit, and name the run in
+the sentence. The rig sends the selection as the workflow's one input and
+starts no job itself: which jobs a selection runs is the workflow's own
+`if:` on that input, in the repository that holds the workflow.
 A run that is done also answers `tests`: `{ran, failures, errors, skipped,
 skips: [{test, reason}]}`, the counts the runner printed in the job logs
 and the first 5 skips, so a green run says whether a `skipUnless` test
