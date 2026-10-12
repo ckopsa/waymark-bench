@@ -505,6 +505,52 @@ class TestTheTestTool(LandingCase):
         self.assertEqual(self.ok("test_result", run_id=31)["conclusion"], "pending")
         self.assertEqual(self.slept, [5, 5])
 
+    def test_a_run_still_going_says_its_status_and_the_job_it_waits_on(self):
+        head = self.make_test()
+        self.serve(head, "in_progress", jobs=[
+            {"id": 41, "name": "changes", "status": "completed", "conclusion": "success",
+             "started_at": "2026-10-12T15:32:00Z", "steps": []},
+            {"id": 42, "name": "ui-access", "status": "in_progress",
+             "started_at": "2026-10-12T15:40:00Z", "steps": []},
+            {"id": 43, "name": "test-waymark", "status": "in_progress",
+             "started_at": "2026-10-12T15:36:00Z", "steps": []},
+            {"id": 44, "name": "ui-guided", "status": "queued", "steps": []}])
+        self.ok("test", branch="work", select="waymark.core-test")
+        answer = self.ok("test_result", run_id=31, wait_seconds=0)
+        self.assertEqual(answer["conclusion"], "pending")
+        self.assertEqual(answer["status"], "in_progress")
+        self.assertEqual(answer["jobs"], {"completed": 1, "in_progress": 2, "queued": 1})
+        self.assertEqual(answer["waiting_on"]["job"], "test-waymark")
+        self.assertEqual(answer["waiting_on"]["status"], "in_progress")
+        self.assertGreater(answer["waiting_on"]["elapsed_s"], 0)
+
+    def test_a_queued_run_names_the_job_that_waits_for_a_runner(self):
+        head = self.make_test()
+        self.serve(head, "queued", jobs=[
+            {"id": 44, "name": "tests", "status": "queued", "steps": []}])
+        self.ok("test", branch="work", select="waymark.core-test")
+        answer = self.ok("test_result", run_id=31, wait_seconds=0)
+        self.assertEqual(answer["conclusion"], "pending")
+        self.assertEqual(answer["status"], "queued")
+        self.assertEqual(answer["waiting_on"],
+                         {"job": "tests", "status": "queued", "elapsed_s": None})
+
+    def test_a_run_not_done_past_the_ceiling_refuses_with_a_remedy(self):
+        head = self.make_test()
+        self.serve(head, "in_progress", jobs=[
+            {"id": 44, "name": "ui-access", "status": "queued", "steps": []}])
+        self.ok("test", branch="work", select="waymark.core-test")
+        self.run["created_at"] = "2020-01-01T00:00:00Z"
+        refused = self.refused("test_result", run_id=31, wait_seconds=0)
+        self.assertEqual(refused["refused"], "test_overdue")
+        self.assertEqual(refused["status"], "in_progress")
+        self.assertEqual(refused["run_id"], 31)
+        self.assertEqual(refused["ceiling_s"], tools.TEST_RUN_CEILING)
+        self.assertEqual(refused["waiting_on"],
+                         {"job": "ui-access", "status": "queued", "elapsed_s": None})
+        self.assertIn("submit", refused["remedy"])
+        self.assertNotEqual(self.scratch(), "")
+
     def test_a_second_test_refuses_while_the_first_run_is_going(self):
         head = self.make_test()
         self.serve(head, "in_progress")

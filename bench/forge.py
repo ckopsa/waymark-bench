@@ -935,6 +935,7 @@ class GitHub(Client):
                 "state": (job.get("status") or "").lower(),
                 "result": (job.get("conclusion") or "").lower(),
                 "seconds": None, "failed_steps": failed,
+                "started": job.get("started_at"),
                 "interrupted": job_interrupted(job),
             })
         # a red job beside an interrupted one may only gather it: the workflow file tells
