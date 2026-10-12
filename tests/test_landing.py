@@ -1309,6 +1309,38 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual(answer["runs"][0]["jobs"], ["suites / lint", "gate"])
         self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
 
+    SUITES = ("jobs:\n  unit:\n    steps: []\n  lint:\n    steps: []\n"
+              "  gate:\n    needs: [unit, lint]\n    if: always()\n    steps: []\n")
+
+    def called_gate_run(self, head, unit):
+        """Answers one failed run on head whose gate is a job of the reusable workflow it calls."""
+        self.one_run(head, [
+            {"id": 21, "name": "suites / unit", "status": "completed", "conclusion": unit,
+             "steps": [{"name": "Run tests", "conclusion": unit}]},
+            {"id": 22, "name": "suites / lint", "status": "completed", "conclusion": "cancelled", "steps": []},
+            dict(self.GATE, name="suites / gate")])
+        self.answers["/contents/.github/workflows/tests.yml"] = ("GET", {"content": base64.b64encode(
+            b"jobs:\n  suites:\n    uses: ./.github/workflows/suites.yml\n").decode()})
+        self.answers["/contents/.github/workflows/suites.yml"] = ("GET", {
+            "content": base64.b64encode(self.SUITES.encode()).decode()})
+        self.answers["/actions/runs/11"] = ("GET", {
+            "id": 11, "head_sha": head, "path": ".github/workflows/tests.yml"})
+
+    def test_rerun_starts_a_gate_inside_a_reusable_workflow_over_a_cancelled_sibling(self):
+        head = self.submitted()
+        self.called_gate_run(head, "success")
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["runs"][0]["jobs"], ["suites / lint", "suites / gate"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_rerun_refuses_a_red_test_inside_a_reusable_workflow_beside_its_gate(self):
+        head = self.submitted()
+        self.called_gate_run(head, "failure")
+        answer = self.refused("rerun", branch="work")
+        self.assertEqual(answer["refused"], "red")
+        self.assertEqual(answer["jobs"], ["suites / unit", "suites / gate"])
+        self.assertEqual(self.reruns(), [])
+
     def test_rerun_starts_a_gate_over_a_gate_that_github_lists_first(self):
         head = self.submitted()
         self.gated_run(head, [dict(self.GATE, id=24, name="all")] + self.CUT_JOBS,

@@ -622,6 +622,25 @@ def workflow_needs(text):
     return found
 
 
+def workflow_calls(text):
+    """Gives {job name: path} of each job of a workflow file's text that calls
+    a reusable workflow of its own repository, `uses: ./.github/workflows/x.yml`."""
+    try:
+        import yaml
+        data = yaml.safe_load(text)
+    except Exception:
+        return {}
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    if not isinstance(jobs, dict):
+        return {}
+    found = {}
+    for key, job in jobs.items():
+        uses = job.get("uses") if isinstance(job, dict) else None
+        if isinstance(uses, str) and uses.startswith("./.github/workflows/"):
+            found[str(job.get("name") or key)] = uses[2:].split("@")[0]
+    return found
+
+
 def job_named(job_name, name, called=False):
     """Tells if a run's job is the workflow's job of this name. A matrix job
     carries its values after the name, or in the place of an expression. With
@@ -926,19 +945,33 @@ class GitHub(Client):
 
     def needs_of_run(self, run_id):
         """Gives the needs of each job of a run's workflow file, as
-        workflow_needs gives them, or {} when the file cannot be read."""
+        workflow_needs gives them, or {} when the file cannot be read. A job
+        that calls a reusable workflow of the repository adds that file's
+        needs, both sides named `caller / job` as GitHub names them."""
         try:
             run = self.request("GET", self.url("/actions/runs/%s" % run_id))
-            path = (run.get("path") or "").split("@")[0]
-            if not path.startswith(".github/workflows/") or not run.get("head_sha"):
-                return {}
-            data = self.request("GET", self.url("/contents/" + urllib.parse.quote(path),
-                                                ref=run["head_sha"]))
-            if not isinstance(data, dict):
-                return {}
-            return workflow_needs(base64.b64decode(data.get("content") or "").decode("utf-8", "replace"))
         except (ForgeError, ValueError):
             return {}
+        path = (run.get("path") or "").split("@")[0]
+        head = run.get("head_sha")
+        if not path.startswith(".github/workflows/") or not head:
+            return {}
+        text = self.workflow_text(path, head)
+        found = workflow_needs(text)
+        for caller, called in workflow_calls(text).items():
+            for name, listed in workflow_needs(self.workflow_text(called, head)).items():
+                found["%s / %s" % (caller, name)] = ["%s / %s" % (caller, need) for need in listed]
+        return found
+
+    def workflow_text(self, path, ref):
+        """Gives the text of one workflow file at ref, or "" when it cannot be read."""
+        try:
+            data = self.request("GET", self.url("/contents/" + urllib.parse.quote(path), ref=ref))
+            if not isinstance(data, dict):
+                return ""
+            return base64.b64decode(data.get("content") or "").decode("utf-8", "replace")
+        except (ForgeError, ValueError):
+            return ""
 
     def rerun_failed_jobs(self, run_id):
         """Starts the failed and cancelled jobs of one workflow run again."""
