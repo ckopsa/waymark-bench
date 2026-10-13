@@ -505,6 +505,23 @@ class TestHouseMerge(LandingCase):
         self.assertEqual(answer["failed"], ["tests"])
         self.assertEqual(self.merges(), [])
 
+    def test_a_skipped_or_neutral_check_run_is_green_and_merges(self):
+        for conclusion in ("skipped", "neutral"):
+            self.calls[:] = []
+            self.forge_with(runs=check_runs(("tests", "completed", "success"),
+                                            ("ansible", "completed", conclusion)))
+            answer = self.green(required_checks=["tests", "ansible"])
+            self.assertEqual(answer["state"], "merged", conclusion)
+            self.assertEqual(self.merges(), [{"sha": "abc123", "merge_method": "merge"}])
+
+    def test_an_interrupted_check_run_is_still_red(self):
+        for conclusion in ("cancelled", "timed_out", "action_required", "stale"):
+            self.forge_with(runs=check_runs(("tests", "completed", conclusion)))
+            answer = self.green()
+            self.assertEqual(answer["state"], "red", conclusion)
+            self.assertEqual(answer["failed"], ["tests"])
+            self.assertEqual(self.merges(), [])
+
     def test_a_failed_commit_status_is_red(self):
         self.forge_with(runs=check_runs(("tests", "completed", "success")),
                         statuses=[{"context": "gate", "state": "failure"}])
