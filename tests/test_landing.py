@@ -1312,13 +1312,14 @@ class TestPullRequestAndFeedback(LandingCase):
     SUITES = ("jobs:\n  unit:\n    steps: []\n  lint:\n    steps: []\n"
               "  gate:\n    needs: [unit, lint]\n    if: always()\n    steps: []\n")
 
-    def called_gate_run(self, head, unit):
-        """Answers one failed run on head whose gate is a job of the reusable workflow it calls."""
+    def called_gate_run(self, head, unit, leg="", lint="cancelled", more=()):
+        """Answers one failed run on head whose gate is a job of the reusable workflow it calls.
+        With leg, the caller is a matrix job, and GitHub names its jobs `suites (x) / job`."""
         self.one_run(head, [
-            {"id": 21, "name": "suites / unit", "status": "completed", "conclusion": unit,
+            {"id": 21, "name": "suites%s / unit" % leg, "status": "completed", "conclusion": unit,
              "steps": [{"name": "Run tests", "conclusion": unit}]},
-            {"id": 22, "name": "suites / lint", "status": "completed", "conclusion": "cancelled", "steps": []},
-            dict(self.GATE, name="suites / gate")])
+            {"id": 22, "name": "suites%s / lint" % leg, "status": "completed", "conclusion": lint, "steps": []},
+            dict(self.GATE, name="suites%s / gate" % leg)] + list(more))
         self.answers["/contents/.github/workflows/tests.yml"] = ("GET", {"content": base64.b64encode(
             b"jobs:\n  suites:\n    uses: ./.github/workflows/suites.yml\n").decode()})
         self.answers["/contents/.github/workflows/suites.yml"] = ("GET", {
@@ -1339,6 +1340,22 @@ class TestPullRequestAndFeedback(LandingCase):
         answer = self.refused("rerun", branch="work")
         self.assertEqual(answer["refused"], "red")
         self.assertEqual(answer["jobs"], ["suites / unit", "suites / gate"])
+        self.assertEqual(self.reruns(), [])
+
+    def test_rerun_starts_a_gate_inside_a_reusable_workflow_whose_caller_is_a_matrix_job(self):
+        head = self.submitted()
+        self.called_gate_run(head, "success", leg=" (x)")
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["runs"][0]["jobs"], ["suites (x) / lint", "suites (x) / gate"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_rerun_refuses_a_matrix_leg_gate_red_beside_a_cancelled_job_of_another_leg(self):
+        head = self.submitted()
+        self.called_gate_run(head, "success", leg=" (x)", lint="success", more=[
+            {"id": 25, "name": "suites (y) / lint", "status": "completed", "conclusion": "cancelled", "steps": []}])
+        answer = self.refused("rerun", branch="work")
+        self.assertEqual(answer["refused"], "red")
+        self.assertEqual(answer["jobs"], ["suites (x) / gate"])
         self.assertEqual(self.reruns(), [])
 
     def test_rerun_starts_a_gate_over_a_gate_that_github_lists_first(self):
