@@ -1778,10 +1778,35 @@ class TestCheck(BenchCase):
         first = self.ok("check", branch="work", wait=0)
         self.assertTrue(first["pending"], first)
         self.assertIsNone(first["ok"])
+        self.assertRegex(first["started_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertGreaterEqual(first["running_seconds"], 0)
         answer = self.ok("check", branch="work", check_id=first["check_id"], wait=20)
         self.assertFalse(answer["pending"], answer)
         self.assertEqual((answer["state"], answer["exit_code"]), ("finished", 1))
         self.assertEqual([f["kind"] for f in answer["findings"]], ["slow"])
+        self.assertNotIn("started_at", answer)
+
+    def test_a_change_of_markdown_files_only_does_not_start_the_check_step(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/spec-seat.md"), "# the seat\n")
+        self.config.repo("demo").check = config_module.check_from_dict(
+            "demo", {"command": "sleep 30; exit 1"})
+        answer = self.ok("check", branch="work", wait=0)
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["skipped"], ["docs/spec-seat.md"])
+        self.assertEqual(answer["findings"], [])
+        self.assertNotIn("check_id", answer)
+        self.assertNotIn("pending", answer)
+
+    def test_a_markdown_path_does_not_stop_the_step_when_another_file_changed(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/spec-seat.md"), "# the seat\n")
+        util.write(os.path.join(path, "check.out"), self.CHECK_OUTPUT)
+        self.config.repo("demo").check = config_module.check_from_dict(
+            "demo", {"command": "cat check.out; exit 1"})
+        answer = self.ok("check", branch="work", paths=["docs/spec-seat.md"])
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(len(answer["findings"]), 2)
 
     def test_a_check_step_past_its_timeout_answers_timed_out(self):
         self.prepared()

@@ -1559,12 +1559,17 @@ def start_check_step(bench, repo, branch, worktree, lint):
 
 def check_answer(check_id, entry, wait):
     """Waits up to `wait` seconds for a check step. Gives the lint answer with
-    check_id and pending; when the step ended, its state (finished or
+    check_id and pending, and for a pending step started_at and
+    running_seconds; when the step ended, its state (finished or
     timed_out), its exit code and its findings after the lint's."""
     entry["done"].wait(wait)
     answer = dict(entry["lint"], check_id=check_id)
     if not entry["done"].is_set():
+        # started_at and running_seconds let a caller tell a slow step from a stuck one.
         answer.update(pending=True, state="pending", ok=None,
+                      started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                               time.gmtime(entry["started"])),
+                      running_seconds=int(time.time() - entry["started"]),
                       remedy="call check again with this check_id until it is not pending")
         return answer
     result = entry["result"]
@@ -1632,7 +1637,8 @@ def check(bench, args):
     """Lints the files a change touched: Clojure forms, Python compiles, shell parses,
     .js and .mjs parse,
     .github YAML parses, no workflow line it touched gives runs-on a GitHub-hosted
-    runner. Then it starts the repository's check step, when it has one,
+    runner. Then it starts the repository's check step, when it has one and
+    the branch changed a file that is not Markdown,
     and waits for it a while: a step that has not ended answers pending with a
     check_id, and check with that check_id answers it later. It never writes."""
     repo = bench.repo(args.get("repo"))
@@ -1730,6 +1736,10 @@ def check(bench, args):
                     findings.extend(kondo_errors(program, worktree, clojure))
                 except (OSError, ValueError, subprocess.SubprocessError) as exc:
                     unavailable.append("clj-kondo did not answer: %s" % exc)
+        # The step checks the whole worktree, so the paths of the call do not
+        # decide it: every file the branch changed does.
+        changed = ([rel for _, rel in places] if not given
+                   else changed_paths(bench, repo, branch, worktree))
     answer = {
         "repo": repo.name,
         "branch": branch,
@@ -1740,6 +1750,10 @@ def check(bench, args):
         "hosted_runs_on": hosted,
     }
     if repo.check is None:
+        return answer
+    if changed and all(rel.endswith(".md") for rel in changed):
+        # A Markdown file is not an input of the step. A file the lint skips
+        # can be one, so skipped alone does not stop the step.
         return answer
     check_id, entry = start_check_step(bench, repo, branch, worktree, answer)
     return check_answer(check_id, entry, wait)
@@ -4485,7 +4499,9 @@ TOOL_SPECS = [
             "files are listed as skipped. The answer "
             "is ok, the findings with path, line, col and message, skipped and unavailable. "
             "When the repository has a check step, check starts it and waits up to `wait` "
-            "seconds: a step that has not ended answers pending: true, ok: null and a check_id. "
+            "seconds: a step that has not ended answers pending: true, ok: null, a check_id, "
+            "started_at and running_seconds. A branch whose changed files are all Markdown "
+            "(*.md) does not start the step: it answers the lint in one call. "
             "Call check again with that check_id until it is not pending; the finished answer "
             "carries state (finished, or timed_out past the step's timeout), exit_code and "
             "the step's findings. It also carries warnings, one {kind, field, sentence} for "

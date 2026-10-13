@@ -69,11 +69,17 @@ finding, and it does not change `ok`.
 The check step runs in the background, so a slow one does not pass the
 engine's 30 s limit on a call. `check` waits for it up to `wait` seconds
 (5 by default, 20 at most). A step that has not ended answers the lint's
-findings with `pending: true`, `ok: null` and a `check_id`. Call `check`
+findings with `pending: true`, `ok: null`, a `check_id`, `started_at` (when
+the step started, UTC) and `running_seconds`, so a caller can tell a slow
+step from a stuck one. Call `check`
 again with that `check_id` until it is not pending: the answer then
 carries `state` (`finished`, or `timed_out` when the step passed its
 `timeout`), `exit_code`, and the step's findings after the lint's. A
-repository with no check step answers in one call, as before. The rig
+repository with no check step answers in one call, as before. So does a
+branch whose changed files are all Markdown (`*.md`): the step is not
+started, and the answer is the lint's, `ok: true` with the files in
+`skipped`. A file the lint skips that is not Markdown still starts the
+step, because the step can read it. The rig
 holds a pending step in memory only: after the bench server restarts,
 `check` with the old `check_id` refuses `unknown_check`, and its `reason`
 says the step was lost to a restart. Call `check` again with no `check_id`.
