@@ -653,6 +653,34 @@ def job_named(job_name, name, called=False):
     return called and job_name.startswith(name + " / ")
 
 
+def matrix_leg(job_name, name):
+    """Gives the caller's name in a run's job, `caller (a, b)`, when the job is
+    the `caller / job` of this name in one leg of the caller's matrix, or None."""
+    caller, slash, job = name.partition(" / ")
+    if not slash or not job_name.startswith(caller + " ("):
+        return None
+    end = job_name.find(") / ", len(caller))
+    if end < 0 or not job_named(job_name[end + 4:], job):
+        return None
+    return job_name[:end + 1]
+
+
+def needs_of_job(job_name, needs):
+    """Gives the names of the jobs a run's job needs. A `caller / job` whose
+    caller is a matrix job needs the jobs of its own leg only."""
+    wanted = []
+    for name, listed in needs.items():
+        if job_named(job_name, name):
+            wanted.extend(listed)
+            continue
+        leg = matrix_leg(job_name, name)
+        if leg:
+            caller = name.partition(" / ")[0]
+            wanted.extend(leg + need[len(caller):] if need.startswith(caller + " / ") else need
+                          for need in listed)
+    return wanted
+
+
 def mark_aggregates(steps, needs):
     """Marks interrupted each failed job that only gathers the others: every
     job it needs is success, skipped or interrupted, and one is interrupted.
@@ -664,8 +692,7 @@ def mark_aggregates(steps, needs):
         for step in steps:
             if step.get("result") != "failure" or step.get("interrupted"):
                 continue
-            wanted = [need for name, listed in needs.items()
-                      if job_named(step.get("name") or "", name) for need in listed]
+            wanted = needs_of_job(step.get("name") or "", needs)
             needed = [s for s in steps
                       if s is not step and any(job_named(s.get("name") or "", need, called=True)
                                                for need in wanted)]
