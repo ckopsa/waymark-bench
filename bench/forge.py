@@ -1058,7 +1058,9 @@ class GitHub(Client):
     def check_states(self, sha):
         """Gives {name: success | failure | pending} for the check runs AND the
         commit statuses on one commit. A check run that has not completed is
-        pending; one that completed with anything but success is a failure. A
+        pending; one that completed success, skipped or neutral is a success,
+        as GitHub counts it for a required check, and any other conclusion is
+        a failure. A
         name with several check runs (a job that ran again, or the jobs of
         every Actions run on the commit) takes its newest run: one that has
         not completed, else the latest completed_at, then the highest id. A
@@ -1084,7 +1086,8 @@ class GitHub(Client):
                 put(item.get("name"), "pending")
             else:
                 put(item.get("name"),
-                    "success" if item.get("conclusion") == "success" else "failure")
+                    "success" if item.get("conclusion") in ("success", "skipped", "neutral")
+                    else "failure")
         combined = self.request("GET", self.url("/commits/%s/status" % sha, per_page=100))
         for item in combined.get("statuses") or []:
             state = item.get("state")
