@@ -18,6 +18,7 @@ import base64
 import contextlib
 import datetime
 import json
+import os
 import re
 import socket
 import subprocess
@@ -45,6 +46,74 @@ RETRY_SECONDS = 2
 
 # The tests replace it.
 _sleep = time.sleep
+
+# The build-state table is the factory kit's (bench/kit/SOURCE names the
+# commit): change it there and vendor it again, never here.
+KIT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kit")
+with open(os.path.join(KIT, "build-states.json"), encoding="utf-8") as _handle:
+    BUILD_STATES = json.load(_handle)
+# check_states spells green and red as it always did.
+_STATE_WORDS = {"green": "success", "red": "failure"}
+
+
+def build_state(forge, raw):
+    """Gives the kit's verdict (green, red, pending or interrupted) of one raw
+    build state of a forge, or None for a state the table does not hold."""
+    table = BUILD_STATES["forges"][forge]
+    for verdict in BUILD_STATES["verdicts"]:
+        if raw in table.get(verdict, ()):
+            return verdict
+    return None
+
+
+def check_state(forge, check):
+    """Gives the kit's verdict of one check as its forge answers it. A GitHub
+    check run that has not completed is pending, and a completed one is read
+    by its conclusion; a Bitbucket status is read by its state. A state the
+    table does not hold is red on GitHub and pending on Bitbucket, as the rig
+    read it before the table."""
+    if forge == "github":
+        if check.get("status") != "completed":
+            return "pending"
+        return build_state(forge, check.get("conclusion")) or "red"
+    return build_state(forge, (check.get("state") or "").upper()) or "pending"
+
+
+def head_verdict(states, required, advisory=()):
+    """Gives the kit's verdict of one head from its check_states: None while
+    a required check is pending or has no run, else {verdict: red, names},
+    {verdict: interrupted, names} or {verdict: green}. A red check beside an
+    interrupted one is red. An advisory check counts only when it is red: a
+    pending or missing one does not hold."""
+    if any(states.get(name, "pending") == "pending" for name in required):
+        return None
+    red = [name for name in list(required) + list(advisory) if states.get(name) == "failure"]
+    if red:
+        return {"verdict": "red", "names": red}
+    stopped = [name for name in required if states.get(name) == "interrupted"]
+    if stopped:
+        return {"verdict": "interrupted", "names": stopped}
+    return {"verdict": "green"}
+
+
+def held_answer(states, required):
+    """Gives the merge's answer while the required checks are not green:
+    waiting, red or interrupted. None when they are green."""
+    verdict = head_verdict(states, required)
+    if verdict is None:
+        return {"state": "waiting", "waits_on": "checks",
+                "pending": [name for name in required
+                            if states.get(name, "pending") == "pending"]}
+    if verdict["verdict"] == "red":
+        return {"state": "red", "failed": verdict["names"]}
+    if verdict["verdict"] == "interrupted":
+        return {"state": "interrupted", "interrupted": verdict["names"]}
+    return None
+
+
+def behind(behind_by):
+    """True when a head lacks this many commits of its base, and it is not 0."""
+    return (behind_by or 0) > 0
 
 
 class ForgeError(Exception):
@@ -403,6 +472,22 @@ class Bitbucket(Client):
     def enable_auto_merge(self, pr):
         raise ForgeError("bitbucket does not enable auto-merge on a pull request")
 
+    def check_states(self, sha):
+        """Gives {key: success | failure | pending | interrupted} for the commit
+        statuses on one commit, by the kit's table: STOPPED is interrupted,
+        not red. A key with several statuses takes the highest id, then the
+        last one."""
+        newest = {}
+        for item in self.all_values("/commit/%s/statuses" % sha):
+            key = item.get("key")
+            if key not in newest or (item.get("id") or 0) >= (newest[key].get("id") or 0):
+                newest[key] = item
+        states = {}
+        for key, item in newest.items():
+            verdict = check_state(self.provider, item)
+            states[key] = _STATE_WORDS.get(verdict, verdict)
+        return states
+
     def merge_when_green(self, number, head_sha, required_checks, method="merge"):
         """Merges one pull request when every required status is green on its
         head, in the answers of the GitHub path. A required name is the `key`
@@ -422,15 +507,9 @@ class Bitbucket(Client):
             return {"refused": "head_moved", "head": head,
                     "reason": "the head is %s, not %s: something was pushed since" % (
                         head, head_sha)}
-        states = {}
-        for item in self.all_values("/commit/%s/statuses" % head_sha):
-            states[item.get("key")] = (item.get("state") or "").upper()
-        failed = [name for name in required_checks if states.get(name) in ("FAILED", "STOPPED")]
-        if failed:
-            return {"state": "red", "failed": failed}
-        pending = [name for name in required_checks if states.get(name) != "SUCCESSFUL"]
-        if pending:
-            return {"state": "waiting", "waits_on": "checks", "pending": pending}
+        held = held_answer(self.check_states(head_sha), required_checks)
+        if held:
+            return held
         url = self.url("/pullrequests/%s/merge" % number)
         status, text = ask("POST", url, self.headers(), {
             "merge_strategy": BITBUCKET_STRATEGIES.get(method, "merge_commit"),
@@ -1056,16 +1135,17 @@ class GitHub(Client):
         return found
 
     def check_states(self, sha):
-        """Gives {name: success | failure | pending} for the check runs AND the
-        commit statuses on one commit. A check run that has not completed is
-        pending; one that completed success, skipped or neutral is a success,
-        as GitHub counts it for a required check, and any other conclusion is
-        a failure. A
+        """Gives {name: success | failure | pending | interrupted} for the
+        check runs AND the commit statuses on one commit. A check run that
+        has not completed is pending; a completed one is read by the kit's
+        table (check_state): success, skipped or neutral is a success,
+        cancelled, stale or action_required is interrupted, and any other
+        conclusion is a failure. A
         name with several check runs (a job that ran again, or the jobs of
         every Actions run on the commit) takes its newest run: one that has
         not completed, else the latest completed_at, then the highest id. A
         name that is both a check run and a status takes the worse of the two."""
-        rank = {"success": 0, "pending": 1, "failure": 2}
+        rank = {"success": 0, "pending": 1, "interrupted": 2, "failure": 3}
         states = {}
 
         def put(name, state):
@@ -1082,12 +1162,8 @@ class GitHub(Client):
             if name not in newest or age(item) >= age(newest[name]):
                 newest[name] = item
         for item in newest.values():
-            if item.get("status") != "completed":
-                put(item.get("name"), "pending")
-            else:
-                put(item.get("name"),
-                    "success" if item.get("conclusion") in ("success", "skipped", "neutral")
-                    else "failure")
+            verdict = check_state(self.provider, item)
+            put(item.get("name"), _STATE_WORDS.get(verdict, verdict))
         combined = self.request("GET", self.url("/commits/%s/status" % sha, per_page=100))
         for item in combined.get("statuses") or []:
             state = item.get("state")
@@ -1097,7 +1173,7 @@ class GitHub(Client):
 
     def merge_when_green(self, number, head_sha, required_checks, method="merge"):
         """Merges one pull request when every required check is green on its
-        head. Gives one answer: {state: merged|closed|waiting|red, ...} or
+        head. Gives one answer: {state: merged|closed|waiting|red|interrupted, ...} or
         {refused, reason}. A waiting answer names what it waits on in
         waits_on: `checks` (a required check, named in pending) or `github`
         (the checks are green and GitHub has not judged the pull request).
@@ -1121,13 +1197,9 @@ class GitHub(Client):
         if data.get("mergeable") is False:
             return {"refused": "not_mergeable",
                     "reason": "github says the pull request is not mergeable (a conflict)"}
-        states = self.check_states(head_sha)
-        failed = [name for name in required_checks if states.get(name) == "failure"]
-        if failed:
-            return {"state": "red", "failed": failed}
-        pending = [name for name in required_checks if states.get(name) != "success"]
-        if pending:
-            return {"state": "waiting", "waits_on": "checks", "pending": pending}
+        held = held_answer(self.check_states(head_sha), required_checks)
+        if held:
+            return held
         for _ in range(TRIES - 1):
             if data.get("mergeable") is not None or data.get("mergeable_state") == "behind":
                 break
@@ -1171,7 +1243,7 @@ class GitHub(Client):
                 urllib.parse.quote(base), head)))
         except ForgeError:
             return False
-        return (data.get("behind_by") or 0) > 0
+        return behind(data.get("behind_by"))
 
     def update_branch(self, number, head_sha):
         """Merges the base into a pull request's branch; never a rebase, never

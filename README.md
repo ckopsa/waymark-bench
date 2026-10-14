@@ -286,11 +286,21 @@ the forge for auto-merge; the house merges with the `merge` tool
 instead. Give `number`, `head_sha` and `required_checks` (and `method`:
 `merge`, `squash` or `rebase`). The rig reads the check runs and the
 commit statuses on `head_sha` and answers `waiting` (a required check is
-missing or running), `red` (one failed), `closed`, or `merged` - it
+missing or running), `red` (one failed), `interrupted` (none failed, and
+one was cancelled or stopped before it judged the change: run it again),
+`closed`, or `merged` - it
 merges only when every required check is success, and names `head_sha`
 in the merge so GitHub refuses a moved head. It refuses a moved head
 (`head_moved`), a draft, a conflict (`not_mergeable`) and an empty
 `required_checks`: the rig never merges a change nothing has tested.
+The rig reads each build state by one table, `bench/kit/build-states.json`,
+for GitHub (a check run's `conclusion`) and for Bitbucket (a status's
+`state`): a Bitbucket `STOPPED` build is `interrupted`, not `red`. While a
+required check is pending the answer is `waiting`, also beside a red one.
+The table and its cases, `bench/kit/forge-conformance.json`, are the
+factory kit's: `bench/kit/SOURCE` names the commit they come from, and
+`tests/test_kit.py` runs every case against both forges. Do not change
+them here; change them in the kit and vendor them again.
 When the checks are green but GitHub says the branch is `behind` its
 base, `merge` answers `behind` and does not try the merge. While GitHub
 has not yet computed whether the pull request merges (a base that moved
