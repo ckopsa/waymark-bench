@@ -1,0 +1,17 @@
+{
+  "verdicts": ["green", "red", "pending", "interrupted"],
+  "forges": {
+    "github": {
+      "green": ["success", "neutral", "skipped"],
+      "red": ["failure", "timed_out"],
+      "pending": ["queued", "in_progress"],
+      "interrupted": ["cancelled", "stale", "action_required"]
+    },
+    "bitbucket": {
+      "green": ["SUCCESSFUL"],
+      "red": ["FAILED"],
+      "pending": ["INPROGRESS"],
+      "interrupted": ["STOPPED"]
+    }
+  }
+}

@@ -514,12 +514,20 @@ class TestHouseMerge(LandingCase):
             self.assertEqual(answer["state"], "merged", conclusion)
             self.assertEqual(self.merges(), [{"sha": "abc123", "merge_method": "merge"}])
 
-    def test_an_interrupted_check_run_is_still_red(self):
-        for conclusion in ("cancelled", "timed_out", "action_required", "stale"):
+    def test_a_timed_out_check_run_is_red(self):
+        self.forge_with(runs=check_runs(("tests", "completed", "timed_out")))
+        answer = self.green()
+        self.assertEqual(answer["state"], "red")
+        self.assertEqual(answer["failed"], ["tests"])
+        self.assertEqual(self.merges(), [])
+
+    def test_an_interrupted_check_run_is_interrupted_and_not_merged(self):
+        # the kit's build-state table (bench/kit): these three are not red
+        for conclusion in ("cancelled", "action_required", "stale"):
             self.forge_with(runs=check_runs(("tests", "completed", conclusion)))
             answer = self.green()
-            self.assertEqual(answer["state"], "red", conclusion)
-            self.assertEqual(answer["failed"], ["tests"])
+            self.assertEqual(answer["state"], "interrupted", conclusion)
+            self.assertEqual(answer["interrupted"], ["tests"])
             self.assertEqual(self.merges(), [])
 
     def test_a_failed_commit_status_is_red(self):
@@ -820,11 +828,17 @@ class TestBitbucketMerge(BitbucketCase):
         self.assertEqual(answer["pending"], ["bench/test", "bench/setup"])
         self.assertEqual(self.merges(), [])
 
-    def test_a_failed_or_stopped_status_is_red(self):
+    def test_a_failed_status_is_red_and_a_stopped_one_is_interrupted(self):
+        # the kit's build-state table (bench/kit): STOPPED is interrupted, not red
         self.forge_with(statuses=bitbucket_statuses(("bench/test", "FAILED"), ("lint", "STOPPED")))
         answer = self.green(required_checks=["bench/test", "lint"])
         self.assertEqual(answer["state"], "red")
-        self.assertEqual(answer["failed"], ["bench/test", "lint"])
+        self.assertEqual(answer["failed"], ["bench/test"])
+        self.assertEqual(self.merges(), [])
+        self.forge_with(statuses=bitbucket_statuses(("bench/test", "SUCCESSFUL"), ("lint", "STOPPED")))
+        answer = self.green(required_checks=["bench/test", "lint"])
+        self.assertEqual(answer["state"], "interrupted")
+        self.assertEqual(answer["interrupted"], ["lint"])
         self.assertEqual(self.merges(), [])
 
     def test_a_moved_head_is_refused(self):

@@ -1,0 +1,4 @@
+build-states.json and forge-conformance.json are the factory kit's.
+Source: ckopsa/waymark, commit 944181fac2abc4360d4a4a42ccb68c30b7326ce5,
+path factorykit/resources/. Vendored 2026-10-14, exactly as written there.
+Do not edit them here: change them in the kit, and vendor them again.
