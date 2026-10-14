@@ -96,10 +96,11 @@ def head_verdict(states, required, advisory=()):
     return {"verdict": "green"}
 
 
-def held_answer(states, required):
+def held_answer(states, required, advisory=()):
     """Gives the merge's answer while the required checks are not green:
-    waiting, red or interrupted. None when they are green."""
-    verdict = head_verdict(states, required)
+    waiting, red or interrupted. None when they are green. A red advisory
+    check is red; a pending or missing one changes nothing."""
+    verdict = head_verdict(states, required, advisory or ())
     if verdict is None:
         return {"state": "waiting", "waits_on": "checks",
                 "pending": [name for name in required
@@ -488,11 +489,12 @@ class Bitbucket(Client):
             states[key] = _STATE_WORDS.get(verdict, verdict)
         return states
 
-    def merge_when_green(self, number, head_sha, required_checks, method="merge"):
+    def merge_when_green(self, number, head_sha, required_checks, method="merge",
+                         advisory_checks=()):
         """Merges one pull request when every required status is green on its
         head, in the answers of the GitHub path. A required name is the `key`
         of a commit status; Bitbucket's source hash is short, so the head
-        matches head_sha by a prefix."""
+        matches head_sha by a prefix. A red advisory status holds the merge."""
         if not required_checks:
             return {"refused": "no_required_checks",
                     "reason": "the rig never merges a change nothing has tested"}
@@ -507,7 +509,7 @@ class Bitbucket(Client):
             return {"refused": "head_moved", "head": head,
                     "reason": "the head is %s, not %s: something was pushed since" % (
                         head, head_sha)}
-        held = held_answer(self.check_states(head_sha), required_checks)
+        held = held_answer(self.check_states(head_sha), required_checks, advisory_checks)
         if held:
             return held
         url = self.url("/pullrequests/%s/merge" % number)
@@ -1171,9 +1173,10 @@ class GitHub(Client):
                 state, "failure"))
         return states
 
-    def merge_when_green(self, number, head_sha, required_checks, method="merge"):
+    def merge_when_green(self, number, head_sha, required_checks, method="merge",
+                         advisory_checks=()):
         """Merges one pull request when every required check is green on its
-        head. Gives one answer: {state: merged|closed|waiting|red|interrupted, ...} or
+        head and no advisory check is red. Gives one answer: {state: merged|closed|waiting|red|interrupted, ...} or
         {refused, reason}. A waiting answer names what it waits on in
         waits_on: `checks` (a required check, named in pending) or `github`
         (the checks are green and GitHub has not judged the pull request).
@@ -1197,7 +1200,7 @@ class GitHub(Client):
         if data.get("mergeable") is False:
             return {"refused": "not_mergeable",
                     "reason": "github says the pull request is not mergeable (a conflict)"}
-        held = held_answer(self.check_states(head_sha), required_checks)
+        held = held_answer(self.check_states(head_sha), required_checks, advisory_checks)
         if held:
             return held
         for _ in range(TRIES - 1):
@@ -1211,7 +1214,8 @@ class GitHub(Client):
             if (data.get("merged") or data.get("merged_at") or data.get("state") == "closed"
                     or (data.get("head") or {}).get("sha") != head_sha
                     or data.get("draft") or data.get("mergeable") is False):
-                return self.merge_when_green(number, head_sha, required_checks, method)
+                return self.merge_when_green(number, head_sha, required_checks, method,
+                                             advisory_checks)
         if data.get("mergeable_state") == "behind":
             # Branch protection wants the branch up to date: update_branch first.
             return {"state": "behind",
