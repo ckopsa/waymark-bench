@@ -505,6 +505,29 @@ class TestHouseMerge(LandingCase):
         self.assertEqual(answer["failed"], ["tests"])
         self.assertEqual(self.merges(), [])
 
+    def test_a_failed_advisory_check_is_red(self):
+        self.forge_with(runs=check_runs(("tests", "completed", "success"),
+                                        ("wiz", "completed", "failure")))
+        answer = self.green(advisory_checks=["wiz"])
+        self.assertEqual(answer["state"], "red")
+        self.assertEqual(answer["failed"], ["wiz"])
+        self.assertEqual(self.merges(), [])
+
+    def test_a_pending_or_missing_advisory_check_merges(self):
+        for runs in (check_runs(("tests", "completed", "success"), ("wiz", "in_progress", None)),
+                     check_runs(("tests", "completed", "success"))):
+            self.calls[:] = []
+            self.forge_with(runs=runs)
+            answer = self.green(advisory_checks=["wiz"])
+            self.assertEqual(answer["state"], "merged")
+            self.assertEqual(self.merges(), [{"sha": "abc123", "merge_method": "merge"}])
+
+    def test_advisory_checks_that_are_not_a_list_of_names_are_refused(self):
+        self.forge_with()
+        answer = self.refusal(advisory_checks="wiz")
+        self.assertEqual(answer["refused"], "input")
+        self.assertEqual(answer["field"], "advisory_checks")
+
     def test_a_skipped_or_neutral_check_run_is_green_and_merges(self):
         for conclusion in ("skipped", "neutral"):
             self.calls[:] = []
@@ -840,6 +863,22 @@ class TestBitbucketMerge(BitbucketCase):
         self.assertEqual(answer["state"], "interrupted")
         self.assertEqual(answer["interrupted"], ["lint"])
         self.assertEqual(self.merges(), [])
+
+    def test_a_failed_advisory_status_is_red(self):
+        self.forge_with(statuses=bitbucket_statuses(("bench/test", "SUCCESSFUL"), ("wiz", "FAILED")))
+        answer = self.green(advisory_checks=["wiz"])
+        self.assertEqual(answer["state"], "red")
+        self.assertEqual(answer["failed"], ["wiz"])
+        self.assertEqual(self.merges(), [])
+
+    def test_a_pending_or_missing_advisory_status_merges(self):
+        for statuses in (bitbucket_statuses(("bench/test", "SUCCESSFUL"), ("wiz", "INPROGRESS")),
+                         bitbucket_statuses(("bench/test", "SUCCESSFUL"))):
+            self.calls[:] = []
+            self.forge_with(statuses=statuses)
+            answer = self.green(advisory_checks=["wiz"])
+            self.assertEqual(answer["state"], "merged")
+            self.assertEqual(len(self.merges()), 1)
 
     def test_a_moved_head_is_refused(self):
         self.forge_with(pr=dict(BITBUCKET_PR, source={"commit": {"hash": "fff000"}}),

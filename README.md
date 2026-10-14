@@ -293,6 +293,9 @@ merges only when every required check is success, and names `head_sha`
 in the merge so GitHub refuses a moved head. It refuses a moved head
 (`head_moved`), a draft, a conflict (`not_mergeable`) and an empty
 `required_checks`: the rig never merges a change nothing has tested.
+`advisory_checks` is optional: a list of check names that hold the merge
+only when they failed. A red advisory check answers `red` with its name in
+`failed`; a pending or missing one changes nothing.
 The rig reads each build state by one table, `bench/kit/build-states.json`,
 for GitHub (a check run's `conclusion`) and for Bitbucket (a status's
 `state`): a Bitbucket `STOPPED` build is `interrupted`, not `red`. While a
