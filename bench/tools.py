@@ -3029,11 +3029,19 @@ def merge(bench, args):
     if not required:
         raise Refusal("no_required_checks",
                       reason="the rig never merges a change nothing has tested")
+    advisory = args.get("advisory_checks")
+    if advisory is None:
+        advisory = []
+    if not isinstance(advisory, list) or not all(
+            isinstance(name, str) and name for name in advisory):
+        raise Refusal("input", field="advisory_checks",
+                      reason="a list of check names is necessary")
     method = _text(args, "method", default="merge")
     if method not in MERGE_METHODS:
         raise Refusal("input", field="method", reason="use merge, squash or rebase")
     try:
-        answer = forge.client(repo).merge_when_green(number, head_sha, required, method)
+        answer = forge.client(repo).merge_when_green(number, head_sha, required, method,
+                                                     advisory)
     except forge.ForgeError as exc:
         raise Refusal("forge", reason=git.scrub(str(exc)))
     if answer.get("refused"):
@@ -4888,7 +4896,9 @@ TOOL_SPECS = [
             "\"checks\", \"pending\": [\"tests\"]}; github - every check is green and GitHub "
             "has not yet computed mergeability, e.g. {\"state\": \"waiting\", \"waits_on\": "
             "\"github\", \"pending\": [], \"reason\": \"...\"}; "
-            "red - a required check failed, e.g. {\"state\": \"red\", \"failed\": [\"tests\"]}; "
+            "red - a required check failed, e.g. {\"state\": \"red\", \"failed\": [\"tests\"]}, "
+            "or a check named in advisory_checks failed: an advisory check holds the merge "
+            "only when it is red, and a pending or missing one changes nothing; "
             "a refusal - nothing was merged, e.g. {\"refused\": \"head_moved\", \"reason\": "
             "\"the head is b2..., not a1...: something was pushed since\"}. The refusals are "
             "head_moved, draft, not_mergeable (a conflict), no_required_checks (the list is "
@@ -4916,6 +4926,12 @@ TOOL_SPECS = [
                                                    "status contexts that must be success, "
                                                    "e.g. [\"tests\"]. An empty list is "
                                                    "refused."},
+                "advisory_checks": {"type": "array", "items": {"type": "string"},
+                                    "description": "Optional. The names of checks that "
+                                                   "hold the merge only when they failed, "
+                                                   "e.g. [\"wiz\"]: a red one answers red, "
+                                                   "a pending or missing one changes "
+                                                   "nothing."},
                 "method": {"type": "string", "enum": list(MERGE_METHODS),
                            "description": "The merge method. The default is merge."},
                 "seat": _SEAT,
