@@ -728,9 +728,17 @@ def run_step(repo, branch, path, step):
 
 
 def status(bench, args):
-    """Gives the state of a worktree. No fetch."""
+    """Gives the state of a worktree. No fetch.
+
+    With wait, a running landing is waited for up to that many seconds
+    first, so a seat follows a landing in a few calls rather than polling
+    it every second; the answer comes back as soon as the landing ends."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
+    wait = _int(args, "wait", 0, 0, CEILING_STATUS_WAIT)
+    pending = bench.landings.get(repo, branch)
+    if wait and pending is not None and pending.running:
+        pending.wait(wait)
     with bench.lock(repo.name):
         path = bench.worktree(repo, branch)
         bare = bench.bare_dir(repo.name)
@@ -1451,6 +1459,7 @@ def check_step_findings(repo, branch, worktree, step):
 
 CHECK_WAIT = 5
 CEILING_CHECK_WAIT = 20
+CEILING_STATUS_WAIT = 25
 CHECK_KEEP = 3600
 
 
@@ -4093,11 +4102,23 @@ TOOL_SPECS = [
             "Gives the state of the worktree: the head, the base, the count of changed "
             "paths, the changed paths, and the commits ahead of and behind the base. "
             "During a merge, markers gives each conflicted path with the line ranges "
-            "{start, end} of its conflict markers. It does no fetch."
+            "{start, end} of its conflict markers. It does no fetch. With wait, a "
+            "running landing is waited for first, up to that many seconds; the answer "
+            "comes as soon as the landing ends."
         ),
         "schema": {
             "type": "object",
-            "properties": {"repo": _REPO, "branch": _BRANCH, "seat": _SEAT, "sitting": _SITTING},
+            "properties": {
+                "repo": _REPO,
+                "branch": _BRANCH,
+                "wait": {"type": "integer",
+                         "description": "The seconds to wait for a running landing to end "
+                                        "before answering. The default is 0; the ceiling is "
+                                        "25, under the engine's 30 s limit on a call. "
+                                        "Follow a landing with wait 25, not with fast calls."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
             "required": ["repo", "branch"],
             "additionalProperties": False,
         },

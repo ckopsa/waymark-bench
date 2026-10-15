@@ -12,6 +12,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 
@@ -334,6 +335,20 @@ class TestLandingGuards(LandingCase):
         status = self.ok("status", branch="work")
         self.assertEqual(status["landing"]["state"], "landed")
         self.assertEqual(status["ahead"], 1)
+
+    def test_status_with_wait_answers_when_the_landing_ends(self):
+        self.make({"stages": [{"name": "slow", "command": "sleep 2"}]})
+        path = self.prepared()
+        self.change(path)
+        answer = self.ok("submit", branch="work", message="slow", wait=0)
+        self.assertTrue(answer["landing"]["running"])
+        quick = self.ok("status", branch="work")
+        self.assertTrue(quick["landing"]["running"])
+        started = time.monotonic()
+        waited = self.ok("status", branch="work", wait=20)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertFalse(waited["landing"]["running"])
+        self.assertEqual(waited["landing"]["state"], "landed")
 
     def test_a_clean_worktree_may_land_again_after_a_failure_but_not_after_a_landing(self):
         marker = os.path.join(self.root, "pass")
