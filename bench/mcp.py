@@ -19,16 +19,30 @@ SERVER_NAME = "bench"
 MAX_BODY = 4 * 1024 * 1024
 
 
+# The tools that change nothing: no worktree, clone, landing, CI run or
+# secret moves. The list marks them readOnlyHint, which is how the engine
+# knows it may pace a repeated identical call rather than pass it at once.
+# A tool that fetches, merges, starts a check or dispatches a run stays off.
+READ_ONLY = frozenset({
+    "status", "find", "read", "symbols", "read_symbol", "history", "diff",
+    "feedback", "log", "repos", "test_result", "run_status", "train_status",
+    "train_checks", "secret_list",
+})
+
+
 def tool_list():
-    """Gives the tools with their input schemas."""
-    return [
-        {
+    """Gives the tools with their input schemas, the reads marked readOnlyHint."""
+    listed = []
+    for spec in tools.TOOL_SPECS:
+        item = {
             "name": spec["name"],
             "description": spec["description"],
             "inputSchema": spec["schema"],
         }
-        for spec in tools.TOOL_SPECS
-    ]
+        if spec["name"] in READ_ONLY:
+            item["annotations"] = {"readOnlyHint": True}
+        listed.append(item)
+    return listed
 
 
 class Server:

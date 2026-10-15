@@ -62,6 +62,12 @@ class TestHttp(TransportCase):
         self.assertEqual(status, 200)
         tools = answer["result"]["tools"]
         self.assertEqual(len(tools), 35)
+        hints = {tool["name"]: tool.get("annotations", {}).get("readOnlyHint") for tool in tools}
+        self.assertTrue(hints["status"])
+        self.assertTrue(hints["read"])
+        self.assertIsNone(hints["submit"])
+        self.assertIsNone(hints["prepare"])
+        self.assertEqual(mcp.READ_ONLY - set(hints), set())
         names = [tool["name"] for tool in tools]
         self.assertEqual(sorted(names), sorted([
             "prepare", "status", "diff", "find", "read", "symbols", "read_symbol", "history", "check", "edit",
