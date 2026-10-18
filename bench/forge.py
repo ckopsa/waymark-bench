@@ -743,28 +743,32 @@ def job_named(job_name, name, called=False):
 
 
 def matrix_leg(job_name, name):
-    """Gives the caller's name in a run's job, `caller (a, b)`, when the job is
-    the `caller / job` of this name in one leg of the caller's matrix, or None."""
-    caller, slash, job = name.partition(" / ")
-    if not slash or not job_name.startswith(caller + " ("):
-        return None
-    end = job_name.find(") / ", len(caller))
-    if end < 0 or not job_named(job_name[end + 4:], job):
-        return None
-    return job_name[:end + 1]
+    """Gives (caller, leg) when a run's job is the `caller / job` of this name in
+    one leg of a matrix caller at any ` / ` level: `outer (a) / inner / job` or
+    `outer / inner (a) / job`. The caller is the name up to that level, the leg
+    is the run's job up to it, `outer / inner (a)`. Or None."""
+    segments = name.split(" / ")
+    for level in range(1, len(segments)):
+        caller = " / ".join(segments[:level])
+        if not job_name.startswith(caller + " ("):
+            continue
+        end = job_name.find(") / ", len(caller))
+        if end >= 0 and job_named(job_name[end + 4:], " / ".join(segments[level:])):
+            return caller, job_name[:end + 1]
+    return None
 
 
 def needs_of_job(job_name, needs):
     """Gives the names of the jobs a run's job needs. A `caller / job` whose
-    caller is a matrix job needs the jobs of its own leg only."""
+    caller, at any level, is a matrix job needs the jobs of its own leg only."""
     wanted = []
     for name, listed in needs.items():
         if job_named(job_name, name):
             wanted.extend(listed)
             continue
-        leg = matrix_leg(job_name, name)
-        if leg:
-            caller = name.partition(" / ")[0]
+        scope = matrix_leg(job_name, name)
+        if scope:
+            caller, leg = scope
             wanted.extend(leg + need[len(caller):] if need.startswith(caller + " / ") else need
                           for need in listed)
     return wanted
