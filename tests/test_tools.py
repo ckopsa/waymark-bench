@@ -1168,6 +1168,40 @@ class TestSubmit(BenchCase):
         with self.assertRaises(config_module.ConfigError):
             config_module.hosted_workflows_from_dict("demo", "ansible.yml")
 
+    def test_submit_passes_a_hosted_runs_on_when_the_repo_is_hosted_ok(self):
+        self.config.repo("demo").hosted_ok = True
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/new.yml"), self.HOSTED)
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["hosted_runs_on"], [
+            {"path": ".github/workflows/new.yml", "line": 5,
+             "text": "runs-on: ubuntu-latest", "allowed": True}])
+        self.assertTrue(self.ok("submit", branch="work", message="hosted ok")["pushed"])
+
+    def test_hosted_ok_absent_or_null_is_false(self):
+        self.assertFalse(self.config.repo("demo").hosted_ok)
+        self.assertFalse(config_module.hosted_ok_from_dict("demo", None))
+        self.assertFalse(self.config.repo("demo").to_dict()["hosted_ok"])
+        with self.assertRaises(config_module.ConfigError):
+            config_module.hosted_ok_from_dict("demo", "yes")
+
+    def test_runner_labels_name_the_labels_a_refusal_gives(self):
+        self.config.runner_labels = ("self-hosted", "tims-box")
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/new.yml"), self.HOSTED)
+        answer = self.refused("submit", branch="work", message="a hosted runner")
+        self.assertEqual(answer["refused"], "hosted_runner")
+        self.assertEqual(answer["house_labels"], ["self-hosted", "tims-box"])
+        self.assertIn("tims-box", answer["findings"][0]["message"])
+
+    def test_runner_labels_default_to_the_house_labels(self):
+        self.assertEqual(self.config.runner_labels, ("self-hosted", "waymark"))
+        config = config_module.from_dict({"data_dir": self.root, "runner_labels": ["mine"]})
+        self.assertEqual(config.runner_labels, ("mine",))
+        with self.assertRaises(config_module.ConfigError):
+            config_module.from_dict({"data_dir": self.root, "runner_labels": []})
+
     def test_submit_refuses_a_change_over_the_ceiling(self):
         path = self.prepared()
         util.write(os.path.join(path, "big.txt"), "line\n" * 40)
