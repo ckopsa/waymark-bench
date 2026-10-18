@@ -3361,15 +3361,30 @@ def _dispatch_test(bench, repo, spec, client, args):
     runs = client.workflow_runs(spec["workflow"], scratch)
     before = {run["id"] for run in runs}
     running = [run for run in runs if run.get("state") != "completed"]
+    # a run the forge made past the ceiling no longer holds the branch; one
+    # with no created time is taken as young
+    young = [run for run in running
+             if (_age(_stamp_seconds(run.get("created"))) or 0) <= TEST_RUN_CEILING]
+    stale = [run for run in running if run not in young]
+    superseded = []
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
         head = head_of(worktree)
         # a new push to the scratch ref would cancel the run still on it
-        if running and _scratch_exists(worktree, scratch):
+        if young and _scratch_exists(worktree, scratch):
             raise Refusal("test_running", repo=repo.name, branch=branch,
-                          run_id=running[0]["id"], run_url=running[0].get("url"),
+                          run_id=young[0]["id"], run_url=young[0].get("url"),
+                          elapsed_s=_age(_stamp_seconds(young[0].get("created"))),
                           reason="a test run of this branch is not done: "
-                                 "read it with test_result, then test again")
+                                 "read it with test_result, then test again",
+                          remedy="a run past %d s no longer blocks: test again then"
+                                 % TEST_RUN_CEILING)
+        for run in stale:
+            try:
+                client.cancel_run(run["id"])
+            except forge.ForgeError:
+                pass
+            superseded.append(run["id"])
         head, paths = _scratch_commit(worktree, head)
         # the scratch ref, never the pull request's branch
         code, out, err = git.run(["push", "--force", "origin",
@@ -3393,6 +3408,8 @@ def _dispatch_test(bench, repo, spec, client, args):
     answer = {"repo": repo.name, "branch": branch, "head": head, "conclusion": "pending",
               "run_id": None, "run_url": None, "dispatched_at": dispatched_at,
               "dirty_included": bool(paths), "paths": paths}
+    if superseded:
+        answer["superseded"] = superseded
     for attempt in range(TEST_FIND_TRIES):
         runs = [run for run in client.workflow_runs(spec["workflow"], scratch)
                 if run["id"] not in before and run.get("commit") == head]
@@ -5129,8 +5146,10 @@ TOOL_SPECS = [
             "conclusion: pending, head, dispatched_at}. When no run shows within about 15 s, "
             "run_id is null: give test_result the branch, head and dispatched_at instead. "
             "Read the result with test_result. While a run of the branch is not completed and "
-            "its scratch ref is still there, test refuses test_running with that run's run_id "
-            "and run_url and pushes nothing: read it with test_result, then test again. "
+            "its scratch ref is still there, test refuses test_running with that run's run_id, "
+            "run_url and elapsed_s and pushes nothing: read it with test_result, then test "
+            "again. A run not completed 1800 s after the forge made it no longer blocks: test "
+            "cancels it, lists its id in superseded, and dispatches a new run. "
             "The refusals are no_test_workflow, test_running, git and forge."
         ),
         "schema": {
