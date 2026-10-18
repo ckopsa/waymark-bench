@@ -742,35 +742,49 @@ def job_named(job_name, name, called=False):
     return called and job_name.startswith(name + " / ")
 
 
-def matrix_leg(job_name, name):
-    """Gives (caller, leg) when a run's job is the `caller / job` of this name in
-    one leg of a matrix caller at any ` / ` level: `outer (a) / inner / job` or
-    `outer / inner (a) / job`. The caller is the name up to that level, the leg
-    is the run's job up to it, `outer / inner (a)`. Or None."""
+def matrix_legs(job_name, name):
+    """Gives [(caller, leg)], one for each ` / ` level, outermost first, when a
+    run's job is the `caller / job` of this name in one leg of a matrix caller
+    at one level or more: `outer (a) / inner / job`, `outer / inner (a) / job`
+    or `outer (a) / inner (b) / job`. The caller is the name up to that level,
+    the leg is the run's job up to it, `outer (a) / inner (b)`. Or None."""
     segments = name.split(" / ")
+    legs, at, matrix = [], 0, False
     for level in range(1, len(segments)):
-        caller = " / ".join(segments[:level])
-        if not job_name.startswith(caller + " ("):
-            continue
-        end = job_name.find(") / ", len(caller))
-        if end >= 0 and job_named(job_name[end + 4:], " / ".join(segments[level:])):
-            return caller, job_name[:end + 1]
+        segment, rest = segments[level - 1], job_name[at:]
+        if rest.startswith(segment + " ("):
+            end = job_name.find(") / ", at + len(segment))
+            if end < 0:
+                return None
+            at, matrix = end + 4, True
+        elif rest.startswith(segment + " / "):
+            at += len(segment) + 3
+        else:
+            return None
+        legs.append((" / ".join(segments[:level]), job_name[:at - 3]))
+    if matrix and job_named(job_name[at:], segments[-1]):
+        return legs
     return None
 
 
 def needs_of_job(job_name, needs):
     """Gives the names of the jobs a run's job needs. A `caller / job` whose
-    caller, at any level, is a matrix job needs the jobs of its own leg only."""
+    callers, at any level or several, are matrix jobs needs the jobs of its own
+    leg only: each need is rewritten to the deepest leg that prefixes it."""
     wanted = []
     for name, listed in needs.items():
         if job_named(job_name, name):
             wanted.extend(listed)
             continue
-        scope = matrix_leg(job_name, name)
-        if scope:
-            caller, leg = scope
-            wanted.extend(leg + need[len(caller):] if need.startswith(caller + " / ") else need
-                          for need in listed)
+        legs = matrix_legs(job_name, name)
+        if not legs:
+            continue
+        for need in listed:
+            for caller, leg in reversed(legs):
+                if need.startswith(caller + " / "):
+                    need = leg + need[len(caller):]
+                    break
+            wanted.append(need)
     return wanted
 
 

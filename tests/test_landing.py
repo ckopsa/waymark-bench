@@ -1485,14 +1485,15 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual(answer["runs"][0]["jobs"], ["outer / inner / lint", "outer / inner / gate"])
         self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
 
-    def inner_leg_gate_run(self, head, lint="cancelled", more=()):
+    def inner_leg_gate_run(self, head, lint="cancelled", more=(), leg="outer / inner (x)"):
         """Answers one failed run on head whose gate is two reusable workflows deep, and whose
-        inner caller is a matrix job: GitHub names its jobs `outer / inner (x) / job`."""
+        inner caller is a matrix job: GitHub names its jobs `outer / inner (x) / job`, or
+        `outer (a) / inner (b) / job` when the outer caller is one too."""
         self.one_run(head, [
-            {"id": 21, "name": "outer / inner (x) / unit", "status": "completed", "conclusion": "success",
+            {"id": 21, "name": leg + " / unit", "status": "completed", "conclusion": "success",
              "steps": [{"name": "Run tests", "conclusion": "success"}]},
-            {"id": 22, "name": "outer / inner (x) / lint", "status": "completed", "conclusion": lint, "steps": []},
-            dict(self.GATE, name="outer / inner (x) / gate")] + list(more))
+            {"id": 22, "name": leg + " / lint", "status": "completed", "conclusion": lint, "steps": []},
+            dict(self.GATE, name=leg + " / gate")] + list(more))
         self.answers["/contents/.github/workflows/tests.yml"] = ("GET", {"content": base64.b64encode(
             b"jobs:\n  outer:\n    uses: ./.github/workflows/outer.yml\n").decode()})
         self.answers["/contents/.github/workflows/outer.yml"] = ("GET", {"content": base64.b64encode(
@@ -1517,6 +1518,23 @@ class TestPullRequestAndFeedback(LandingCase):
         answer = self.refused("rerun", branch="work")
         self.assertEqual(answer["refused"], "red")
         self.assertEqual(answer["jobs"], ["outer / inner (x) / gate"])
+        self.assertEqual(self.reruns(), [])
+
+    def test_rerun_starts_a_gate_whose_callers_are_matrix_jobs_at_two_levels_over_a_cancelled_sibling(self):
+        head = self.submitted()
+        self.inner_leg_gate_run(head, leg="outer (a) / inner (b)")
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["runs"][0]["jobs"], ["outer (a) / inner (b) / lint", "outer (a) / inner (b) / gate"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_rerun_refuses_a_two_level_leg_gate_red_beside_a_cancelled_job_of_another_inner_leg(self):
+        head = self.submitted()
+        self.inner_leg_gate_run(head, lint="success", leg="outer (a) / inner (b)", more=[
+            {"id": 25, "name": "outer (a) / inner (c) / lint", "status": "completed", "conclusion": "cancelled",
+             "steps": []}])
+        answer = self.refused("rerun", branch="work")
+        self.assertEqual(answer["refused"], "red")
+        self.assertEqual(answer["jobs"], ["outer (a) / inner (b) / gate"])
         self.assertEqual(self.reruns(), [])
 
     def test_rerun_starts_a_gate_over_a_gate_that_github_lists_first(self):
