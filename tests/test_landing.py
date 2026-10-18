@@ -1443,6 +1443,25 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual(answer["jobs"], ["suites (x) / gate"])
         self.assertEqual(self.reruns(), [])
 
+    def test_rerun_starts_a_gate_two_reusable_workflows_deep_over_a_cancelled_sibling(self):
+        head = self.submitted()
+        self.one_run(head, [
+            {"id": 21, "name": "outer / inner / unit", "status": "completed", "conclusion": "success",
+             "steps": [{"name": "Run tests", "conclusion": "success"}]},
+            {"id": 22, "name": "outer / inner / lint", "status": "completed", "conclusion": "cancelled", "steps": []},
+            dict(self.GATE, name="outer / inner / gate")])
+        self.answers["/contents/.github/workflows/tests.yml"] = ("GET", {"content": base64.b64encode(
+            b"jobs:\n  outer:\n    uses: ./.github/workflows/outer.yml\n").decode()})
+        self.answers["/contents/.github/workflows/outer.yml"] = ("GET", {"content": base64.b64encode(
+            b"jobs:\n  inner:\n    uses: ./.github/workflows/suites.yml\n").decode()})
+        self.answers["/contents/.github/workflows/suites.yml"] = ("GET", {
+            "content": base64.b64encode(self.SUITES.encode()).decode()})
+        self.answers["/actions/runs/11"] = ("GET", {
+            "id": 11, "head_sha": head, "path": ".github/workflows/tests.yml"})
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["runs"][0]["jobs"], ["outer / inner / lint", "outer / inner / gate"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
     def test_rerun_starts_a_gate_over_a_gate_that_github_lists_first(self):
         head = self.submitted()
         self.gated_run(head, [dict(self.GATE, id=24, name="all")] + self.CUT_JOBS,
