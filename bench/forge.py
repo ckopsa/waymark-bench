@@ -547,6 +547,9 @@ class Bitbucket(Client):
     def workflow_runs(self, workflow, branch, limit=10, event="workflow_dispatch"):
         raise ForgeError("the rig dispatches a test workflow only on github")
 
+    def cancel_run(self, run_id):
+        raise ForgeError("the rig dispatches a test workflow only on github")
+
     def pipeline(self, run_id):
         raise ForgeError("the rig dispatches a test workflow only on github")
 
@@ -1085,6 +1088,15 @@ class GitHub(Client):
     def rerun_failed_jobs(self, run_id):
         """Starts the failed and cancelled jobs of one workflow run again."""
         self.request("POST", self.url("/actions/runs/%s/rerun-failed-jobs" % run_id), {})
+        return True
+
+    def cancel_run(self, run_id):
+        """Cancels one workflow run. A 409, the run already done, counts as done."""
+        try:
+            self.request("POST", self.url("/actions/runs/%s/cancel" % run_id), {})
+        except ForgeError as error:
+            if error.status != 409:
+                raise
         return True
 
     def step_log(self, pipeline_id, step_id):

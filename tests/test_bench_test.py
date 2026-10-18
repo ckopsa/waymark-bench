@@ -568,6 +568,30 @@ class TestTheTestTool(LandingCase):
         self.assertEqual(self.dispatches(),
                          [{"ref": "bench-test/work", "inputs": {"only": "waymark.api-test"}}])
 
+    def test_a_run_past_the_ceiling_is_cancelled_and_does_not_block(self):
+        head = self.make_test()
+        self.serve(head, "in_progress")
+        self.ok("test", branch="work", select="waymark.core-test")
+        self.run["created_at"] = "2020-01-01T00:00:00Z"
+        self.answers["/actions/runs/31/cancel"] = ("POST", {})
+        self.calls = []
+        answer = self.ok("test", branch="work", select="waymark.api-test")
+        posts = [path for method, path, body in self.calls if method == "POST"]
+        self.assertEqual(posts, ["/actions/runs/31/cancel", WORKFLOW + "/dispatches"])
+        self.assertEqual(answer["superseded"], [31])
+
+    def test_a_stale_run_the_forge_will_not_cancel_still_does_not_block(self):
+        head = self.make_test()
+        self.serve(head, "in_progress")
+        self.ok("test", branch="work", select="waymark.core-test")
+        self.run["created_at"] = "2020-01-01T00:00:00Z"
+        self.answers["/actions/runs/31/cancel"] = ("POST", 409)
+        self.calls = []
+        answer = self.ok("test", branch="work", select="waymark.api-test")
+        posts = [path for method, path, body in self.calls if method == "POST"]
+        self.assertEqual(posts, ["/actions/runs/31/cancel", WORKFLOW + "/dispatches"])
+        self.assertEqual(answer["superseded"], [31])
+
     def test_a_going_run_whose_scratch_ref_is_gone_does_not_block(self):
         head = self.make_test()
         self.serve(head, "in_progress")
