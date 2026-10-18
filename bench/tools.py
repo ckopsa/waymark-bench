@@ -3080,6 +3080,60 @@ def update_branch(bench, args):
     return dict(answer, repo=repo.name, number=number)
 
 
+SHA_CHARS = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def _named_commit(bare, args, key):
+    """Gives the full name of one commit the call names, fetching it by name when the
+    clone lacks it, or refuses."""
+    sha = _text(args, key, required=True)
+    if not SHA_CHARS.match(sha):
+        raise Refusal("input", field=key, reason="a commit's hex name is necessary")
+    if not git.ref_exists(sha, cwd=bare):
+        git.run(["fetch", "origin", sha], cwd=bare, timeout=600, check=False)
+    if not git.ref_exists(sha, cwd=bare):
+        raise Refusal("unknown_commit", field=key, commit=sha,
+                      reason="the commit is not in the clone, and the remote did not give it")
+    return git.rev_parse(sha + "^{commit}", cwd=bare)
+
+
+def _own_patch_id(bare, base, head):
+    """Gives the stable patch-id of `git diff base...head`: what head adds over its
+    merge-base with base. None when it adds nothing."""
+    diff = git.out(["diff", "--no-color", "--no-ext-diff", base + "..." + head], cwd=bare)
+    if not diff.strip():
+        return None
+    fields = git.run(["patch-id", "--stable"], cwd=bare, stdin=diff)[1].split()
+    return fields[0] if fields else None
+
+
+def compare_heads(bench, args):
+    """Tells if a moved head is the approved head merged with its base's head, carrying the
+    same own diff, so a yes given to the approved head may carry over to it."""
+    repo = bench.repo(args.get("repo"))
+    base = _text(args, "base", default=repo.default_branch)
+    if not BRANCH_CHARS.match(base) or ".." in base:
+        raise Refusal("input", field="base", reason="Use only A-Z a-z 0-9 . _ / -")
+    with bench.lock(repo.name):
+        bare = bench.fetch(repo)
+        remote = "refs/remotes/origin/" + base
+        if not git.ref_exists(remote, cwd=bare):
+            raise Refusal("no_base", repo=repo.name, base=base,
+                          reason="the base branch is not on the remote")
+        base_head = git.rev_parse(remote, cwd=bare)
+        approved = _named_commit(bare, args, "approved")
+        head = _named_commit(bare, args, "head")
+        parents = git.line(["rev-list", "--parents", "-n", "1", head], cwd=bare).split()[1:]
+        approved_patch_id = _own_patch_id(bare, base_head, approved)
+        head_patch_id = _own_patch_id(bare, base_head, head)
+    merged_with_base = parents == [approved, base_head]
+    same_own_diff = approved_patch_id == head_patch_id
+    return {"repo": repo.name, "base": base, "base_head": base_head, "approved": approved,
+            "head": head, "parents": parents, "merged_with_base": merged_with_base,
+            "approved_patch_id": approved_patch_id, "head_patch_id": head_patch_id,
+            "same_own_diff": same_own_diff, "carries": merged_with_base and same_own_diff}
+
+
 def _rerun_failed(client, repo, branch, head, run_id):
     """Asks the forge to start one run's failed jobs again. A 403 is the token's."""
     try:
@@ -5024,6 +5078,37 @@ TOOL_SPECS = [
                 "sitting": _SITTING,
             },
             "required": ["repo", "number", "head_sha"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "compare_heads",
+        "function": compare_heads,
+        "description": (
+            "Tells if a moved head is the approved head merged with its base, carrying the "
+            "same own diff, so a yes given to the approved head may carry over. The rig "
+            "fetches, then reads head's parents and the stable patch-id of git diff "
+            "base...approved and of git diff base...head, base being the base branch's head "
+            "now. merged_with_base: head's parents are exactly [approved, base_head]; "
+            "same_own_diff: the two patch-ids are equal; carries: both. e.g. {\"carries\": "
+            "true, \"parents\": [\"<approved>\", \"<base_head>\"], ...}. The refusals are "
+            "input, no_base (the base branch is not on the remote) and unknown_commit."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "base": {"type": "string",
+                         "description": "The base branch. The default is the repository's "
+                                        "default branch."},
+                "approved": {"type": "string",
+                             "description": "The head commit a person approved, hex."},
+                "head": {"type": "string",
+                         "description": "The head commit the branch has now, hex."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "approved", "head"],
             "additionalProperties": False,
         },
     },

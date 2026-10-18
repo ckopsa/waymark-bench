@@ -1,9 +1,10 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives thirty-five
+for each repository and a git worktree for each branch. It gives thirty-six
 tools: `prepare`, `status`, `diff`, `find`, `read`, `symbols`, `read_symbol`, `history`, `check`, `edit`,
-`edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
+`edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`,
+`compare_heads`, `rerun`, `test`,
 `test_result`, `enroll`, `repos`, `unenroll`, `train_build`, `train_checks`,
 `train_open`, `train_status`, `train_land`, `train_delete`, `secret_set`,
 `secret_list`, `dispatch` and `run_status`. It needs Python
@@ -337,6 +338,16 @@ head will move and the checks run again) or `current` (already up to
 date), and refuses a conflict (`not_mergeable`), any other GitHub
 refusal (`update_refused`) and a forge that is not GitHub
 (`unsupported`).
+
+`compare_heads` tells whether the head an update moved to still carries a
+person's yes: give `approved` (the head they approved), `head` (the head
+now) and, optionally, `base` (the default branch otherwise). The rig
+fetches and answers `parents` (head's), `base_head`, the stable patch-id
+of `git diff base...approved` and of `git diff base...head`,
+`merged_with_base` (the parents are exactly `[approved, base_head]`),
+`same_own_diff` (the patch-ids are equal) and `carries` (both). A commit
+the clone lacks is fetched by name; one the remote does not give is
+refused `unknown_commit`, and a base not on the remote `no_base`.
 
 CI can die with the code sound: a runner freezes, a job is cancelled or
 times out, or it fails in checkout or container set-up before any test

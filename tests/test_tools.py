@@ -1021,6 +1021,62 @@ class TestDiff(BenchCase):
         self.assertEqual(len(second["diff"].encode("utf-8")), 188)
 
 
+class TestCompareHeads(BenchCase):
+    """A head the base was merged into, judged against the head a person approved."""
+
+    def setUp(self):
+        super().setUp()
+        self.other = util.clone(self.root, self.clone_url)
+        util.push_change(self.other, "feature", "docs/mine.txt", "my edit\n")
+        self.approved = self.rev("HEAD")
+        util.git(["checkout", "main"], cwd=self.other)
+        util.push_change(self.other, "main", "docs/theirs.txt", "their edit\n")
+        self.base_head = self.rev("HEAD")
+        util.git(["checkout", "feature"], cwd=self.other)
+
+    def rev(self, ref):
+        return util.git(["rev-parse", ref], cwd=self.other).strip()
+
+    def merge_base_in(self):
+        util.git(["merge", "--no-ff", "-m", "merge main", "main"], cwd=self.other)
+        util.git(["push", "origin", "feature"], cwd=self.other)
+        return self.rev("HEAD")
+
+    def test_compare_heads_carries_a_plain_merge_of_the_base(self):
+        head = self.merge_base_in()
+        answer = self.ok("compare_heads", approved=self.approved, head=head)
+        self.assertEqual(answer["parents"], [self.approved, self.base_head])
+        self.assertEqual(answer["base_head"], self.base_head)
+        self.assertTrue(answer["merged_with_base"])
+        self.assertTrue(answer["same_own_diff"])
+        self.assertIsNotNone(answer["head_patch_id"])
+        self.assertTrue(answer["carries"])
+
+    def test_compare_heads_does_not_carry_a_commit_after_the_merge(self):
+        self.merge_base_in()
+        util.push_change(self.other, "feature", "docs/more.txt", "more\n")
+        answer = self.ok("compare_heads", approved=self.approved, head=self.rev("HEAD"))
+        self.assertFalse(answer["merged_with_base"])
+        self.assertFalse(answer["same_own_diff"])
+        self.assertFalse(answer["carries"])
+
+    def test_compare_heads_does_not_carry_a_merge_that_changes_the_own_diff(self):
+        util.git(["merge", "--no-ff", "--no-commit", "main"], cwd=self.other)
+        util.write(os.path.join(self.other, "docs/mine.txt"), "my other edit\n")
+        util.git(["add", "-A"], cwd=self.other)
+        util.git(["commit", "-m", "merge main, and edit"], cwd=self.other)
+        util.git(["push", "origin", "feature"], cwd=self.other)
+        answer = self.ok("compare_heads", approved=self.approved, head=self.rev("HEAD"))
+        self.assertTrue(answer["merged_with_base"])
+        self.assertFalse(answer["same_own_diff"])
+        self.assertFalse(answer["carries"])
+
+    def test_compare_heads_refuses_an_unknown_commit(self):
+        answer = self.refused("compare_heads", approved=self.approved, head="0" * 40)
+        self.assertEqual(answer["refused"], "unknown_commit")
+        self.assertEqual(answer["field"], "head")
+
+
 class TestConflicts(BenchCase):
 
     def state(self, path):
