@@ -706,6 +706,11 @@ def workflow_needs(text):
     return found
 
 
+WORKFLOW_LEVELS = 4
+"""How deep GitHub lets reusable workflows call one another: the run's own
+file is the first level."""
+
+
 def workflow_calls(text):
     """Gives {job name: path} of each job of a workflow file's text that calls
     a reusable workflow of its own repository, `uses: ./.github/workflows/x.yml`."""
@@ -1059,7 +1064,8 @@ class GitHub(Client):
         """Gives the needs of each job of a run's workflow file, as
         workflow_needs gives them, or {} when the file cannot be read. A job
         that calls a reusable workflow of the repository adds that file's
-        needs, both sides named `caller / job` as GitHub names them."""
+        needs, both sides named `caller / job` as GitHub names them, and so
+        on through each workflow that one calls, `outer / inner / job`."""
         try:
             run = self.request("GET", self.url("/actions/runs/%s" % run_id))
         except (ForgeError, ValueError):
@@ -1070,10 +1076,21 @@ class GitHub(Client):
             return {}
         text = self.workflow_text(path, head)
         found = workflow_needs(text)
-        for caller, called in workflow_calls(text).items():
-            for name, listed in workflow_needs(self.workflow_text(called, head)).items():
-                found["%s / %s" % (caller, name)] = ["%s / %s" % (caller, need) for need in listed]
+        self.add_called_needs(found, text, head, "", 1)
         return found
+
+    def add_called_needs(self, found, text, head, prefix, level):
+        """Adds to found the needs of each reusable workflow that text calls,
+        named with prefix and the caller, then the needs of the ones those
+        call, until GitHub's last level."""
+        if level >= WORKFLOW_LEVELS:
+            return
+        for caller, called in workflow_calls(text).items():
+            outer = "%s%s / " % (prefix, caller)
+            inner = self.workflow_text(called, head)
+            for name, listed in workflow_needs(inner).items():
+                found[outer + name] = [outer + need for need in listed]
+            self.add_called_needs(found, inner, head, outer, level + 1)
 
     def workflow_text(self, path, ref):
         """Gives the text of one workflow file at ref, or "" when it cannot be read."""
