@@ -667,6 +667,29 @@ class TestHouseMerge(LandingCase):
         self.assertEqual(answer["pending"], [])
         self.assertEqual(self.merges(), [])
 
+    def compares_against(self, base):
+        return [path for method, path, body in self.calls
+                if path.startswith("/compare/%s..." % base)]
+
+    def test_a_green_head_on_a_master_base_compares_against_master_and_waits(self):
+        master_pr = dict(OPEN_PR, base={"ref": "master"})
+        self.forge_with(pr=dict(master_pr, mergeable=None, mergeable_state="unknown"),
+                        runs=check_runs(("tests", "completed", "success")))
+        self.answers["/compare/master...abc123"] = ("GET", {"behind_by": 0, "ahead_by": 1})
+        answer = self.green()
+        self.assertEqual((answer["state"], answer["waits_on"]), ("waiting", "github"))
+        self.assertNotEqual(self.compares_against("master"), [])
+        self.assertEqual(self.compares_against("main"), [])
+        self.assertEqual(self.merges(), [])
+
+    def test_a_clean_head_on_a_master_base_merges(self):
+        self.forge_with(pr=dict(OPEN_PR, base={"ref": "master"}, mergeable_state="clean"),
+                        runs=check_runs(("tests", "completed", "success")))
+        self.answers["/compare/master...abc123"] = ("GET", {"behind_by": 0, "ahead_by": 1})
+        self.assertEqual(self.green()["state"], "merged")
+        self.assertEqual(self.compares_against("main"), [])
+        self.assertEqual(self.merges(), [{"sha": "abc123", "merge_method": "merge"}])
+
     def test_waiting_says_whether_it_waits_on_checks_or_on_github(self):
         self.forge_with(runs=check_runs(("tests", "in_progress", None)))
         answer = self.green()
