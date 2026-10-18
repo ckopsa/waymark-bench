@@ -342,10 +342,13 @@ refusal (`update_refused`) and a forge that is not GitHub
 `compare_heads` tells whether the head an update moved to still carries a
 person's yes: give `approved` (the head they approved), `head` (the head
 now) and, optionally, `base` (the default branch otherwise). The rig
-fetches and answers `parents` (head's), `base_head`, the stable patch-id
-of `git diff base...approved` and of `git diff base...head`,
-`merged_with_base` (the parents are exactly `[approved, base_head]`),
-`same_own_diff` (the patch-ids are equal) and `carries` (both). A commit
+fetches and answers `parents` (head's), `base_head`, `merged_with_base`
+(head has exactly two parents, `[approved, P]`, and P is `base_head` or an
+ancestor of it, so an update that merged an earlier base head still
+counts), `base_parent` (that P, or null), the stable patch-id of
+`git diff P...approved` and of `git diff P...head` (against `base_head`
+when there is no P), `same_own_diff` (the patch-ids are equal) and
+`carries` (both). A commit
 the clone lacks is fetched by name; one the remote does not give is
 refused `unknown_commit`, and a base not on the remote `no_base`.
 

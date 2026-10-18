@@ -3166,8 +3166,9 @@ def _own_patch_id(bare, base, head):
 
 
 def compare_heads(bench, args):
-    """Tells if a moved head is the approved head merged with its base's head, carrying the
-    same own diff, so a yes given to the approved head may carry over to it."""
+    """Tells if a moved head is the approved head merged with its base's head, now or an
+    earlier one, carrying the same own diff, so a yes given to the approved head may carry
+    over to it."""
     repo = bench.repo(args.get("repo"))
     base = _text(args, "base", default=repo.default_branch)
     if not BRANCH_CHARS.match(base) or ".." in base:
@@ -3182,12 +3183,19 @@ def compare_heads(bench, args):
         approved = _named_commit(bare, args, "approved")
         head = _named_commit(bare, args, "head")
         parents = git.line(["rev-list", "--parents", "-n", "1", head], cwd=bare).split()[1:]
-        approved_patch_id = _own_patch_id(bare, base_head, approved)
-        head_patch_id = _own_patch_id(bare, base_head, head)
-    merged_with_base = parents == [approved, base_head]
+        base_parent = None
+        if len(parents) == 2 and parents[0] == approved:
+            code = git.run(["merge-base", "--is-ancestor", parents[1], base_head], cwd=bare, check=False)[0]
+            if code == 0:
+                base_parent = parents[1]
+        judge = base_parent or base_head
+        approved_patch_id = _own_patch_id(bare, judge, approved)
+        head_patch_id = _own_patch_id(bare, judge, head)
+    merged_with_base = base_parent is not None
     same_own_diff = approved_patch_id == head_patch_id
     return {"repo": repo.name, "base": base, "base_head": base_head, "approved": approved,
             "head": head, "parents": parents, "merged_with_base": merged_with_base,
+            "base_parent": base_parent,
             "approved_patch_id": approved_patch_id, "head_patch_id": head_patch_id,
             "same_own_diff": same_own_diff, "carries": merged_with_base and same_own_diff}
 
