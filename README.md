@@ -342,6 +342,11 @@ CI can die with the code sound: a runner freezes, a job is cancelled or
 times out, or it fails in checkout or container set-up before any test
 runs. A step that runs after the failed set-up step all the same (a crash
 report with `if: always()`) does not change that: the job ran no test.
+So does a job whose log ends on a dependency or registry fetch (an HTTP
+403, 429 or 5xx from Maven Central, Clojars, ghcr, docker.io or another
+registry, or a classpath step failing on one) with no test reported: its
+message starts `ci: interrupted: dependency fetch`. A log with a test
+report (`FAIL in`, `ERROR in`, a test summary) stays a red test step.
 `feedback` gives such a run one finding of severity `interrupted`
 (not `error`) whose message starts `ci: interrupted`. A job that only
 gathers the others counts with them: its own step failed, and each job

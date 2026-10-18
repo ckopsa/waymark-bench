@@ -1568,6 +1568,59 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertIn("error", severities)
         self.assertNotIn("interrupted", severities)
 
+    def fetch_log(self, rows):
+        stamp = "2026-10-18T10:00:01.0000000Z "
+        self.answers["/actions/jobs/21/logs"] = "".join(stamp + row + "\n" for row in rows)
+
+    MAVEN_403 = (
+        "##[group]Run clojure -M:test", "##[endgroup]",
+        "Error building classpath. Could not transfer artifact org.clojure:tools.cli:jar:1.1.230 "
+        "from/to central (https://repo1.maven.org/maven2/): status code: 403, reason phrase: Forbidden (403)",
+        "##[error]Process completed with exit code 1.")
+    REGISTRY_429 = (
+        "##[group]Run docker build .", "##[endgroup]",
+        "ERROR: failed to solve: node:20: unexpected status from HEAD request to "
+        "https://registry-1.docker.io/v2/library/node/manifests/20: 429 Too Many Requests",
+        "toomanyrequests: You have reached your pull rate limit.",
+        "##[error]Process completed with exit code 1.")
+
+    def assert_fetch_is_rerun(self, rows):
+        head = self.submitted()
+        self.one_run("abc123", self.RED_JOBS[:1])
+        self.fetch_log(rows)
+        feedback = self.ok("feedback", branch="work")
+        sources = [(f["source"], f["severity"]) for f in feedback["findings"]]
+        self.assertEqual(sources, [("pipeline", "interrupted"), ("status", "interrupted")])
+        for finding in feedback["findings"]:
+            self.assertTrue(finding["message"].startswith("ci: interrupted: dependency fetch"),
+                            finding["message"])
+        self.one_run(head, self.RED_JOBS[:1])
+        self.fetch_log(rows)
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["runs"][0]["jobs"], ["unit"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_a_maven_403_building_the_classpath_is_rerun_as_interrupted(self):
+        self.assert_fetch_is_rerun(self.MAVEN_403)
+
+    def test_a_registry_429_in_the_build_is_rerun_as_interrupted(self):
+        self.assert_fetch_is_rerun(self.REGISTRY_429)
+
+    def test_a_failing_test_beside_a_fetch_error_stays_a_red_test_step(self):
+        rows = self.MAVEN_403[:3] + ("FAIL in (factory-test) (factory_test.clj:12)",
+                                     "Ran 4 tests containing 9 assertions.", "1 failures, 0 errors.")
+        head = self.submitted()
+        self.one_run("abc123", self.RED_JOBS[:1])
+        self.fetch_log(rows)
+        feedback = self.ok("feedback", branch="work")
+        severities = [f["severity"] for f in feedback["findings"]]
+        self.assertIn("error", severities)
+        self.assertNotIn("interrupted", severities)
+        self.one_run(head, self.RED_JOBS[:1])
+        self.fetch_log(rows)
+        self.assertEqual(self.refused("rerun", branch="work")["refused"], "red")
+        self.assertEqual(self.reruns(), [])
+
     def test_the_log_tail_keeps_the_test_report(self):
         head = "FAIL in (factory-test) (factory_test.clj:12)\nexpected: 1\n  actual: 2\n"
         noise = "".join("compiling namespace %d of the build\n" % i for i in range(400))
