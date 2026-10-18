@@ -3291,8 +3291,8 @@ def rerun(bench, args):
                                 "url": run.get("url"), "jobs": jobs})
         if not stopped:
             raise Refusal("nothing_interrupted", repo=repo.name, branch=branch, head=head,
-                          reason="no finished run on the head has a cancelled, timed out or "
-                                 "stopped-in-setup job")
+                          reason="no finished run on the head has a cancelled, timed out, "
+                                 "stopped-in-setup or dependency-fetch-dead job")
         for run in stopped:
             _rerun_failed(client, repo, branch, head, run["id"])
     except forge.ForgeError as exc:
@@ -4942,7 +4942,8 @@ TOOL_SPECS = [
             "comes as one finding in findings, with a source (landing, pipeline, status, review, "
             "pull_request), a severity, a message, and the path:line locations it names. Read "
             "findings, fix the worktree, submit again. A run whose jobs were cancelled, timed "
-            "out or stopped in setup, with no red test step, is severity interrupted, not "
+            "out, stopped in setup or died fetching a dependency (a registry 403, 429 or 5xx "
+            "before any test ran), with no red test step, is severity interrupted, not "
             "error, and its message starts ci: interrupted: call rerun for it. Sources the "
             "rig cannot reach are named in unavailable."
         ),
@@ -5185,8 +5186,9 @@ TOOL_SPECS = [
         "description": (
             "Starts the interrupted CI of the branch's pushed head again. The rig reads the "
             "newest finished run of each workflow on that head: a job that was cancelled, "
-            "timed out, or failed with no step past setup (checkout, set up, containers, "
-            "network, services) is interrupted, and the rig asks GitHub to re-run the "
+            "timed out, failed with no step past setup (checkout, set up, containers, "
+            "network, services), or died fetching a dependency (its log ends on a registry "
+            "403, 429 or 5xx before any test ran) is interrupted, and the rig asks GitHub to re-run the "
             "failed jobs of its run, e.g. {\"run_id\": 11, \"runs\": [...]}. Use it when "
             "feedback gives a finding whose message starts ci: interrupted. One time per "
             "head. The refusals are not_pushed, red (a job failed in a test step: fix it), "
