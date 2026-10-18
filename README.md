@@ -367,7 +367,9 @@ gathers the others counts with them: its own step failed, and each job
 its workflow file says it `needs` is success, skipped or interrupted (a
 `gate` job red only because suites were cancelled). A job of a reusable
 workflow, which GitHub names `caller / job`, is a job its caller's name
-`needs`, and a gate over such a gate counts too. `rerun` (give
+`needs`, and a gate over such a gate counts too. When the caller is a
+matrix job, GitHub names the jobs `caller (a, b) / job`, and a gate
+there counts over the jobs of its own leg only. `rerun` (give
 `repo` and `branch`) then asks GitHub to re-run the failed jobs of each
 such run on the branch's pushed head, and answers the `run_id`. It does
 so one time per head (`already_rerun` after), and refuses `not_pushed`,
