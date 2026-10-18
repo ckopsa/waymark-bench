@@ -2,13 +2,16 @@
 
 import io
 import json
+import os
 import shutil
 import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 
+from bench import __main__ as entry
 from bench import mcp
 from bench.tools import Bench
 
@@ -152,6 +155,27 @@ class TestStdio(unittest.TestCase):
         self.assertEqual([answer["id"] for answer in answers], [1, 2, 3])
         self.assertEqual(len(answers[1]["result"]["tools"]), 35)
         self.assertTrue(answers[2]["result"]["structuredContent"]["result"]["created"])
+
+
+class TestHost(TransportCase):
+    """--host and BENCH_HOST: the address the HTTP transport binds."""
+
+    def bound(self, argv, env):
+        clean = {key: value for key, value in os.environ.items() if key != "BENCH_HOST"}
+        clean["BENCH_ENV_FILE"] = os.path.join(self.root, "none.env")
+        clean.update(env)
+        with mock.patch.dict(os.environ, clean, clear=True):
+            args = entry.parse_args(["--http", "0"] + argv)
+        httpd = mcp.serve_http(self.bench, args.http, host=args.host)
+        self.addCleanup(httpd.server_close)
+        return httpd.server_address[0]
+
+    def test_host_loopback_binds_loopback(self):
+        self.assertEqual(self.bound(["--host", "127.0.0.1"], {"BENCH_HOST": "0.0.0.0"}), "127.0.0.1")
+
+    def test_no_flag_binds_what_it_binds_today(self):
+        self.assertEqual(self.bound([], {}), "127.0.0.1")
+        self.assertEqual(self.bound([], {"BENCH_HOST": "0.0.0.0"}), "0.0.0.0")
 
 
 if __name__ == "__main__":

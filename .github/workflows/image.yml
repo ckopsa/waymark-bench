@@ -5,7 +5,8 @@
 # for public repos and authenticates with the built-in GITHUB_TOKEN.
 #
 # WHY arm64 NATIVELY: the cluster's node is ARM64, and public repos get
-# free arm64 runners, so the runner is the target and qemu never enters.
+# free arm64 runners, so the runner is the house's target. The one
+# manifest also carries linux/amd64, built under qemu, for a self-hoster.
 #
 # THE TAG IS THE BARE SHORT SHA, the same the Makefile's IMAGE_TAG
 # computes, so a laptop deploy and a CI deploy name one image.
@@ -59,6 +60,11 @@ jobs:
         id: tag
         run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
+      # amd64 is built under qemu, for a self-hoster's x86 machine.
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: amd64
+
       - uses: docker/setup-buildx-action@v3
 
       # A pull request proves the image builds; it publishes nothing.
@@ -84,7 +90,7 @@ jobs:
         with:
           context: .
           file: Dockerfile
-          platforms: linux/arm64
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

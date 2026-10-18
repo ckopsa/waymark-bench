@@ -84,7 +84,8 @@ holds a pending step in memory only: after the bench server restarts,
 `check` with the old `check_id` refuses `unknown_check`, and its `reason`
 says the step was lost to a restart. Call `check` again with no `check_id`.
 
-CI runs on the house's runners only (`self-hosted`, `waymark`). `submit`
+CI runs on the house's runners only (`self-hosted`, `waymark`, unless
+bench.json gives `runner_labels`, a list that replaces them). `submit`
 refuses `hosted_runner`, and `check` gives a finding, when a change adds
 or changes a `runs-on` in `.github/workflows/*.yml` to a GitHub-hosted
 label (`ubuntu-*`, `windows-*`, `macos-*`): in the value, in an
@@ -103,6 +104,15 @@ with `allowed`: true when its file is in the list. An absent or null
 `hosted_workflows` is an empty list. Only a person can grant the exception:
 the list is on the repository's policy row in the engine, which gives it to
 `enroll`, and no seat's change can add to it.
+
+A repository with no house runners can say `hosted_ok: true`, in bench.json
+or to `enroll`. Then no workflow of it is judged: `submit` and `check` raise
+no `hosted_runner` for it, and every `hosted_runs_on` line is `allowed`. An
+absent or null `hosted_ok` is false.
+
+The HTTP transport binds `--host` (the setting `BENCH_HOST`), `127.0.0.1`
+when neither is given; the image sets `BENCH_HOST=0.0.0.0`. The rig has no
+auth, so a self-hosted rig outside a container keeps the loopback default.
 
 ## A branch with no worktree
 
