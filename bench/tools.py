@@ -2530,6 +2530,7 @@ def feedback(bench, args):
         if pipeline.get("result") in ("failed", "error", "failure", "stopped", "cancelled",
                                       "timed_out"):
             steps = attempt("steps", lambda: client.steps(pipeline["id"]), [])
+            logs = attempt("logs", lambda: mark_fetch_failures(client, pipeline["id"], steps), {})
             pipeline["steps"] = steps
             stopped = interrupted_of(steps)
             if stopped:
@@ -2544,7 +2545,8 @@ def feedback(bench, args):
                 if step.get("result") not in ("failed", "error", "failure"):
                     continue
                 try:
-                    log = client.step_log(pipeline["id"], step["id"]) or ""
+                    log = (logs[step.get("id")] if step.get("id") in logs
+                           else client.step_log(pipeline["id"], step["id"]) or "")
                 except forge.ForgeError as exc:
                     log = "(no log: %s)" % exc
                 if not log.strip() or log.startswith("(no log:"):
@@ -2578,9 +2580,11 @@ def feedback(bench, args):
                     "message": status.get("description") or "%s failed" % status.get("name"),
                     "url": status.get("url"),
                 }
-                if step_of_status(status, dead):
+                stopped = step_of_status(status, dead)
+                if stopped:
                     finding["severity"] = "interrupted"
-                    finding["message"] = INTERRUPTED % status.get("name")
+                    finding["message"] = ((DEPENDENCY_FETCH if stopped[1].get("fetch") else INTERRUPTED)
+                                          % status.get("name"))
                     findings.append(finding)
                     continue
                 found = step_of_status(status, read)
@@ -2671,16 +2675,70 @@ LOG_NO_MARK_NOTE = ("no marker matched in this failed job: these are the lines u
 # red is the runner's, and rerun starts it again.
 INTERRUPTED = ("ci: interrupted: %s cancelled or stopped before a test ran, no log: "
                "call rerun and the bench reruns it")
+# A job whose log ends on a registry's 403, 429 or 5xx before any test ran died
+# fetching its dependencies or its image: its red is the registry's.
+DEPENDENCY_FETCH = ("ci: interrupted: dependency fetch: %s died fetching a dependency or an "
+                    "image before a test ran: call rerun and the bench reruns it")
 # A job that only gathers the others is red because they did not finish.
 GATHERED = "; %s is red only because they did not finish, and rerun starts it again too"
+# The answer of a registry that refused or failed a fetch, and the words that
+# say the line is a fetch. A line of a test report keeps the job a red test step.
+FETCH_STATUS = re.compile(r"(?i)\b(?:403|429|5\d\d)\b|forbidden|too ?many ?requests|rate limit"
+                          r"|bad gateway|service unavailable|gateway time-?out")
+FETCH_SOURCE = re.compile(r"(?i)maven|clojars|ghcr\.io|docker\.io|registry|artifact|classpath"
+                          r"|could not transfer|failed to (?:read|fetch|download|resolve|pull)"
+                          r"|error (?:building classpath|pulling)|manifest|toomanyrequests|pull rate")
+TEST_REPORTED = re.compile(r"FAIL in|ERROR in|Ran \d+ tests|\d+ tests?, \d+ assertions?"
+                           r"|\d+ failures?, \d+ errors?|Error: FAILED: |=+ .*\b\d+ (?:passed|failed)\b")
+
+
+def died_fetching(log):
+    """Tells if a failed job's log ended on a dependency or registry fetch
+    before any test ran: a fetch line with a 403, 429 or 5xx, and no test report."""
+    if not log or log.startswith("(no log:"):
+        return False
+    lines = [LOG_STAMP.sub("", ANSI_ESCAPE.sub("", line)) for line in log.splitlines()]
+    if any(TEST_REPORTED.search(line) for line in lines):
+        return False
+    return any(FETCH_STATUS.search(line) and FETCH_SOURCE.search(line) for line in lines)
+
+
+def mark_fetch_failures(client, pipeline_id, steps):
+    """Marks interrupted each failed job of a pipeline that died fetching its
+    dependencies, then each job that only gathers it, and gives {job id: log}
+    of the logs it read, so a caller reads each one time."""
+    logs = {}
+    for step in steps:
+        if step.get("result") not in ("failed", "error", "failure") or step.get("interrupted"):
+            continue
+        try:
+            log = client.step_log(pipeline_id, step["id"]) or ""
+        except forge.ForgeError as exc:
+            log = "(no log: %s)" % exc
+        logs[step.get("id")] = log
+        if died_fetching(log):
+            step["interrupted"] = True
+            step["fetch"] = True
+    needs_of_run = getattr(client, "needs_of_run", None)
+    if (needs_of_run and any(s.get("fetch") for s in steps)
+            and any(s.get("result") == "failure" and not s.get("interrupted") for s in steps)):
+        forge.mark_aggregates(steps, needs_of_run(pipeline_id))
+    return logs
 
 
 def interrupted_message(stopped):
     """Gives the message of the interrupted jobs of one pipeline."""
     gathered = [step.get("name") or "job" for step in stopped if step.get("aggregate")]
-    names = [step.get("name") or "job" for step in stopped if not step.get("aggregate")]
-    message = INTERRUPTED % ", ".join(names or gathered)
-    if names and gathered:
+    fetched = [step.get("name") or "job" for step in stopped if step.get("fetch")]
+    names = [step.get("name") or "job" for step in stopped
+             if not step.get("aggregate") and not step.get("fetch")]
+    if fetched:
+        message = DEPENDENCY_FETCH % ", ".join(fetched)
+        if names:
+            message += "; %s cancelled or stopped before a test ran" % ", ".join(names)
+    else:
+        message = INTERRUPTED % ", ".join(names or gathered)
+    if (names or fetched) and gathered:
         message += GATHERED % ", ".join(gathered)
     return message
 
@@ -3158,6 +3216,7 @@ def rerun(bench, args):
             if run.get("state") != "completed":
                 continue
             steps = client.steps(run["id"])
+            mark_fetch_failures(client, run["id"], steps)
             red = [s.get("name") for s in steps
                    if s.get("result") == "failure" and not s.get("interrupted")]
             if red:
