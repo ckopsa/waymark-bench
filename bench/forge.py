@@ -547,6 +547,9 @@ class Bitbucket(Client):
     def workflow_runs(self, workflow, branch, limit=10, event="workflow_dispatch"):
         raise ForgeError("the rig dispatches a test workflow only on github")
 
+    def cancel_run(self, run_id):
+        raise ForgeError("the rig dispatches a test workflow only on github")
+
     def pipeline(self, run_id):
         raise ForgeError("the rig dispatches a test workflow only on github")
 
@@ -703,6 +706,11 @@ def workflow_needs(text):
     return found
 
 
+WORKFLOW_LEVELS = 4
+"""How deep GitHub lets reusable workflows call one another: the run's own
+file is the first level."""
+
+
 def workflow_calls(text):
     """Gives {job name: path} of each job of a workflow file's text that calls
     a reusable workflow of its own repository, `uses: ./.github/workflows/x.yml`."""
@@ -734,31 +742,49 @@ def job_named(job_name, name, called=False):
     return called and job_name.startswith(name + " / ")
 
 
-def matrix_leg(job_name, name):
-    """Gives the caller's name in a run's job, `caller (a, b)`, when the job is
-    the `caller / job` of this name in one leg of the caller's matrix, or None."""
-    caller, slash, job = name.partition(" / ")
-    if not slash or not job_name.startswith(caller + " ("):
-        return None
-    end = job_name.find(") / ", len(caller))
-    if end < 0 or not job_named(job_name[end + 4:], job):
-        return None
-    return job_name[:end + 1]
+def matrix_legs(job_name, name):
+    """Gives [(caller, leg)], one for each ` / ` level, outermost first, when a
+    run's job is the `caller / job` of this name in one leg of a matrix caller
+    at one level or more: `outer (a) / inner / job`, `outer / inner (a) / job`
+    or `outer (a) / inner (b) / job`. The caller is the name up to that level,
+    the leg is the run's job up to it, `outer (a) / inner (b)`. Or None."""
+    segments = name.split(" / ")
+    legs, at, matrix = [], 0, False
+    for level in range(1, len(segments)):
+        segment, rest = segments[level - 1], job_name[at:]
+        if rest.startswith(segment + " ("):
+            end = job_name.find(") / ", at + len(segment))
+            if end < 0:
+                return None
+            at, matrix = end + 4, True
+        elif rest.startswith(segment + " / "):
+            at += len(segment) + 3
+        else:
+            return None
+        legs.append((" / ".join(segments[:level]), job_name[:at - 3]))
+    if matrix and job_named(job_name[at:], segments[-1]):
+        return legs
+    return None
 
 
 def needs_of_job(job_name, needs):
     """Gives the names of the jobs a run's job needs. A `caller / job` whose
-    caller is a matrix job needs the jobs of its own leg only."""
+    callers, at any level or several, are matrix jobs needs the jobs of its own
+    leg only: each need is rewritten to the deepest leg that prefixes it."""
     wanted = []
     for name, listed in needs.items():
         if job_named(job_name, name):
             wanted.extend(listed)
             continue
-        leg = matrix_leg(job_name, name)
-        if leg:
-            caller = name.partition(" / ")[0]
-            wanted.extend(leg + need[len(caller):] if need.startswith(caller + " / ") else need
-                          for need in listed)
+        legs = matrix_legs(job_name, name)
+        if not legs:
+            continue
+        for need in listed:
+            for caller, leg in reversed(legs):
+                if need.startswith(caller + " / "):
+                    need = leg + need[len(caller):]
+                    break
+            wanted.append(need)
     return wanted
 
 
@@ -1056,7 +1082,8 @@ class GitHub(Client):
         """Gives the needs of each job of a run's workflow file, as
         workflow_needs gives them, or {} when the file cannot be read. A job
         that calls a reusable workflow of the repository adds that file's
-        needs, both sides named `caller / job` as GitHub names them."""
+        needs, both sides named `caller / job` as GitHub names them, and so
+        on through each workflow that one calls, `outer / inner / job`."""
         try:
             run = self.request("GET", self.url("/actions/runs/%s" % run_id))
         except (ForgeError, ValueError):
@@ -1067,10 +1094,21 @@ class GitHub(Client):
             return {}
         text = self.workflow_text(path, head)
         found = workflow_needs(text)
-        for caller, called in workflow_calls(text).items():
-            for name, listed in workflow_needs(self.workflow_text(called, head)).items():
-                found["%s / %s" % (caller, name)] = ["%s / %s" % (caller, need) for need in listed]
+        self.add_called_needs(found, text, head, "", 1)
         return found
+
+    def add_called_needs(self, found, text, head, prefix, level):
+        """Adds to found the needs of each reusable workflow that text calls,
+        named with prefix and the caller, then the needs of the ones those
+        call, until GitHub's last level."""
+        if level >= WORKFLOW_LEVELS:
+            return
+        for caller, called in workflow_calls(text).items():
+            outer = "%s%s / " % (prefix, caller)
+            inner = self.workflow_text(called, head)
+            for name, listed in workflow_needs(inner).items():
+                found[outer + name] = [outer + need for need in listed]
+            self.add_called_needs(found, inner, head, outer, level + 1)
 
     def workflow_text(self, path, ref):
         """Gives the text of one workflow file at ref, or "" when it cannot be read."""
@@ -1085,6 +1123,15 @@ class GitHub(Client):
     def rerun_failed_jobs(self, run_id):
         """Starts the failed and cancelled jobs of one workflow run again."""
         self.request("POST", self.url("/actions/runs/%s/rerun-failed-jobs" % run_id), {})
+        return True
+
+    def cancel_run(self, run_id):
+        """Cancels one workflow run. A 409, the run already done, counts as done."""
+        try:
+            self.request("POST", self.url("/actions/runs/%s/cancel" % run_id), {})
+        except ForgeError as error:
+            if error.status != 409:
+                raise
         return True
 
     def step_log(self, pipeline_id, step_id):

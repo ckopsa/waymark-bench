@@ -1021,6 +1021,87 @@ class TestDiff(BenchCase):
         self.assertEqual(len(second["diff"].encode("utf-8")), 188)
 
 
+class TestCompareHeads(BenchCase):
+    """A head the base was merged into, judged against the head a person approved."""
+
+    def setUp(self):
+        super().setUp()
+        self.other = util.clone(self.root, self.clone_url)
+        util.push_change(self.other, "feature", "docs/mine.txt", "my edit\n")
+        self.approved = self.rev("HEAD")
+        util.git(["checkout", "main"], cwd=self.other)
+        util.push_change(self.other, "main", "docs/theirs.txt", "their edit\n")
+        self.base_head = self.rev("HEAD")
+        util.git(["checkout", "feature"], cwd=self.other)
+
+    def rev(self, ref):
+        return util.git(["rev-parse", ref], cwd=self.other).strip()
+
+    def merge_base_in(self):
+        util.git(["merge", "--no-ff", "-m", "merge main", "main"], cwd=self.other)
+        util.git(["push", "origin", "feature"], cwd=self.other)
+        return self.rev("HEAD")
+
+    def test_compare_heads_carries_a_plain_merge_of_the_base(self):
+        head = self.merge_base_in()
+        answer = self.ok("compare_heads", approved=self.approved, head=head)
+        self.assertEqual(answer["parents"], [self.approved, self.base_head])
+        self.assertEqual(answer["base_head"], self.base_head)
+        self.assertTrue(answer["merged_with_base"])
+        self.assertTrue(answer["same_own_diff"])
+        self.assertIsNotNone(answer["head_patch_id"])
+        self.assertTrue(answer["carries"])
+        self.assertEqual(answer["base_parent"], self.base_head)
+
+    def test_compare_heads_carries_a_merge_of_an_earlier_base_head(self):
+        head = self.merge_base_in()
+        util.git(["checkout", "main"], cwd=self.other)
+        util.push_change(self.other, "main", "docs/later.txt", "later edit\n")
+        moved = self.rev("HEAD")
+        util.git(["checkout", "feature"], cwd=self.other)
+        answer = self.ok("compare_heads", approved=self.approved, head=head)
+        self.assertEqual(answer["base_head"], moved)
+        self.assertEqual(answer["base_parent"], self.base_head)
+        self.assertTrue(answer["merged_with_base"])
+        self.assertTrue(answer["same_own_diff"])
+        self.assertTrue(answer["carries"])
+
+    def test_compare_heads_does_not_carry_a_merge_of_a_branch_off_the_base(self):
+        util.git(["checkout", "-b", "side", "main"], cwd=self.other)
+        util.push_change(self.other, "side", "docs/side.txt", "side edit\n")
+        util.git(["checkout", "feature"], cwd=self.other)
+        util.git(["merge", "--no-ff", "-m", "merge side", "side"], cwd=self.other)
+        util.git(["push", "origin", "feature"], cwd=self.other)
+        answer = self.ok("compare_heads", approved=self.approved, head=self.rev("HEAD"))
+        self.assertFalse(answer["merged_with_base"])
+        self.assertIsNone(answer["base_parent"])
+        self.assertFalse(answer["carries"])
+
+    def test_compare_heads_does_not_carry_a_commit_after_the_merge(self):
+        self.merge_base_in()
+        util.push_change(self.other, "feature", "docs/more.txt", "more\n")
+        answer = self.ok("compare_heads", approved=self.approved, head=self.rev("HEAD"))
+        self.assertFalse(answer["merged_with_base"])
+        self.assertFalse(answer["same_own_diff"])
+        self.assertFalse(answer["carries"])
+
+    def test_compare_heads_does_not_carry_a_merge_that_changes_the_own_diff(self):
+        util.git(["merge", "--no-ff", "--no-commit", "main"], cwd=self.other)
+        util.write(os.path.join(self.other, "docs/mine.txt"), "my other edit\n")
+        util.git(["add", "-A"], cwd=self.other)
+        util.git(["commit", "-m", "merge main, and edit"], cwd=self.other)
+        util.git(["push", "origin", "feature"], cwd=self.other)
+        answer = self.ok("compare_heads", approved=self.approved, head=self.rev("HEAD"))
+        self.assertTrue(answer["merged_with_base"])
+        self.assertFalse(answer["same_own_diff"])
+        self.assertFalse(answer["carries"])
+
+    def test_compare_heads_refuses_an_unknown_commit(self):
+        answer = self.refused("compare_heads", approved=self.approved, head="0" * 40)
+        self.assertEqual(answer["refused"], "unknown_commit")
+        self.assertEqual(answer["field"], "head")
+
+
 class TestConflicts(BenchCase):
 
     def state(self, path):
@@ -1167,6 +1248,40 @@ class TestSubmit(BenchCase):
         self.assertEqual(self.config.repo("demo").to_dict()["hosted_workflows"], [])
         with self.assertRaises(config_module.ConfigError):
             config_module.hosted_workflows_from_dict("demo", "ansible.yml")
+
+    def test_submit_passes_a_hosted_runs_on_when_the_repo_is_hosted_ok(self):
+        self.config.repo("demo").hosted_ok = True
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/new.yml"), self.HOSTED)
+        answer = self.ok("check", branch="work")
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["hosted_runs_on"], [
+            {"path": ".github/workflows/new.yml", "line": 5,
+             "text": "runs-on: ubuntu-latest", "allowed": True}])
+        self.assertTrue(self.ok("submit", branch="work", message="hosted ok")["pushed"])
+
+    def test_hosted_ok_absent_or_null_is_false(self):
+        self.assertFalse(self.config.repo("demo").hosted_ok)
+        self.assertFalse(config_module.hosted_ok_from_dict("demo", None))
+        self.assertFalse(self.config.repo("demo").to_dict()["hosted_ok"])
+        with self.assertRaises(config_module.ConfigError):
+            config_module.hosted_ok_from_dict("demo", "yes")
+
+    def test_runner_labels_name_the_labels_a_refusal_gives(self):
+        self.config.runner_labels = ("self-hosted", "tims-box")
+        path = self.prepared()
+        util.write(os.path.join(path, ".github/workflows/new.yml"), self.HOSTED)
+        answer = self.refused("submit", branch="work", message="a hosted runner")
+        self.assertEqual(answer["refused"], "hosted_runner")
+        self.assertEqual(answer["house_labels"], ["self-hosted", "tims-box"])
+        self.assertIn("tims-box", answer["findings"][0]["message"])
+
+    def test_runner_labels_default_to_the_house_labels(self):
+        self.assertEqual(self.config.runner_labels, ("self-hosted", "waymark"))
+        config = config_module.from_dict({"data_dir": self.root, "runner_labels": ["mine"]})
+        self.assertEqual(config.runner_labels, ("mine",))
+        with self.assertRaises(config_module.ConfigError):
+            config_module.from_dict({"data_dir": self.root, "runner_labels": []})
 
     def test_submit_refuses_a_change_over_the_ceiling(self):
         path = self.prepared()

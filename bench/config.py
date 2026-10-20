@@ -17,6 +17,8 @@ import re
 
 REPOS_FILE = "repos.json"
 DEFAULT_DENY = ["*.pem", "*.key", ".env*", "**/secrets/**"]
+# the runs-on labels of the house's runners; bench.json's runner_labels replaces them
+DEFAULT_RUNNER_LABELS = ("self-hosted", "waymark")
 DEFAULT_STEP_TIMEOUT = 1800
 CEILING_STEP_TIMEOUT = 7200
 STAGE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -70,7 +72,8 @@ class RepoConfig:
     """One repository on the bench."""
 
     def __init__(self, name, clone_url, default_branch="main", deny=None, land=None,
-                 source="config", test=None, setup=None, check=None, hosted_workflows=None):
+                 source="config", test=None, setup=None, check=None, hosted_workflows=None,
+                 hosted_ok=False):
         self.name = name
         self.source = source
         self.clone_url = clone_url
@@ -87,6 +90,8 @@ class RepoConfig:
         self.check = check
         # the workflow paths a person lets run on GitHub-hosted runners
         self.hosted_workflows = list(hosted_workflows or [])
+        # every workflow may run on GitHub-hosted runners: a repository with no house runners
+        self.hosted_ok = bool(hosted_ok)
 
     def to_dict(self):
         return {
@@ -99,14 +104,16 @@ class RepoConfig:
             "setup": self.setup.to_dict() if self.setup else None,
             "check": self.check.to_dict() if self.check else None,
             "hosted_workflows": list(self.hosted_workflows),
+            "hosted_ok": self.hosted_ok,
         }
 
 
 class Config:
     """The full configuration: bench.json, then repos.json."""
 
-    def __init__(self, data_dir, repos, file_repos=None):
+    def __init__(self, data_dir, repos, file_repos=None, runner_labels=None):
         self.data_dir = data_dir
+        self.runner_labels = tuple(runner_labels or DEFAULT_RUNNER_LABELS)
         self.config_repos = dict(repos)
         self.file_repos = dict(file_repos or {})
         self.repos = {}
@@ -179,7 +186,8 @@ def from_dict(data, base_dir=None):
     data_dir = os.path.expanduser(str(data_dir))
     if base_dir and not os.path.isabs(data_dir):
         data_dir = os.path.join(base_dir, data_dir)
-    return Config(os.path.abspath(data_dir), repos_from_dict(data.get("repos") or {}))
+    return Config(os.path.abspath(data_dir), repos_from_dict(data.get("repos") or {}),
+                  runner_labels=runner_labels_from_dict(data.get("runner_labels")))
 
 
 def repos_from_dict(data, source="config"):
@@ -205,6 +213,7 @@ def repos_from_dict(data, source="config"):
             setup=setup_from_dict(name, spec.get("setup")),
             check=check_from_dict(name, spec.get("check")),
             hosted_workflows=hosted_workflows_from_dict(name, spec.get("hosted_workflows")),
+            hosted_ok=hosted_ok_from_dict(name, spec.get("hosted_ok")),
         )
     return repos
 
@@ -286,6 +295,30 @@ def hosted_workflows_from_dict(repo_name, data):
             raise ConfigError("repo %s: each hosted_workflows entry is a path" % repo_name)
         paths.append(item.strip())
     return paths
+
+
+def hosted_ok_from_dict(repo_name, data):
+    """Reads hosted_ok: true lets every workflow of the repository use a GitHub-hosted
+    runs-on. None is false."""
+    if data is None:
+        return False
+    if not isinstance(data, bool):
+        raise ConfigError("repo %s: hosted_ok must be true or false" % repo_name)
+    return data
+
+
+def runner_labels_from_dict(data):
+    """Reads runner_labels, the labels of the house's runners. None is the default."""
+    if data is None:
+        return DEFAULT_RUNNER_LABELS
+    if not isinstance(data, list) or not data:
+        raise ConfigError("runner_labels must be a list of labels")
+    labels = []
+    for item in data:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError("each runner_labels entry is a label")
+        labels.append(item.strip())
+    return tuple(labels)
 
 
 def step_from_dict(repo_name, data, name):

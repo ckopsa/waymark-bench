@@ -1,9 +1,10 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives thirty-five
+for each repository and a git worktree for each branch. It gives thirty-six
 tools: `prepare`, `status`, `diff`, `find`, `read`, `symbols`, `read_symbol`, `history`, `check`, `edit`,
-`edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`, `rerun`, `test`,
+`edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`,
+`compare_heads`, `rerun`, `test`,
 `test_result`, `enroll`, `repos`, `unenroll`, `train_build`, `train_checks`,
 `train_open`, `train_status`, `train_land`, `train_delete`, `secret_set`,
 `secret_list`, `dispatch` and `run_status`. It needs Python
@@ -84,7 +85,8 @@ holds a pending step in memory only: after the bench server restarts,
 `check` with the old `check_id` refuses `unknown_check`, and its `reason`
 says the step was lost to a restart. Call `check` again with no `check_id`.
 
-CI runs on the house's runners only (`self-hosted`, `waymark`). `submit`
+CI runs on the house's runners only (`self-hosted`, `waymark`, unless
+bench.json gives `runner_labels`, a list that replaces them). `submit`
 refuses `hosted_runner`, and `check` gives a finding, when a change adds
 or changes a `runs-on` in `.github/workflows/*.yml` to a GitHub-hosted
 label (`ubuntu-*`, `windows-*`, `macos-*`): in the value, in an
@@ -103,6 +105,15 @@ with `allowed`: true when its file is in the list. An absent or null
 `hosted_workflows` is an empty list. Only a person can grant the exception:
 the list is on the repository's policy row in the engine, which gives it to
 `enroll`, and no seat's change can add to it.
+
+A repository with no house runners can say `hosted_ok: true`, in bench.json
+or to `enroll`. Then no workflow of it is judged: `submit` and `check` raise
+no `hosted_runner` for it, and every `hosted_runs_on` line is `allowed`. An
+absent or null `hosted_ok` is false.
+
+The HTTP transport binds `--host` (the setting `BENCH_HOST`), `127.0.0.1`
+when neither is given; the image sets `BENCH_HOST=0.0.0.0`. The rig has no
+auth, so a self-hosted rig outside a container keeps the loopback default.
 
 ## A branch with no worktree
 
@@ -328,17 +339,37 @@ date), and refuses a conflict (`not_mergeable`), any other GitHub
 refusal (`update_refused`) and a forge that is not GitHub
 (`unsupported`).
 
+`compare_heads` tells whether the head an update moved to still carries a
+person's yes: give `approved` (the head they approved), `head` (the head
+now) and, optionally, `base` (the default branch otherwise). The rig
+fetches and answers `parents` (head's), `base_head`, `merged_with_base`
+(head has exactly two parents, `[approved, P]`, and P is `base_head` or an
+ancestor of it, so an update that merged an earlier base head still
+counts), `base_parent` (that P, or null), the stable patch-id of
+`git diff P...approved` and of `git diff P...head` (against `base_head`
+when there is no P), `same_own_diff` (the patch-ids are equal) and
+`carries` (both). A commit
+the clone lacks is fetched by name; one the remote does not give is
+refused `unknown_commit`, and a base not on the remote `no_base`.
+
 CI can die with the code sound: a runner freezes, a job is cancelled or
 times out, or it fails in checkout or container set-up before any test
 runs. A step that runs after the failed set-up step all the same (a crash
 report with `if: always()`) does not change that: the job ran no test.
+So does a job whose log ends on a dependency or registry fetch (an HTTP
+403, 429 or 5xx from Maven Central, Clojars, ghcr, docker.io or another
+registry, or a classpath step failing on one) with no test reported: its
+message starts `ci: interrupted: dependency fetch`. A log with a test
+report (`FAIL in`, `ERROR in`, a test summary) stays a red test step.
 `feedback` gives such a run one finding of severity `interrupted`
 (not `error`) whose message starts `ci: interrupted`. A job that only
 gathers the others counts with them: its own step failed, and each job
 its workflow file says it `needs` is success, skipped or interrupted (a
 `gate` job red only because suites were cancelled). A job of a reusable
 workflow, which GitHub names `caller / job`, is a job its caller's name
-`needs`, and a gate over such a gate counts too. `rerun` (give
+`needs`, and a gate over such a gate counts too. When the caller is a
+matrix job, GitHub names the jobs `caller (a, b) / job`, and a gate
+there counts over the jobs of its own leg only. `rerun` (give
 `repo` and `branch`) then asks GitHub to re-run the failed jobs of each
 such run on the branch's pushed head, and answers the `run_id`. It does
 so one time per head (`already_rerun` after), and refuses `not_pushed`,

@@ -67,8 +67,9 @@ def environment(token=None):
     return env
 
 
-def run(argv, cwd=None, timeout=DEFAULT_TIMEOUT, check=True):
-    """Runs one git command. Gives (returncode, stdout, stderr)."""
+def run(argv, cwd=None, timeout=DEFAULT_TIMEOUT, check=True, stdin=None):
+    """Runs one git command, with stdin as its input when given. Gives (returncode, stdout,
+    stderr)."""
     config = settings.load()
     token = config.secret("git_token")
     command = ["git"] + config_args(token, config) + list(argv)
@@ -77,6 +78,7 @@ def run(argv, cwd=None, timeout=DEFAULT_TIMEOUT, check=True):
             command,
             cwd=cwd,
             env=environment(token),
+            input=stdin,
             timeout=timeout,
             capture_output=True,
             text=True,

@@ -1345,7 +1345,8 @@ def yaml_errors(places, unavailable):
 # The labels GitHub gives its own runners. CI runs on the house's runners only, and
 # the list is fixed: no repository's policy changes it.
 HOSTED_RUNNER = re.compile(r"(?<![\w.-])(?:ubuntu|windows|macos)-[\w.-]+")
-HOUSE_RUNNER_LABELS = ("self-hosted", "waymark")
+# The house's own labels, unless bench.json gives runner_labels.
+HOUSE_RUNNER_LABELS = config_module.DEFAULT_RUNNER_LABELS
 _WORKFLOW_KEY = re.compile(r"^(\s*(?:-\s+)?)([\w-]+)\s*:(.*)$")
 _MATRIX_KEY = re.compile(r"matrix\.([\w-]+)")
 _HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@", re.M)
@@ -1400,10 +1401,12 @@ def added_lines(worktree, against, rel, cached=False):
     return added
 
 
-def hosted_runner_findings(worktree, against, rels, cached=False, allowed=()):
+def hosted_runner_findings(worktree, against, rels, cached=False, allowed=(),
+                           labels=HOUSE_RUNNER_LABELS):
     """Gives a finding for each GitHub-hosted runs-on line that a change adds or changes
     in a workflow. A line the change does not touch is not judged, and a file in
-    allowed, the repository's hosted_workflows, is not judged."""
+    allowed, the repository's hosted_workflows, is not judged. Each finding names
+    labels, the house's runner labels."""
     findings = []
     for rel in rels:
         full = os.path.join(worktree, rel)
@@ -1418,13 +1421,14 @@ def hosted_runner_findings(worktree, against, rels, cached=False, allowed=()):
                     "path": rel, "line": item["line"], "col": 1,
                     "message": "runs-on: %s is a GitHub-hosted runner (%s). CI runs on the "
                                "house's runners: use the labels %s"
-                               % (item["label"], item["text"], ", ".join(HOUSE_RUNNER_LABELS))})
+                               % (item["label"], item["text"], ", ".join(labels))})
     return findings
 
 
-def hosted_runner_lines(worktree, allowed=()):
+def hosted_runner_lines(worktree, allowed=(), hosted_ok=False):
     """Gives every GitHub-hosted runs-on line of the worktree's workflows, as information.
-    `allowed` says if the file is in allowed, the repository's hosted_workflows."""
+    `allowed` says if the file is in allowed, the repository's hosted_workflows, or
+    the repository is hosted_ok."""
     folder = os.path.join(worktree, ".github", "workflows")
     lines = []
     for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
@@ -1433,7 +1437,7 @@ def hosted_runner_lines(worktree, allowed=()):
         if is_workflow(rel) and os.path.isfile(full):
             with open(full, "r", encoding="utf-8", errors="replace") as handle:
                 lines.extend({"path": rel, "line": item["line"], "text": item["text"],
-                              "allowed": rel in allowed}
+                              "allowed": hosted_ok or rel in allowed}
                              for item in hosted_runs_on(handle.read()))
     return lines
 
@@ -1708,13 +1712,14 @@ def check(bench, args):
                 skipped.append(rel)
         if workflows:
             findings.extend(yaml_errors(workflows, unavailable))
-        if any(is_workflow(rel) for _, rel in places):
+        if any(is_workflow(rel) for _, rel in places) and not repo.hosted_ok:
             base_head = git.rev_parse(
                 base_ref_of(bench.bare_dir(repo.name), bench.base_of(repo, branch)), cwd=worktree)
             findings.extend(hosted_runner_findings(worktree, base_head,
                                                    [rel for _, rel in places],
-                                                   allowed=repo.hosted_workflows))
-        hosted = hosted_runner_lines(worktree, repo.hosted_workflows)
+                                                   allowed=repo.hosted_workflows,
+                                                   labels=bench.config.runner_labels))
+        hosted = hosted_runner_lines(worktree, repo.hosted_workflows, repo.hosted_ok)
         if shell:
             program = shutil.which("bash")
             if not program:
@@ -2341,14 +2346,15 @@ def submit(bench, args):
                     raise Refusal("over_ceiling", lines=added + removed, max_lines=ceiling,
                                   files=files, against=against, target=target,
                                   remedy="make the change smaller, or raise the ceiling")
-            hosted = hosted_runner_findings(worktree, against, git.out(
+            hosted = [] if repo.hosted_ok else hosted_runner_findings(worktree, against, git.out(
                 ["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--no-renames",
                  "--diff-filter=d", against, "--", ".github/workflows"],
-                cwd=worktree).splitlines(), cached=True, allowed=repo.hosted_workflows)
+                cwd=worktree).splitlines(), cached=True, allowed=repo.hosted_workflows,
+                labels=bench.config.runner_labels)
             if hosted:
                 os.replace(saved, index)
                 raise Refusal("hosted_runner", findings=hosted,
-                              house_labels=list(HOUSE_RUNNER_LABELS),
+                              house_labels=list(bench.config.runner_labels),
                               reason="the change adds or changes a runs-on to a GitHub-hosted "
                                      "runner, and CI runs on the house's runners only",
                               remedy="give runs-on the house's labels in these lines, "
@@ -2524,6 +2530,7 @@ def feedback(bench, args):
         if pipeline.get("result") in ("failed", "error", "failure", "stopped", "cancelled",
                                       "timed_out"):
             steps = attempt("steps", lambda: client.steps(pipeline["id"]), [])
+            logs = attempt("logs", lambda: mark_fetch_failures(client, pipeline["id"], steps), {})
             pipeline["steps"] = steps
             stopped = interrupted_of(steps)
             if stopped:
@@ -2538,7 +2545,8 @@ def feedback(bench, args):
                 if step.get("result") not in ("failed", "error", "failure"):
                     continue
                 try:
-                    log = client.step_log(pipeline["id"], step["id"]) or ""
+                    log = (logs[step.get("id")] if step.get("id") in logs
+                           else client.step_log(pipeline["id"], step["id"]) or "")
                 except forge.ForgeError as exc:
                     log = "(no log: %s)" % exc
                 if not log.strip() or log.startswith("(no log:"):
@@ -2572,9 +2580,11 @@ def feedback(bench, args):
                     "message": status.get("description") or "%s failed" % status.get("name"),
                     "url": status.get("url"),
                 }
-                if step_of_status(status, dead):
+                stopped = step_of_status(status, dead)
+                if stopped:
                     finding["severity"] = "interrupted"
-                    finding["message"] = INTERRUPTED % status.get("name")
+                    finding["message"] = ((DEPENDENCY_FETCH if stopped[1].get("fetch") else INTERRUPTED)
+                                          % status.get("name"))
                     findings.append(finding)
                     continue
                 found = step_of_status(status, read)
@@ -2665,16 +2675,70 @@ LOG_NO_MARK_NOTE = ("no marker matched in this failed job: these are the lines u
 # red is the runner's, and rerun starts it again.
 INTERRUPTED = ("ci: interrupted: %s cancelled or stopped before a test ran, no log: "
                "call rerun and the bench reruns it")
+# A job whose log ends on a registry's 403, 429 or 5xx before any test ran died
+# fetching its dependencies or its image: its red is the registry's.
+DEPENDENCY_FETCH = ("ci: interrupted: dependency fetch: %s died fetching a dependency or an "
+                    "image before a test ran: call rerun and the bench reruns it")
 # A job that only gathers the others is red because they did not finish.
 GATHERED = "; %s is red only because they did not finish, and rerun starts it again too"
+# The answer of a registry that refused or failed a fetch, and the words that
+# say the line is a fetch. A line of a test report keeps the job a red test step.
+FETCH_STATUS = re.compile(r"(?i)\b(?:403|429|5\d\d)\b|forbidden|too ?many ?requests|rate limit"
+                          r"|bad gateway|service unavailable|gateway time-?out")
+FETCH_SOURCE = re.compile(r"(?i)maven|clojars|ghcr\.io|docker\.io|registry|artifact|classpath"
+                          r"|could not transfer|failed to (?:read|fetch|download|resolve|pull)"
+                          r"|error (?:building classpath|pulling)|manifest|toomanyrequests|pull rate")
+TEST_REPORTED = re.compile(r"FAIL in|ERROR in|Ran \d+ tests|\d+ tests?, \d+ assertions?"
+                           r"|\d+ failures?, \d+ errors?|Error: FAILED: |=+ .*\b\d+ (?:passed|failed)\b")
+
+
+def died_fetching(log):
+    """Tells if a failed job's log ended on a dependency or registry fetch
+    before any test ran: a fetch line with a 403, 429 or 5xx, and no test report."""
+    if not log or log.startswith("(no log:"):
+        return False
+    lines = [LOG_STAMP.sub("", ANSI_ESCAPE.sub("", line)) for line in log.splitlines()]
+    if any(TEST_REPORTED.search(line) for line in lines):
+        return False
+    return any(FETCH_STATUS.search(line) and FETCH_SOURCE.search(line) for line in lines)
+
+
+def mark_fetch_failures(client, pipeline_id, steps):
+    """Marks interrupted each failed job of a pipeline that died fetching its
+    dependencies, then each job that only gathers it, and gives {job id: log}
+    of the logs it read, so a caller reads each one time."""
+    logs = {}
+    for step in steps:
+        if step.get("result") not in ("failed", "error", "failure") or step.get("interrupted"):
+            continue
+        try:
+            log = client.step_log(pipeline_id, step["id"]) or ""
+        except forge.ForgeError as exc:
+            log = "(no log: %s)" % exc
+        logs[step.get("id")] = log
+        if died_fetching(log):
+            step["interrupted"] = True
+            step["fetch"] = True
+    needs_of_run = getattr(client, "needs_of_run", None)
+    if (needs_of_run and any(s.get("fetch") for s in steps)
+            and any(s.get("result") == "failure" and not s.get("interrupted") for s in steps)):
+        forge.mark_aggregates(steps, needs_of_run(pipeline_id))
+    return logs
 
 
 def interrupted_message(stopped):
     """Gives the message of the interrupted jobs of one pipeline."""
     gathered = [step.get("name") or "job" for step in stopped if step.get("aggregate")]
-    names = [step.get("name") or "job" for step in stopped if not step.get("aggregate")]
-    message = INTERRUPTED % ", ".join(names or gathered)
-    if names and gathered:
+    fetched = [step.get("name") or "job" for step in stopped if step.get("fetch")]
+    names = [step.get("name") or "job" for step in stopped
+             if not step.get("aggregate") and not step.get("fetch")]
+    if fetched:
+        message = DEPENDENCY_FETCH % ", ".join(fetched)
+        if names:
+            message += "; %s cancelled or stopped before a test ran" % ", ".join(names)
+    else:
+        message = INTERRUPTED % ", ".join(names or gathered)
+    if (names or fetched) and gathered:
         message += GATHERED % ", ".join(gathered)
     return message
 
@@ -3074,6 +3138,68 @@ def update_branch(bench, args):
     return dict(answer, repo=repo.name, number=number)
 
 
+SHA_CHARS = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def _named_commit(bare, args, key):
+    """Gives the full name of one commit the call names, fetching it by name when the
+    clone lacks it, or refuses."""
+    sha = _text(args, key, required=True)
+    if not SHA_CHARS.match(sha):
+        raise Refusal("input", field=key, reason="a commit's hex name is necessary")
+    if not git.ref_exists(sha, cwd=bare):
+        git.run(["fetch", "origin", sha], cwd=bare, timeout=600, check=False)
+    if not git.ref_exists(sha, cwd=bare):
+        raise Refusal("unknown_commit", field=key, commit=sha,
+                      reason="the commit is not in the clone, and the remote did not give it")
+    return git.rev_parse(sha + "^{commit}", cwd=bare)
+
+
+def _own_patch_id(bare, base, head):
+    """Gives the stable patch-id of `git diff base...head`: what head adds over its
+    merge-base with base. None when it adds nothing."""
+    diff = git.out(["diff", "--no-color", "--no-ext-diff", base + "..." + head], cwd=bare)
+    if not diff.strip():
+        return None
+    fields = git.run(["patch-id", "--stable"], cwd=bare, stdin=diff)[1].split()
+    return fields[0] if fields else None
+
+
+def compare_heads(bench, args):
+    """Tells if a moved head is the approved head merged with its base's head, now or an
+    earlier one, carrying the same own diff, so a yes given to the approved head may carry
+    over to it."""
+    repo = bench.repo(args.get("repo"))
+    base = _text(args, "base", default=repo.default_branch)
+    if not BRANCH_CHARS.match(base) or ".." in base:
+        raise Refusal("input", field="base", reason="Use only A-Z a-z 0-9 . _ / -")
+    with bench.lock(repo.name):
+        bare = bench.fetch(repo)
+        remote = "refs/remotes/origin/" + base
+        if not git.ref_exists(remote, cwd=bare):
+            raise Refusal("no_base", repo=repo.name, base=base,
+                          reason="the base branch is not on the remote")
+        base_head = git.rev_parse(remote, cwd=bare)
+        approved = _named_commit(bare, args, "approved")
+        head = _named_commit(bare, args, "head")
+        parents = git.line(["rev-list", "--parents", "-n", "1", head], cwd=bare).split()[1:]
+        base_parent = None
+        if len(parents) == 2 and parents[0] == approved:
+            code = git.run(["merge-base", "--is-ancestor", parents[1], base_head], cwd=bare, check=False)[0]
+            if code == 0:
+                base_parent = parents[1]
+        judge = base_parent or base_head
+        approved_patch_id = _own_patch_id(bare, judge, approved)
+        head_patch_id = _own_patch_id(bare, judge, head)
+    merged_with_base = base_parent is not None
+    same_own_diff = approved_patch_id == head_patch_id
+    return {"repo": repo.name, "base": base, "base_head": base_head, "approved": approved,
+            "head": head, "parents": parents, "merged_with_base": merged_with_base,
+            "base_parent": base_parent,
+            "approved_patch_id": approved_patch_id, "head_patch_id": head_patch_id,
+            "same_own_diff": same_own_diff, "carries": merged_with_base and same_own_diff}
+
+
 def _rerun_failed(client, repo, branch, head, run_id):
     """Asks the forge to start one run's failed jobs again. A 403 is the token's."""
     try:
@@ -3152,6 +3278,7 @@ def rerun(bench, args):
             if run.get("state") != "completed":
                 continue
             steps = client.steps(run["id"])
+            mark_fetch_failures(client, run["id"], steps)
             red = [s.get("name") for s in steps
                    if s.get("result") == "failure" and not s.get("interrupted")]
             if red:
@@ -3164,8 +3291,8 @@ def rerun(bench, args):
                                 "url": run.get("url"), "jobs": jobs})
         if not stopped:
             raise Refusal("nothing_interrupted", repo=repo.name, branch=branch, head=head,
-                          reason="no finished run on the head has a cancelled, timed out or "
-                                 "stopped-in-setup job")
+                          reason="no finished run on the head has a cancelled, timed out, "
+                                 "stopped-in-setup or dependency-fetch-dead job")
         for run in stopped:
             _rerun_failed(client, repo, branch, head, run["id"])
     except forge.ForgeError as exc:
@@ -3361,15 +3488,30 @@ def _dispatch_test(bench, repo, spec, client, args):
     runs = client.workflow_runs(spec["workflow"], scratch)
     before = {run["id"] for run in runs}
     running = [run for run in runs if run.get("state") != "completed"]
+    # a run the forge made past the ceiling no longer holds the branch; one
+    # with no created time is taken as young
+    young = [run for run in running
+             if (_age(_stamp_seconds(run.get("created"))) or 0) <= TEST_RUN_CEILING]
+    stale = [run for run in running if run not in young]
+    superseded = []
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
         head = head_of(worktree)
         # a new push to the scratch ref would cancel the run still on it
-        if running and _scratch_exists(worktree, scratch):
+        if young and _scratch_exists(worktree, scratch):
             raise Refusal("test_running", repo=repo.name, branch=branch,
-                          run_id=running[0]["id"], run_url=running[0].get("url"),
+                          run_id=young[0]["id"], run_url=young[0].get("url"),
+                          elapsed_s=_age(_stamp_seconds(young[0].get("created"))),
                           reason="a test run of this branch is not done: "
-                                 "read it with test_result, then test again")
+                                 "read it with test_result, then test again",
+                          remedy="a run past %d s no longer blocks: test again then"
+                                 % TEST_RUN_CEILING)
+        for run in stale:
+            try:
+                client.cancel_run(run["id"])
+            except forge.ForgeError:
+                pass
+            superseded.append(run["id"])
         head, paths = _scratch_commit(worktree, head)
         # the scratch ref, never the pull request's branch
         code, out, err = git.run(["push", "--force", "origin",
@@ -3393,6 +3535,8 @@ def _dispatch_test(bench, repo, spec, client, args):
     answer = {"repo": repo.name, "branch": branch, "head": head, "conclusion": "pending",
               "run_id": None, "run_url": None, "dispatched_at": dispatched_at,
               "dirty_included": bool(paths), "paths": paths}
+    if superseded:
+        answer["superseded"] = superseded
     for attempt in range(TEST_FIND_TRIES):
         runs = [run for run in client.workflow_runs(spec["workflow"], scratch)
                 if run["id"] not in before and run.get("commit") == head]
@@ -3916,10 +4060,14 @@ def enroll(bench, args):
             name, args.get("hosted_workflows"))
     except config_module.ConfigError as exc:
         raise Refusal("input", field="hosted_workflows", reason=str(exc))
+    try:
+        hosted_ok = config_module.hosted_ok_from_dict(name, args.get("hosted_ok"))
+    except config_module.ConfigError as exc:
+        raise Refusal("input", field="hosted_ok", reason=str(exc))
     entry = config_module.RepoConfig(
         name=name, clone_url=clone_url, default_branch=default_branch,
         deny=deny, land=land, source="file", test=test, check=check,
-        hosted_workflows=hosted_workflows)
+        hosted_workflows=hosted_workflows, hosted_ok=hosted_ok)
     with bench.lock(name):
         cloned = not bench.bare_exists(name)
         try:
@@ -4794,7 +4942,8 @@ TOOL_SPECS = [
             "comes as one finding in findings, with a source (landing, pipeline, status, review, "
             "pull_request), a severity, a message, and the path:line locations it names. Read "
             "findings, fix the worktree, submit again. A run whose jobs were cancelled, timed "
-            "out or stopped in setup, with no red test step, is severity interrupted, not "
+            "out, stopped in setup or died fetching a dependency (a registry 403, 429 or 5xx "
+            "before any test ran), with no red test step, is severity interrupted, not "
             "error, and its message starts ci: interrupted: call rerun for it. Sources the "
             "rig cannot reach are named in unavailable."
         ),
@@ -5001,13 +5150,45 @@ TOOL_SPECS = [
         },
     },
     {
+        "name": "compare_heads",
+        "function": compare_heads,
+        "description": (
+            "Tells if a moved head is the approved head merged with its base, carrying the "
+            "same own diff, so a yes given to the approved head may carry over. The rig "
+            "fetches, then reads head's parents and the stable patch-id of git diff "
+            "base...approved and of git diff base...head, base being the base branch's head "
+            "now. merged_with_base: head's parents are exactly [approved, base_head]; "
+            "same_own_diff: the two patch-ids are equal; carries: both. e.g. {\"carries\": "
+            "true, \"parents\": [\"<approved>\", \"<base_head>\"], ...}. The refusals are "
+            "input, no_base (the base branch is not on the remote) and unknown_commit."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "base": {"type": "string",
+                         "description": "The base branch. The default is the repository's "
+                                        "default branch."},
+                "approved": {"type": "string",
+                             "description": "The head commit a person approved, hex."},
+                "head": {"type": "string",
+                         "description": "The head commit the branch has now, hex."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "approved", "head"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "rerun",
         "function": rerun,
         "description": (
             "Starts the interrupted CI of the branch's pushed head again. The rig reads the "
             "newest finished run of each workflow on that head: a job that was cancelled, "
-            "timed out, or failed with no step past setup (checkout, set up, containers, "
-            "network, services) is interrupted, and the rig asks GitHub to re-run the "
+            "timed out, failed with no step past setup (checkout, set up, containers, "
+            "network, services), or died fetching a dependency (its log ends on a registry "
+            "403, 429 or 5xx before any test ran) is interrupted, and the rig asks GitHub to re-run the "
             "failed jobs of its run, e.g. {\"run_id\": 11, \"runs\": [...]}. Use it when "
             "feedback gives a finding whose message starts ci: interrupted. One time per "
             "head. The refusals are not_pushed, red (a job failed in a test step: fix it), "
@@ -5129,8 +5310,10 @@ TOOL_SPECS = [
             "conclusion: pending, head, dispatched_at}. When no run shows within about 15 s, "
             "run_id is null: give test_result the branch, head and dispatched_at instead. "
             "Read the result with test_result. While a run of the branch is not completed and "
-            "its scratch ref is still there, test refuses test_running with that run's run_id "
-            "and run_url and pushes nothing: read it with test_result, then test again. "
+            "its scratch ref is still there, test refuses test_running with that run's run_id, "
+            "run_url and elapsed_s and pushes nothing: read it with test_result, then test "
+            "again. A run not completed 1800 s after the forge made it no longer blocks: test "
+            "cancels it, lists its id in superseded, and dispatches a new run. "
             "The refusals are no_test_workflow, test_running, git and forge."
         ),
         "schema": {
@@ -5252,6 +5435,10 @@ TOOL_SPECS = [
                                      "description": "The workflow paths, relative to the "
                                                     "repository, that may use a GitHub-hosted "
                                                     "runs-on. Without it no workflow may."},
+                "hosted_ok": {"type": ["boolean", "null"],
+                              "description": "True lets every workflow of the repository use "
+                                             "a GitHub-hosted runs-on: a repository with no "
+                                             "house runners. Without it only hosted_workflows may."},
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },

@@ -667,6 +667,29 @@ class TestHouseMerge(LandingCase):
         self.assertEqual(answer["pending"], [])
         self.assertEqual(self.merges(), [])
 
+    def compares_against(self, base):
+        return [path for method, path, body in self.calls
+                if path.startswith("/compare/%s..." % base)]
+
+    def test_a_green_head_on_a_master_base_compares_against_master_and_waits(self):
+        master_pr = dict(OPEN_PR, base={"ref": "master"})
+        self.forge_with(pr=dict(master_pr, mergeable=None, mergeable_state="unknown"),
+                        runs=check_runs(("tests", "completed", "success")))
+        self.answers["/compare/master...abc123"] = ("GET", {"behind_by": 0, "ahead_by": 1})
+        answer = self.green()
+        self.assertEqual((answer["state"], answer["waits_on"]), ("waiting", "github"))
+        self.assertNotEqual(self.compares_against("master"), [])
+        self.assertEqual(self.compares_against("main"), [])
+        self.assertEqual(self.merges(), [])
+
+    def test_a_clean_head_on_a_master_base_merges(self):
+        self.forge_with(pr=dict(OPEN_PR, base={"ref": "master"}, mergeable_state="clean"),
+                        runs=check_runs(("tests", "completed", "success")))
+        self.answers["/compare/master...abc123"] = ("GET", {"behind_by": 0, "ahead_by": 1})
+        self.assertEqual(self.green()["state"], "merged")
+        self.assertEqual(self.compares_against("main"), [])
+        self.assertEqual(self.merges(), [{"sha": "abc123", "merge_method": "merge"}])
+
     def test_waiting_says_whether_it_waits_on_checks_or_on_github(self):
         self.forge_with(runs=check_runs(("tests", "in_progress", None)))
         answer = self.green()
@@ -1443,6 +1466,77 @@ class TestPullRequestAndFeedback(LandingCase):
         self.assertEqual(answer["jobs"], ["suites (x) / gate"])
         self.assertEqual(self.reruns(), [])
 
+    def test_rerun_starts_a_gate_two_reusable_workflows_deep_over_a_cancelled_sibling(self):
+        head = self.submitted()
+        self.one_run(head, [
+            {"id": 21, "name": "outer / inner / unit", "status": "completed", "conclusion": "success",
+             "steps": [{"name": "Run tests", "conclusion": "success"}]},
+            {"id": 22, "name": "outer / inner / lint", "status": "completed", "conclusion": "cancelled", "steps": []},
+            dict(self.GATE, name="outer / inner / gate")])
+        self.answers["/contents/.github/workflows/tests.yml"] = ("GET", {"content": base64.b64encode(
+            b"jobs:\n  outer:\n    uses: ./.github/workflows/outer.yml\n").decode()})
+        self.answers["/contents/.github/workflows/outer.yml"] = ("GET", {"content": base64.b64encode(
+            b"jobs:\n  inner:\n    uses: ./.github/workflows/suites.yml\n").decode()})
+        self.answers["/contents/.github/workflows/suites.yml"] = ("GET", {
+            "content": base64.b64encode(self.SUITES.encode()).decode()})
+        self.answers["/actions/runs/11"] = ("GET", {
+            "id": 11, "head_sha": head, "path": ".github/workflows/tests.yml"})
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["runs"][0]["jobs"], ["outer / inner / lint", "outer / inner / gate"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def inner_leg_gate_run(self, head, lint="cancelled", more=(), leg="outer / inner (x)"):
+        """Answers one failed run on head whose gate is two reusable workflows deep, and whose
+        inner caller is a matrix job: GitHub names its jobs `outer / inner (x) / job`, or
+        `outer (a) / inner (b) / job` when the outer caller is one too."""
+        self.one_run(head, [
+            {"id": 21, "name": leg + " / unit", "status": "completed", "conclusion": "success",
+             "steps": [{"name": "Run tests", "conclusion": "success"}]},
+            {"id": 22, "name": leg + " / lint", "status": "completed", "conclusion": lint, "steps": []},
+            dict(self.GATE, name=leg + " / gate")] + list(more))
+        self.answers["/contents/.github/workflows/tests.yml"] = ("GET", {"content": base64.b64encode(
+            b"jobs:\n  outer:\n    uses: ./.github/workflows/outer.yml\n").decode()})
+        self.answers["/contents/.github/workflows/outer.yml"] = ("GET", {"content": base64.b64encode(
+            b"jobs:\n  inner:\n    uses: ./.github/workflows/suites.yml\n").decode()})
+        self.answers["/contents/.github/workflows/suites.yml"] = ("GET", {
+            "content": base64.b64encode(self.SUITES.encode()).decode()})
+        self.answers["/actions/runs/11"] = ("GET", {
+            "id": 11, "head_sha": head, "path": ".github/workflows/tests.yml"})
+
+    def test_rerun_starts_a_gate_whose_inner_caller_is_a_matrix_job_over_a_cancelled_sibling(self):
+        head = self.submitted()
+        self.inner_leg_gate_run(head)
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["runs"][0]["jobs"], ["outer / inner (x) / lint", "outer / inner (x) / gate"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_rerun_refuses_an_inner_leg_gate_red_beside_a_cancelled_job_of_another_leg(self):
+        head = self.submitted()
+        self.inner_leg_gate_run(head, lint="success", more=[
+            {"id": 25, "name": "outer / inner (y) / lint", "status": "completed", "conclusion": "cancelled",
+             "steps": []}])
+        answer = self.refused("rerun", branch="work")
+        self.assertEqual(answer["refused"], "red")
+        self.assertEqual(answer["jobs"], ["outer / inner (x) / gate"])
+        self.assertEqual(self.reruns(), [])
+
+    def test_rerun_starts_a_gate_whose_callers_are_matrix_jobs_at_two_levels_over_a_cancelled_sibling(self):
+        head = self.submitted()
+        self.inner_leg_gate_run(head, leg="outer (a) / inner (b)")
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["runs"][0]["jobs"], ["outer (a) / inner (b) / lint", "outer (a) / inner (b) / gate"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_rerun_refuses_a_two_level_leg_gate_red_beside_a_cancelled_job_of_another_inner_leg(self):
+        head = self.submitted()
+        self.inner_leg_gate_run(head, lint="success", leg="outer (a) / inner (b)", more=[
+            {"id": 25, "name": "outer (a) / inner (c) / lint", "status": "completed", "conclusion": "cancelled",
+             "steps": []}])
+        answer = self.refused("rerun", branch="work")
+        self.assertEqual(answer["refused"], "red")
+        self.assertEqual(answer["jobs"], ["outer (a) / inner (b) / gate"])
+        self.assertEqual(self.reruns(), [])
+
     def test_rerun_starts_a_gate_over_a_gate_that_github_lists_first(self):
         head = self.submitted()
         self.gated_run(head, [dict(self.GATE, id=24, name="all")] + self.CUT_JOBS,
@@ -1525,6 +1619,59 @@ class TestPullRequestAndFeedback(LandingCase):
         severities = [f["severity"] for f in feedback["findings"]]
         self.assertIn("error", severities)
         self.assertNotIn("interrupted", severities)
+
+    def fetch_log(self, rows):
+        stamp = "2026-10-18T10:00:01.0000000Z "
+        self.answers["/actions/jobs/21/logs"] = "".join(stamp + row + "\n" for row in rows)
+
+    MAVEN_403 = (
+        "##[group]Run clojure -M:test", "##[endgroup]",
+        "Error building classpath. Could not transfer artifact org.clojure:tools.cli:jar:1.1.230 "
+        "from/to central (https://repo1.maven.org/maven2/): status code: 403, reason phrase: Forbidden (403)",
+        "##[error]Process completed with exit code 1.")
+    REGISTRY_429 = (
+        "##[group]Run docker build .", "##[endgroup]",
+        "ERROR: failed to solve: node:20: unexpected status from HEAD request to "
+        "https://registry-1.docker.io/v2/library/node/manifests/20: 429 Too Many Requests",
+        "toomanyrequests: You have reached your pull rate limit.",
+        "##[error]Process completed with exit code 1.")
+
+    def assert_fetch_is_rerun(self, rows):
+        head = self.submitted()
+        self.one_run("abc123", self.RED_JOBS[:1])
+        self.fetch_log(rows)
+        feedback = self.ok("feedback", branch="work")
+        sources = [(f["source"], f["severity"]) for f in feedback["findings"]]
+        self.assertEqual(sources, [("pipeline", "interrupted"), ("status", "interrupted")])
+        for finding in feedback["findings"]:
+            self.assertTrue(finding["message"].startswith("ci: interrupted: dependency fetch"),
+                            finding["message"])
+        self.one_run(head, self.RED_JOBS[:1])
+        self.fetch_log(rows)
+        answer = self.ok("rerun", branch="work")
+        self.assertEqual(answer["runs"][0]["jobs"], ["unit"])
+        self.assertEqual(self.reruns(), ["/actions/runs/11/rerun-failed-jobs"])
+
+    def test_a_maven_403_building_the_classpath_is_rerun_as_interrupted(self):
+        self.assert_fetch_is_rerun(self.MAVEN_403)
+
+    def test_a_registry_429_in_the_build_is_rerun_as_interrupted(self):
+        self.assert_fetch_is_rerun(self.REGISTRY_429)
+
+    def test_a_failing_test_beside_a_fetch_error_stays_a_red_test_step(self):
+        rows = self.MAVEN_403[:3] + ("FAIL in (factory-test) (factory_test.clj:12)",
+                                     "Ran 4 tests containing 9 assertions.", "1 failures, 0 errors.")
+        head = self.submitted()
+        self.one_run("abc123", self.RED_JOBS[:1])
+        self.fetch_log(rows)
+        feedback = self.ok("feedback", branch="work")
+        severities = [f["severity"] for f in feedback["findings"]]
+        self.assertIn("error", severities)
+        self.assertNotIn("interrupted", severities)
+        self.one_run(head, self.RED_JOBS[:1])
+        self.fetch_log(rows)
+        self.assertEqual(self.refused("rerun", branch="work")["refused"], "red")
+        self.assertEqual(self.reruns(), [])
 
     def test_the_log_tail_keeps_the_test_report(self):
         head = "FAIL in (factory-test) (factory_test.clj:12)\nexpected: 1\n  actual: 2\n"
