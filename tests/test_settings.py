@@ -14,7 +14,8 @@ class TestSettings(unittest.TestCase):
         self.root = tempfile.mkdtemp(prefix="bench-settings-")
         self.addCleanup(shutil.rmtree, self.root, True)
         for name in ("BENCH_GIT_TOKEN", "BENCH_BITBUCKET_USER", "BENCH_BITBUCKET_TOKEN",
-                     "BENCH_GITHUB_TOKEN", "BENCH_ENV_FILE", "BENCH_HOST"):
+                     "BENCH_GITHUB_TOKEN", "BENCH_ENV_FILE", "BENCH_HOST", "BENCH_GIT_NAME",
+                     "BENCH_GIT_EMAIL"):
             self.addCleanup(os.environ.pop, name, None)
         os.environ["BENCH_ENV_FILE"] = os.path.join(self.root, "none.env")
 
@@ -54,6 +55,14 @@ class TestSettings(unittest.TestCase):
         self.assertIn("credential.helper=", args)
         self.assertIn("credential.helper=" + git.CREDENTIAL_HELPER, args)
         self.assertEqual(git.environment("t")["BENCH_GIT_TOKEN"], "t")
+
+    def test_commits_carry_the_configured_identity(self):
+        self.assertIn("user.name=waymark-bench", git.config_args(None))
+        os.environ["BENCH_GIT_NAME"] = "Ada Lovelace"
+        os.environ["BENCH_GIT_EMAIL"] = "ada@example.org"
+        args = git.config_args(None)
+        self.assertIn("user.name=Ada Lovelace", args)
+        self.assertIn("user.email=ada@example.org", args)
 
     def test_the_forge_credentials_come_from_the_settings(self):
         with self.assertRaises(forge.ForgeError):

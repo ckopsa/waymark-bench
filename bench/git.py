@@ -15,10 +15,10 @@ from . import settings
 
 DEFAULT_TIMEOUT = 120
 
-IDENTITY = [
-    "-c", "user.name=waymark-bench",
-    "-c", "user.email=bench@waymark.invalid",
-]
+def identity(config=None):
+    """Gives the -c flags of the commit identity: BENCH_GIT_NAME and BENCH_GIT_EMAIL."""
+    config = config or settings.load()
+    return ["-c", "user.name=" + config.git_name, "-c", "user.email=" + config.git_email]
 
 # The helper reads the token from the environment at the time of the call.
 CREDENTIAL_HELPER = (
@@ -46,9 +46,9 @@ def scrub(text):
     return settings.scrub(text)
 
 
-def config_args(token=None):
+def config_args(token=None, config=None):
     """Gives the -c flags for every call."""
-    args = list(IDENTITY) + ["-c", "advice.detachedHead=false"]
+    args = identity(config) + ["-c", "advice.detachedHead=false"]
     if token:
         # An empty value first: it drops the helpers of the system.
         args += ["-c", "credential.helper=", "-c", "credential.helper=" + CREDENTIAL_HELPER]
@@ -69,8 +69,9 @@ def environment(token=None):
 
 def run(argv, cwd=None, timeout=DEFAULT_TIMEOUT, check=True):
     """Runs one git command. Gives (returncode, stdout, stderr)."""
-    token = settings.load().secret("git_token")
-    command = ["git"] + config_args(token) + list(argv)
+    config = settings.load()
+    token = config.secret("git_token")
+    command = ["git"] + config_args(token, config) + list(argv)
     try:
         proc = subprocess.run(
             command,
