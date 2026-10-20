@@ -14,6 +14,8 @@ another file). The credentials are secrets: they never print, and
   BENCH_GITHUB_TOKEN      the GitHub token, when it is not the git token
   BENCH_SECRETS_TOKEN     the GitHub token of secret_set and secret_list only
   BENCH_TEST_WAIT         the seconds test_result waits by default (25; 28 at most)
+  BENCH_GIT_NAME          the author and committer name of the rig's commits
+  BENCH_GIT_EMAIL         the author and committer email of the rig's commits
 """
 
 import os
@@ -35,6 +37,8 @@ class Settings(BaseSettings):
     github_token: SecretStr | None = None
     secrets_token: SecretStr | None = None
     test_wait: int = 25
+    git_name: str = "waymark-bench"
+    git_email: str = "bench@waymark.invalid"
 
     def secret(self, name):
         """Gives the value of one secret, or None."""
