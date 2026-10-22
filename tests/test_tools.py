@@ -1353,6 +1353,26 @@ class TestSubmit(BenchCase):
         self.assertEqual(util.git(["rev-parse", "HEAD"], cwd=path).strip(), head)
         util.git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], cwd=path)
 
+    def test_pull_with_abort_leaves_a_conflicted_merge_clean_at_the_old_head(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")
+        self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
+        head = util.git(["rev-parse", "HEAD"], cwd=path).strip()
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/a.txt", "alpha\ntheirs\ncharlie\n")
+        self.assertFalse(self.ok("pull", branch="work", **{"from": "base"})["merged"])
+        prepared = self.ok("prepare", branch="work")
+        self.assertTrue(prepared["merge_in_progress"])
+        self.assertIn("abort: true", prepared["note"])
+        answer = self.ok("pull", branch="work", abort=True)
+        self.assertTrue(answer["aborted"])
+        self.assertEqual(answer["head"], head)
+        self.assertEqual(answer["dirty"], 0)
+        # the merge is gone: a second abort finds none
+        again = self.ok("pull", branch="work", abort=True)
+        self.assertFalse(again["aborted"])
+        self.assertEqual(again["note"], "no merge was in progress")
+
     def test_submit_over_the_ceiling_keeps_the_unmerged_entries(self):
         path = self.prepared()
         util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")

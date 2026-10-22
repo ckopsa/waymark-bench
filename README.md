@@ -141,7 +141,17 @@ the base that the worktree does not have, as `status` does.
 worktree does not have. It is `null` when the branch is not on the
 remote. When one of the two is more than zero, `note` names the pull to
 use: `pull` from `head` moves the worktree to the remote branch, and
-`pull` from `base` merges the base in.
+`pull` from `base` merges the base in. `behind_remote` is counted
+before any pull of the base is made.
+
+`merge_in_progress` is true while a merge a conflicted pull left is in
+progress; `prepare` does not move such a worktree, and `note` then says
+so and names `pull` with `abort: true` as the way out. That pull runs
+`git merge --abort`: the worktree goes back to its head before the
+merge, the edits the pull held are put back (`reapplied`), and the
+answer gives `head`, `aborted: true`, `dirty` and `dirty_paths`. With no
+merge in progress it moves nothing and answers `aborted: false` with a
+`note` that says so.
 
 `dirty` counts the uncommitted paths of the worktree, and `dirty_paths`
 names them, up to 100. When a worktree that exists is dirty and its head
