@@ -770,6 +770,7 @@ def status(bench, args):
             behind, ahead = (counts.split() + ["0", "0"])[:2]
             merging = git.ref_exists("MERGE_HEAD", cwd=path)
             markers = conflict_ranges(path, unmerged_paths(path)) if merging else None
+            unpushed = since_push(path, branch, base_ref_of(bare, base), len(paths))
     item = bench.landings.get(repo, branch)
     max_bytes = _int(args, "max_bytes", DEFAULT_MAX_BYTES, 1024, CEILING_MAX_BYTES)
     if kept:
@@ -784,6 +785,7 @@ def status(bench, args):
             "ahead": int(ahead),
             "behind": int(behind),
             "merge_in_progress": merging,
+            "since_push": unpushed,
             "worktree": True,
         }
         if markers is not None:
@@ -825,8 +827,41 @@ def branch_status(bench, repo, branch):
         "ahead": int(ahead),
         "behind": int(behind),
         "merge_in_progress": False,
+        "since_push": None,
         "worktree": False,
     }
+
+
+def since_push(path, branch, base_ref, dirty):
+    """Gives what the worktree holds since the branch's last push, against origin/<branch>:
+    the clean merges of the base, every other commit, and the count of uncommitted paths.
+    None when the branch was never pushed. No fetch and no forge call."""
+    remote = "refs/remotes/origin/" + branch
+    if not git.ref_exists(remote, cwd=path):
+        return None
+    merges = other = 0
+    # the base's own commits a merge brings in are the base's, not the branch's
+    rows = git.out(["rev-list", "--parents", remote + "..HEAD", "^" + base_ref], cwd=path)
+    for row in rows.splitlines():
+        commit, *parents = row.split()
+        if len(parents) == 2 and clean_merge_of_base(path, commit, parents, base_ref):
+            merges += 1
+        else:
+            other += 1
+    return {"merges_of_base": merges, "other_commits": other, "dirty_paths": dirty}
+
+
+def clean_merge_of_base(path, commit, parents, base_ref):
+    """Tells if a merge commit only merged the base: its second parent is in the base, and its
+    tree is the tree git's own merge of its parents makes, so nothing was resolved by hand."""
+    code = git.run(["merge-base", "--is-ancestor", parents[1], base_ref], cwd=path, check=False)[0]
+    if code != 0:
+        return False
+    code, text, _ = git.run(["merge-tree", "--write-tree", parents[0], parents[1]], cwd=path,
+                            check=False)
+    if code != 0:
+        return False
+    return text.split("\n", 1)[0].strip() == git.rev_parse(commit + "^{tree}", cwd=path)
 
 
 def _find_tree(bench, repo, worktree, args, max_bytes, allow=None):
@@ -4503,7 +4538,11 @@ TOOL_SPECS = [
             "Gives the state of the worktree: the head, the base, the count of changed "
             "paths, the changed paths, and the commits ahead of and behind the base. "
             "During a merge, markers gives each conflicted path with the line ranges "
-            "{start, end} of its conflict markers. It does no fetch. With wait, a "
+            "{start, end} of its conflict markers. since_push gives what the worktree "
+            "holds since its last push, against origin/<branch>: {merges_of_base, "
+            "other_commits, dirty_paths}, the clean merges of the base, every other "
+            "commit and the uncommitted paths; null when the branch was never pushed. "
+            "It does no fetch. With wait, a "
             "running landing is waited for first, up to that many seconds; the answer "
             "comes as soon as the landing ends."
         ),
