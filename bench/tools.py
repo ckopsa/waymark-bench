@@ -451,8 +451,18 @@ def bring_up(bare, worktree, branch, base_head):
     return True
 
 
-def lag_note(branch, base, behind, behind_remote):
-    """Names the pull that brings a lagging worktree forward, or gives ""."""
+MERGE_NOTE = ("a merge is in progress: remove the markers, then pull or submit, "
+              "or pull with abort: true to abort it")
+
+
+def lag_note(branch, base, behind, behind_remote, merging=False):
+    """Names the pull that brings a lagging worktree forward, or gives "".
+
+    A merge in progress comes first: no pull moves the worktree until it is
+    finished or aborted.
+    """
+    if merging:
+        return MERGE_NOTE
     def commits(count):
         return "%d commit%s" % (count, "" if count == 1 else "s")
     if behind_remote:
@@ -659,6 +669,7 @@ def prepare(bench, args):
         base_head = git.rev_parse(base_ref_of(bare, base), cwd=bare)
         fast_forwarded = False if created else bring_up(bare, path, branch, base_head)
         behind, behind_remote = lag_of(bare, path, branch, base_head)
+        merging = git.ref_exists("MERGE_HEAD", cwd=path)
         set_up = (bench.meta_read(repo.name).get(branch) or {}).get("setup") == "ok"
     # outside the lock: npm ci takes a minute, and the repository's other
     # worktrees need not wait for it
@@ -686,7 +697,8 @@ def prepare(bench, args):
             "default_branch": repo.default_branch,
             "behind": behind,
             "behind_remote": behind_remote,
-            "note": lag_note(branch, base, behind, behind_remote),
+            "merge_in_progress": merging,
+            "note": lag_note(branch, base, behind, behind_remote, merging),
             "setup": setup,
         }
 
@@ -2151,6 +2163,27 @@ def restore_stash(worktree, branch, paths):
             for name in names]
 
 
+def abort_merge(worktree, repo_name, branch):
+    """Gives up a merge in progress and puts back the edits its pull held.
+
+    The worktree is left at the head it had before the merge. With no merge
+    in progress nothing moves, and the answer says so.
+    """
+    answer = {"repo": repo_name, "branch": branch}
+    if not git.ref_exists("MERGE_HEAD", cwd=worktree):
+        answer.update({"head": head_of(worktree), "aborted": False,
+                       "note": "no merge was in progress"})
+        return answer
+    code, text, err = git.run(["merge", "--abort"], cwd=worktree, check=False)
+    if code != 0:
+        raise Refusal("abort_failed", branch=branch, reason=git.failure(err, text))
+    reapplied = restore_stash(worktree, branch, [])
+    dirty = status_paths(worktree)
+    answer.update({"head": head_of(worktree), "aborted": True, "reapplied": reapplied,
+                   "dirty": len(dirty), "dirty_paths": dirty[:100]})
+    return answer
+
+
 def _merge_in(worktree, branch, base, remote):
     """Merges remote into the worktree: fast-forward only when base is None."""
     before = status_paths(worktree)
@@ -2190,16 +2223,21 @@ def pull(bench, args):
 
     A dirty worktree's edits are put aside first and put back after the
     merge (reapplied). A merge that stops on a conflict holds them until a
-    later pull finishes it.
+    later pull finishes it, or a pull with abort gives it up.
     """
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     source = _text(args, "from", default="base")
     if source not in ("base", "head"):
         raise Refusal("input", field="from", reason="use base or head")
+    abort = args.get("abort", False)
+    if not isinstance(abort, bool):
+        raise Refusal("input", field="abort", reason="use true or false")
     with bench.lock(repo.name):
         worktree = bench.worktree(repo, branch)
         bench.no_landing(repo, branch)
+        if abort:
+            return abort_merge(worktree, repo.name, branch)
         if git.ref_exists("MERGE_HEAD", cwd=worktree):
             # A merge a conflicted pull left: commit it once its markers are gone.
             marked = finish_merge(worktree)
@@ -2207,7 +2245,7 @@ def pull(bench, args):
                 return {"repo": repo.name, "branch": branch, "head": head_of(worktree),
                         "merged": False, "conflicts": marked, "merge_in_progress": True,
                         "markers": conflict_ranges(worktree, marked),
-                        "note": "the merge is in progress: remove the markers, then pull or submit"}
+                        "note": MERGE_NOTE}
         bare = bench.fetch(repo)
         base = None
         if source == "head":
@@ -4839,7 +4877,10 @@ TOOL_SPECS = [
             "put aside and put back after; reapplied gives each path restored, conflicted "
             "(the markers stay in the file) or held (kept aside until a later pull). "
             "A conflicted pull gives markers: each conflicted path with the line ranges "
-            "{start, end} of its conflict markers."
+            "{start, end} of its conflict markers. abort: true gives up a merge in progress "
+            "instead: the worktree goes back to its head before the merge, the edits a "
+            "pull held are put back, and the answer gives the head and the dirty paths; "
+            "with no merge in progress it says so and moves nothing."
         ),
         "schema": {
             "type": "object",
@@ -4848,10 +4889,12 @@ TOOL_SPECS = [
                 "branch": _BRANCH,
                 "from": {"type": "string", "enum": ["base", "head"],
                          "description": "base merges the base branch in. head moves to the remote branch."},
+                "abort": {"type": "boolean",
+                          "description": "True aborts the merge in progress; from is then not read."},
                 "seat": _SEAT,
                 "sitting": _SITTING,
             },
-            "required": ["repo", "branch", "from"],
+            "required": ["repo", "branch"],
             "additionalProperties": False,
         },
     },
