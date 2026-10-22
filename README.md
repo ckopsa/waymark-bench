@@ -120,8 +120,16 @@ auth, so a self-hosted rig outside a container keeps the loopback default.
 `status` for a branch with no worktree answers from the bare clone, with
 no fetch: `head`, `ahead` and `behind` from the local branch, or from
 `origin/<branch>` when there is no local branch, with `dirty` 0, `paths`
-`[]` and `worktree` false. It refuses `no_worktree` only when the branch
+`[]`, `since_push` null and `worktree` false. It refuses `no_worktree` only when the branch
 is in neither. Every other answer of `status` has `worktree` true.
+
+With a worktree, `since_push` counts what the worktree holds since the
+branch's pushed head, `origin/<branch>`, with no fetch and no forge call:
+`merges_of_base` is the merge commits in `origin/<branch>..HEAD` whose
+second parent is in `origin/<base>` and whose tree is git's own merge of
+their parents; `other_commits` is every other commit there that is not
+already in `origin/<base>`, a hand-resolved merge among them; `dirty_paths` is the count of uncommitted paths. It is
+null when the branch was never pushed.
 
 The rig never removes a change's worktree on its own, after a stall or
 at any other time. Only `discard` with `drop_branch` removes one, and it

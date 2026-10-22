@@ -271,6 +271,34 @@ class TestStatus(BenchCase):
         missing = self.refused("status", branch="never")
         self.assertEqual(missing["refused"], "no_worktree")
 
+    def since_push(self):
+        unpushed = self.ok("status", branch="work")["since_push"]
+        return (unpushed["merges_of_base"], unpushed["other_commits"], unpushed["dirty_paths"])
+
+    def test_since_push_counts_a_clean_merge_of_the_base_and_the_edits(self):
+        path = self.prepared()
+        self.assertIsNone(self.ok("status", branch="work")["since_push"], "never pushed")
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")
+        self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
+        self.assertEqual(self.since_push(), (0, 0, 0))
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/new.txt", "from the other person\n")
+        self.assertTrue(self.ok("pull", branch="work", **{"from": "base"})["merged"])
+        self.assertEqual(self.since_push(), (1, 0, 0))
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours again\ncharlie\n")
+        self.assertEqual(self.since_push(), (1, 0, 1))
+
+    def test_since_push_counts_a_hand_resolved_merge_as_another_commit(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nours\ncharlie\n")
+        self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/a.txt", "alpha\ntheirs\ncharlie\n")
+        self.assertFalse(self.ok("pull", branch="work", **{"from": "base"})["merged"])
+        util.write(os.path.join(path, "docs/a.txt"), "alpha\nboth\ncharlie\n")
+        self.assertTrue(self.ok("pull", branch="work", **{"from": "base"})["merged"])
+        self.assertEqual(self.since_push(), (0, 1, 0))
+
 
 class TestFind(BenchCase):
 
