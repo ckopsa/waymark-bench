@@ -11,12 +11,15 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import __version__, tools
+from . import __version__, settings, tools
 
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "bench"
 MAX_BODY = 4 * 1024 * 1024
+# The header the engine resolves from the person's secret row: the git
+# token of the call when BENCH_GIT_TOKEN is unset. Never logged or echoed.
+SECRET_HEADER = "X-Secret-Ref"
 
 
 # The tools that change nothing: no worktree, clone, landing, CI run or
@@ -155,6 +158,13 @@ def make_handler(server):
             except ValueError:
                 self._send(400, error(None, -32700, "the body is not JSON"))
                 return
+            token = settings.CALL_GIT_TOKEN.set((self.headers.get(SECRET_HEADER) or "").strip() or None)
+            try:
+                self._answer(message)
+            finally:
+                settings.CALL_GIT_TOKEN.reset(token)
+
+        def _answer(self, message):
             if isinstance(message, list):
                 answers = [a for a in (server.handle(item) for item in message) if a is not None]
                 if not answers:

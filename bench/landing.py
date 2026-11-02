@@ -13,6 +13,7 @@ state afterwards. The state is written to disk after every step, so it
 survives a restart of the rig.
 """
 
+import contextvars
 import datetime
 import json
 import os
@@ -256,8 +257,10 @@ class Landing:
                 "steps": [],
             })
         self.save()
+        # The thread runs in the call's context: it keeps the call's git token.
         self.thread = threading.Thread(
-            target=self._run, args=(want_pr, title, description, trailers),
+            target=contextvars.copy_context().run,
+            args=(self._run, want_pr, title, description, trailers),
             name="landing-%s-%s" % (self.repo.name, self.branch), daemon=True)
         self.thread.start()
 

@@ -16,8 +16,13 @@ another file). The credentials are secrets: they never print, and
   BENCH_TEST_WAIT         the seconds test_result waits by default (25; 28 at most)
   BENCH_GIT_NAME          the author and committer name of the rig's commits
   BENCH_GIT_EMAIL         the author and committer email of the rig's commits
+
+When BENCH_GIT_TOKEN is unset, the git token of one HTTP call is the
+value of its X-Secret-Ref header (see mcp.py): the engine resolves it
+from the person's secret row. It is a secret like the others.
 """
 
+import contextvars
 import os
 
 from pydantic import SecretStr
@@ -41,11 +46,12 @@ class Settings(BaseSettings):
     git_email: str = "bench@waymark.invalid"
 
     def secret(self, name):
-        """Gives the value of one secret, or None."""
+        """Gives the value of one secret, or None. The environment's git token wins over
+        the call's."""
         value = getattr(self, name)
-        if value is None:
-            return None
-        value = value.get_secret_value()
+        value = value.get_secret_value() if value is not None else None
+        if not value and name == "git_token":
+            value = CALL_GIT_TOKEN.get()
         return value or None
 
     def secrets(self):
@@ -56,6 +62,11 @@ class Settings(BaseSettings):
             if value:
                 found.append(value)
         return found
+
+
+# The git token the engine sent on the current call, or None. The HTTP
+# transport sets it for the call and resets it after.
+CALL_GIT_TOKEN = contextvars.ContextVar("bench_call_git_token", default=None)
 
 
 def load(env_file=None):
