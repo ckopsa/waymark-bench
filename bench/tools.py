@@ -6,6 +6,7 @@ exception with a name and its data. No tool gives a stack trace.
 """
 
 import calendar
+import contextvars
 import difflib
 import fnmatch
 import json
@@ -1613,7 +1614,9 @@ def start_check_step(bench, repo, branch, worktree, lint):
                     if item["done"].is_set() and item["started"] < old]:
             del bench.checks[key]
         bench.checks[check_id] = entry
-    threading.Thread(target=work, name="check-" + check_id, daemon=True).start()
+    # The thread runs in the call's context: it keeps the call's git token.
+    threading.Thread(target=contextvars.copy_context().run, args=(work,),
+                     name="check-" + check_id, daemon=True).start()
     return check_id, entry
 
 
