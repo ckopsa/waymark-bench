@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -12,7 +13,7 @@ import urllib.request
 from unittest import mock
 
 from bench import __main__ as entry
-from bench import mcp
+from bench import git, mcp
 from bench.tools import Bench
 
 from . import util
@@ -33,16 +34,68 @@ class TransportCase(unittest.TestCase):
         self.thread.start()
         self.url = "http://127.0.0.1:%s/mcp/" % self.httpd.server_address[1]
 
-    def post(self, message):
-        """Sends one JSON-RPC message. Gives (status, answer)."""
+    def post(self, message, headers=None):
+        """Sends one JSON-RPC message, with more headers when given. Gives (status, answer)."""
         request = urllib.request.Request(
             self.url, data=json.dumps(message).encode("utf-8"),
-            headers={"Content-Type": "application/json",
-                     "Accept": "application/json, text/event-stream"},
+            headers=dict({"Content-Type": "application/json",
+                          "Accept": "application/json, text/event-stream"}, **(headers or {})),
             method="POST")
         with urllib.request.urlopen(request, timeout=30) as answer:
             body = answer.read()
             return answer.status, (json.loads(body) if body else None)
+
+
+class TestSecretHeader(TransportCase):
+    """The engine's X-Secret-Ref header: the call's git token when the environment has none."""
+
+    def setUp(self):
+        TransportCase.setUp(self)
+        patcher = mock.patch.dict(os.environ, {"BENCH_ENV_FILE": os.path.join(self.root, "none.env")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("BENCH_GIT_TOKEN", None)
+
+    def git_in_a_call(self, headers=None):
+        """Runs one git command in one HTTP call. Gives [the token git got, its scrubbed output]."""
+        seen = []
+
+        def run(command, **kwargs):
+            seen.append(kwargs["env"].get("BENCH_GIT_TOKEN"))
+            return subprocess.CompletedProcess(command, 0, "out %s" % seen[-1], "")
+
+        def call(bench, name, args):
+            with mock.patch.object(git.subprocess, "run", run):
+                seen.append(git.run(["status"])[1])
+            return {"ok": True}, None
+
+        with mock.patch.object(mcp.tools, "call", call):
+            self.post({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": "status", "arguments": {}}}, headers)
+        return seen
+
+    def test_the_header_gives_git_its_token_when_the_environment_has_none(self):
+        self.assertEqual(self.git_in_a_call({"X-Secret-Ref": "header-secret"}),
+                         ["header-secret", "out ***"])
+
+    def test_without_the_header_or_the_environment_git_has_no_token(self):
+        self.assertEqual(self.git_in_a_call(), [None, "out None"])
+
+    def test_the_environment_token_wins_over_the_header(self):
+        os.environ["BENCH_GIT_TOKEN"] = "env-secret"
+        self.assertEqual(self.git_in_a_call({"X-Secret-Ref": "header-secret"}),
+                         ["env-secret", "out ***"])
+
+    def test_the_header_value_is_in_no_log_line_and_no_answer(self):
+        captured = io.StringIO()
+        with mock.patch("sys.stderr", captured):
+            status, answer = self.post({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                        "params": {"name": "repos", "arguments": {}}},
+                                       {"X-Secret-Ref": "header-secret"})
+        self.assertEqual(status, 200)
+        self.assertIn("tool=repos", captured.getvalue())
+        self.assertNotIn("header-secret", captured.getvalue())
+        self.assertNotIn("header-secret", json.dumps(answer))
 
 
 class TestHttp(TransportCase):
