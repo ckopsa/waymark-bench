@@ -3,9 +3,12 @@
 import os
 import shutil
 import tempfile
+import threading
+import types
 import unittest
+from unittest import mock
 
-from bench import forge, git, settings
+from bench import forge, git, settings, tools
 
 
 class TestSettings(unittest.TestCase):
@@ -76,3 +79,15 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(forge.Bitbucket("w", "s").credential(), ("me", "bb-secret"))
         headers = forge.Bitbucket("w", "s").headers()
         self.assertTrue(headers["Authorization"].startswith("Basic "))
+
+    def test_the_check_thread_keeps_the_call_git_token(self):
+        seen = []
+        bench = types.SimpleNamespace(_guard=threading.Lock(), checks={})
+        repo = types.SimpleNamespace(name="r", check=None)
+        token = settings.CALL_GIT_TOKEN.set("call-secret")
+        self.addCleanup(settings.CALL_GIT_TOKEN.reset, token)
+        with mock.patch.object(tools, "check_step_findings",
+                               lambda *args: seen.append(settings.load().secret("git_token")) or {}):
+            _, entry = tools.start_check_step(bench, repo, "b", self.root, None)
+            self.assertTrue(entry["done"].wait(5))
+        self.assertEqual(seen, ["call-secret"])
