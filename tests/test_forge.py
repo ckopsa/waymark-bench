@@ -424,6 +424,28 @@ class TestAskAgain(unittest.TestCase):
         self.assertEqual(self.calls, ["GET", "GET"])
         self.assertEqual(self.slept, [forge.RETRY_SECONDS])
 
+    def test_a_spent_window_makes_one_call_at_the_floor_and_no_more(self):
+        self.answers = [(200, '{"id": 31}')]
+        with forge.within(0):
+            self.assertEqual(self.client.request("GET", "https://api.github.com/runs/31"),
+                             {"id": 31})
+            for _ in range(3):
+                with self.assertRaises(forge.NoAnswer) as raised:
+                    self.client.request("GET", "https://api.github.com/runs/32")
+                self.assertFalse(raised.exception.sent)
+        self.assertEqual(self.calls, ["GET"])
+        self.assertEqual(self.slept, [])
+
+    def test_a_spent_window_does_not_try_its_floor_call_again(self):
+        self.answers = [forge.NoAnswer("no answer from api.github.com: timed out")] * forge.TRIES
+        with forge.within(0):
+            with self.assertRaises(forge.NoAnswer):
+                self.client.request("GET", "https://api.github.com/runs/31")
+        self.assertEqual(self.calls, ["GET"])
+        self.assertEqual(self.slept, [])
+        self.answers = [(200, '{"id": 31}')]
+        self.assertEqual(self.client.request("GET", "https://api.github.com/runs/31"), {"id": 31})
+
     def test_a_get_that_nothing_ever_answers_raises_no_answer_after_the_tries(self):
         self.answers = [forge.NoAnswer("no answer from api.github.com: timed out")] * forge.TRIES
         with self.assertRaises(forge.NoAnswer):
