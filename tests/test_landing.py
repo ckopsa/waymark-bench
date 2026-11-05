@@ -1982,6 +1982,33 @@ class TestLog(LandingCase):
         self.ok("log", branch="work", job=self.JOB, mode="range")
         self.assertEqual(self.fetches(), 2)
 
+    def slow_forge(self, seconds):
+        """Makes every forge call take seconds on the clock of the tools."""
+        now = [0.0]
+        self.addCleanup(setattr, tools, "_clock", tools._clock)
+        tools._clock = lambda: now[0]
+        served = forge.http
+        self.addCleanup(setattr, forge, "http", served)
+
+        def slow(method, url, headers, body=None):
+            now[0] += seconds
+            return served(method, url, headers, body)
+
+        forge.http = slow
+
+    def test_feedback_answers_in_part_when_the_forge_is_slow(self):
+        self.slow_forge(tools.FEEDBACK_READS)
+        feedback = self.ok("feedback", branch="work")
+        self.assertIn("pipelines: " + tools.FEEDBACK_SPENT, feedback["unavailable"])
+        self.assertEqual([f for f in feedback["findings"] if f["source"] == "pipeline"], [])
+
+    def test_log_lists_the_jobs_without_counts_when_the_forge_is_slow(self):
+        self.slow_forge(tools.FEEDBACK_WINDOW)
+        answer = self.ok("log", branch="work")
+        self.assertTrue(answer["jobs"])
+        self.assertEqual([job["lines"] for job in answer["jobs"]], [None] * len(answer["jobs"]))
+        self.assertEqual(self.fetches(), 0)
+
     def test_feedback_names_the_job_its_marked_lines_and_the_log_tool(self):
         feedback = self.ok("feedback", branch="work")
         pipeline = [f for f in feedback["findings"] if f["source"] == "pipeline"][0]
