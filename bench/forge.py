@@ -221,14 +221,37 @@ def within(seconds):
     """Bounds every HTTP call made in the block, on this thread, by the time
     left of seconds. A tool that waits inside the engine's limit on a call
     gives its wait here, so a lookup that hangs is NoAnswer inside the wait
-    and not after TIMEOUT. A window inside a window keeps the earlier end."""
+    and not after TIMEOUT. A window inside a window keeps the earlier end.
+    Once the end has passed, one call more is let through at WINDOW_FLOOR;
+    every call after it is NoAnswer at once, and never leaves."""
     before = getattr(_window, "deadline", None)
+    floor_used = getattr(_window, "floor_used", False)
     deadline = time.monotonic() + seconds
     _window.deadline = deadline if before is None else min(before, deadline)
+    _window.floor_used = floor_used and _window.deadline == before
     try:
         yield
     finally:
         _window.deadline = before
+        _window.floor_used = floor_used
+
+
+def _spent():
+    """True when the window has ended and its one call at the floor is made."""
+    deadline = getattr(_window, "deadline", None)
+    return (deadline is not None and getattr(_window, "floor_used", False)
+            and time.monotonic() >= deadline)
+
+
+def _admit(url):
+    """Lets a call leave, or raises NoAnswer when the window is spent. The
+    first call after the window's end leaves at WINDOW_FLOOR and uses it."""
+    if _spent():
+        raise NoAnswer("no answer from %s: the window's time is spent"
+                       % urllib.parse.urlsplit(url).netloc, sent=False)
+    deadline = getattr(_window, "deadline", None)
+    if deadline is not None and time.monotonic() >= deadline:
+        _window.floor_used = True
 
 
 def timeout():
@@ -277,14 +300,18 @@ def _retried(call, read):
         except NoAnswer as exc:
             if not read and exc.sent:
                 raise NoAnswer("%s; the call was not confirmed: the forge may have done it" % exc)
-            if not left:
+            if not left or _spent():
                 raise
             _sleep(RETRY_SECONDS)
 
 
 def ask(method, url, headers, body=None):
-    """The one HTTP call, made again when nothing answers (see _retried)."""
-    return _retried(lambda: http(method, url, headers, body), method == "GET")
+    """The one HTTP call, made again when nothing answers (see _retried), and
+    not made at all once the window is spent (see within)."""
+    def call():
+        _admit(url)
+        return http(method, url, headers, body)
+    return _retried(call, method == "GET")
 
 
 def _text(raw, headers):
