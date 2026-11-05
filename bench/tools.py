@@ -48,6 +48,13 @@ CEILING_TEST_WAIT = 28
 TEST_POLL_SECONDS = 5
 # The window of test_result's lookups is never shorter: a wait of 0 still reads the run.
 TEST_LOOKUP_FLOOR = 5
+# feedback and log answer inside the gate's 30 seconds too. Every forge lookup of
+# feedback is made in FEEDBACK_WINDOW, and the pull request, the pipelines and
+# their logs in FEEDBACK_READS of it, so the checks and the comments still have
+# the rest. A lookup there is no time left for is named in unavailable.
+FEEDBACK_WINDOW = 24
+FEEDBACK_READS = 16
+FEEDBACK_SPENT = "not read: the forge took the time feedback has inside the gate's 30 s"
 # a run not done this long after the forge made it is refused test_overdue: a
 # selection takes minutes, and a seat that asks past half an hour learns nothing new
 TEST_RUN_CEILING = 1800
@@ -2570,18 +2577,28 @@ def feedback(bench, args):
         answer["findings"] = findings
         return answer
 
-    def attempt(name, function, default):
+    started = _clock()
+
+    def left(until):
+        return started + until - _clock()
+
+    def attempt(name, function, default, until=FEEDBACK_WINDOW):
+        if left(until) <= 0:
+            answer["unavailable"].append("%s: %s" % (name, FEEDBACK_SPENT))
+            return default
         try:
-            return function()
+            with forge.within(left(until)):
+                return function()
         except forge.ForgeError as exc:
             answer["unavailable"].append("%s: %s" % (name, exc))
             return default
 
     target = land.target
-    pr = attempt("pull_request", lambda: client.find_pull_request(branch, target), None)
+    pr = attempt("pull_request", lambda: client.find_pull_request(branch, target), None,
+                 FEEDBACK_READS)
     if pr is None and item and (item.state.get("pull_request") or {}).get("number"):
         number = item.state["pull_request"]["number"]
-        pr = attempt("pull_request", lambda: client.pull_request(number), None)
+        pr = attempt("pull_request", lambda: client.pull_request(number), None, FEEDBACK_READS)
     answer["pull_request"] = pr
     if pr and pr.get("state") in ("declined", "closed", "superseded"):
         findings.append({"source": "pull_request", "severity": "error",
@@ -2597,7 +2614,7 @@ def feedback(bench, args):
                          "url": pr.get("url") if pr else None})
 
     head = (pr or {}).get("head") or (item.state.get("head") if item else None)
-    pipelines = attempt("pipelines", lambda: client.pipelines(branch), [])
+    pipelines = attempt("pipelines", lambda: client.pipelines(branch), [], FEEDBACK_READS)
     chosen = pipelines_of_head(pipelines, head)
     answer["pipelines"] = pipelines[:5] + [p for p in chosen if p not in pipelines[:5]]
     read = []  # (pipeline, step, log) of each failed step; log is None when none came
@@ -2605,8 +2622,9 @@ def feedback(bench, args):
     for pipeline in chosen:
         if pipeline.get("result") in ("failed", "error", "failure", "stopped", "cancelled",
                                       "timed_out"):
-            steps = attempt("steps", lambda: client.steps(pipeline["id"]), [])
-            logs = attempt("logs", lambda: mark_fetch_failures(client, pipeline["id"], steps), {})
+            steps = attempt("steps", lambda: client.steps(pipeline["id"]), [], FEEDBACK_READS)
+            logs = attempt("logs", lambda: mark_fetch_failures(client, pipeline["id"], steps), {},
+                           FEEDBACK_READS)
             pipeline["steps"] = steps
             stopped = interrupted_of(steps)
             if stopped:
@@ -2621,8 +2639,13 @@ def feedback(bench, args):
                 if step.get("result") not in ("failed", "error", "failure"):
                     continue
                 try:
-                    log = (logs[step.get("id")] if step.get("id") in logs
-                           else client.step_log(pipeline["id"], step["id"]) or "")
+                    if step.get("id") in logs:
+                        log = logs[step.get("id")]
+                    elif left(FEEDBACK_READS) <= 0:
+                        log = "(no log: %s)" % FEEDBACK_SPENT
+                    else:
+                        with forge.within(left(FEEDBACK_READS)):
+                            log = client.step_log(pipeline["id"], step["id"]) or ""
                 except forge.ForgeError as exc:
                     log = "(no log: %s)" % exc
                 if not log.strip() or log.startswith("(no log:"):
@@ -3009,6 +3032,12 @@ def run_history(repo, branch, args):
 def log(bench, args):
     """Reads one job's log of the newest run on a branch's head: its jobs, the
     marked lines, a grep, or a range. Every line comes cleaned and cut."""
+    with forge.within(FEEDBACK_WINDOW):
+        return _log(bench, args, _clock() + FEEDBACK_WINDOW)
+
+
+def _log(bench, args, ends):
+    """Reads the log inside the window that ends at ends; a job list past it gives no counts."""
     repo = bench.repo(args.get("repo"))
     branch = check_branch(_text(args, "branch", required=True))
     if args.get("runs") is not None:
@@ -3046,7 +3075,7 @@ def log(bench, args):
         answer["jobs"] = []
         for run, job in jobs:
             count = None
-            if job.get("result") in ("failed", "error", "failure"):
+            if job.get("result") in ("failed", "error", "failure") and _clock() < ends:
                 try:
                     count = len(job_lines(bench, repo, client, run["id"], job["id"]))
                 except Refusal:
