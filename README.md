@@ -1,13 +1,13 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives thirty-six
+for each repository and a git worktree for each branch. It gives thirty-seven
 tools: `prepare`, `status`, `diff`, `find`, `read`, `symbols`, `read_symbol`, `history`, `check`, `edit`,
 `edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`,
 `compare_heads`, `rerun`, `test`,
 `test_result`, `enroll`, `repos`, `unenroll`, `train_build`, `train_checks`,
 `train_open`, `train_status`, `train_land`, `train_delete`, `secret_set`,
-`secret_list`, `dispatch` and `run_status`. It needs Python
+`secret_list`, `dispatch`, `run_status` and `fork`. It needs Python
 3.11, git, and three libraries: pydantic-settings, for the settings,
 PyYAML, so `check` can parse the changed `.github` YAML files, and PyNaCl,
 so `secret_set` can seal a value with a repository's Actions public key.
@@ -419,6 +419,17 @@ is refused `input`.
 
 `why` is optional on `secret_set` and `dispatch`: a gate in front of the
 rig may hold the why itself and not forward it.
+
+`fork {source_repo, name, all_branches, why}` forks a GitHub repository
+into the account `BENCH_REPO_OWNER` names (`ckopsa` by default, never an
+argument), its default branch only unless `all_branches` is true, waits up
+to a minute for the fork, and answers `{full_name, url, private, existed}`.
+A fork of `source_repo` already there is the answer, `existed: true`; a
+repository of the name that is no such fork is refused `name_taken`. It is
+a write a gate should hold for a person's tap. It uses its own token,
+`BENCH_REPO_TOKEN` (docs/credential.md): it refuses `no_repo_token` when
+it is not set, and `token_lacks_repo_create`, naming the permission it
+needs, when GitHub refuses it.
 
 `dispatch {repo, workflow, ref, inputs, why}` starts one
 `workflow_dispatch` workflow of an enrolled repository: `workflow` is the

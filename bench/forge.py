@@ -143,6 +143,14 @@ class NoSecretsToken(ForgeError):
     """BENCH_SECRETS_TOKEN is not set: secret_set and secret_list have no token."""
 
 
+class NoRepoToken(ForgeError):
+    """BENCH_REPO_TOKEN is not set: fork has no token."""
+
+
+class TokenLacksRepoCreate(ForgeError):
+    """GitHub refused the repo token: it may not make repositories in the owner's account."""
+
+
 class Text(str):
     """The text of an answer. `headers` has the answer's headers, the names
     in lower case."""
@@ -1346,6 +1354,61 @@ class GitHub(Client):
         if "conflict" in lowered:
             return {"refused": "not_mergeable", "reason": message}
         return {"refused": "update_refused", "reason": "github answered 422: %s" % message[:300]}
+
+
+# What the repo token needs to make a repository in the owner's account.
+REPO_CREATE_NEEDS = ("a fine-grained token of the owner's account, on all its repositories, with "
+                     "Administration: read and write, Contents: read and Metadata: read; or a "
+                     "classic token with the scope repo")
+
+
+class Account(GitHub):
+    """The GitHub account fork makes repositories in: the owner is
+    BENCH_REPO_OWNER, never an argument, and the token BENCH_REPO_TOKEN,
+    which no other call uses."""
+
+    root = "https://api.github.com"
+
+    def __init__(self):
+        current = settings.load()
+        token = current.secret("repo_token")
+        if not token:
+            raise NoRepoToken("no repo token: set BENCH_REPO_TOKEN")
+        GitHub.__init__(self, current.repo_owner, None)
+        self.token = token
+
+    def credential(self):
+        return self.token
+
+    def call(self, method, path, body=None, missing=False):
+        """One request with the repo token. With missing, a 404 gives None."""
+        url = self.root + path
+        status, text = ask(method, url, self.headers(), body)
+        headers = getattr(text, "headers", None)
+        if missing and status == 404:
+            return None
+        if status in (401, 403) and not throttle_reset(status, headers, text):
+            raise TokenLacksRepoCreate("github refused the repo token (%s): it needs %s"
+                                       % (status, REPO_CREATE_NEEDS), status)
+        return self.judge(status, scrub(text), url, False, headers)
+
+    def repository(self, name):
+        """Gives the owner's repository of this name, or None."""
+        return self.call("GET", "/repos/%s/%s" % (self.owner, name), missing=True)
+
+    def _organization(self):
+        """Gives the owner when it is an organization, None when it is the token's own user."""
+        login = (self.call("GET", "/user") or {}).get("login") or ""
+        return None if login.lower() == self.owner.lower() else self.owner
+
+    def fork(self, source, name, default_branch_only):
+        """Asks GitHub to fork source (owner/name) as name. GitHub answers 202
+        at once and makes the fork after; an existing fork is its answer."""
+        body = {"name": name, "default_branch_only": default_branch_only}
+        organization = self._organization()
+        if organization:
+            body["organization"] = organization
+        return self.call("POST", "/repos/%s/forks" % source, body)
 
 
 # ------------------------------------------------------------------ factory

@@ -13,6 +13,8 @@ another file). The credentials are secrets: they never print, and
   BENCH_BITBUCKET_TOKEN   the Bitbucket app password
   BENCH_GITHUB_TOKEN      the GitHub token, when it is not the git token
   BENCH_SECRETS_TOKEN     the GitHub token of secret_set and secret_list only
+  BENCH_REPO_TOKEN        the GitHub token of fork only
+  BENCH_REPO_OWNER        the account fork makes repositories in (ckopsa)
   BENCH_TEST_WAIT         the seconds test_result waits by default (25; 28 at most)
   BENCH_GIT_NAME          the author and committer name of the rig's commits
   BENCH_GIT_EMAIL         the author and committer email of the rig's commits
@@ -41,6 +43,8 @@ class Settings(BaseSettings):
     bitbucket_token: SecretStr | None = None
     github_token: SecretStr | None = None
     secrets_token: SecretStr | None = None
+    repo_token: SecretStr | None = None
+    repo_owner: str = "ckopsa"
     test_wait: int = 25
     git_name: str = "waymark-bench"
     git_email: str = "bench@waymark.invalid"
@@ -57,7 +61,7 @@ class Settings(BaseSettings):
     def secrets(self):
         """Gives the values of every set secret."""
         found = []
-        for name in ("git_token", "bitbucket_token", "github_token", "secrets_token"):
+        for name in ("git_token", "bitbucket_token", "github_token", "secrets_token", "repo_token"):
             value = self.secret(name)
             if value:
                 found.append(value)
