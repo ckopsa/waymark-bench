@@ -92,6 +92,11 @@ WORKFLOW_NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
 # dispatch looks for the run it started at most ten seconds: 5 reads, 2 s apart.
 DISPATCH_FIND_TRIES = 5
 DISPATCH_FIND_SECONDS = 2
+# A GitHub repository's name, and each half of a fork's owner/name source.
+GITHUB_NAME = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$")
+# fork waits for GitHub to make the fork at most a minute: 30 reads, 2 s apart.
+FORK_WAIT_TRIES = 30
+FORK_WAIT_SECONDS = 2
 
 
 class Refusal(Exception):
@@ -3462,6 +3467,72 @@ def secret_list(bench, args):
         raise Refusal("forge", repo=repo.name, reason=git.scrub(str(exc)))
 
 
+def _account():
+    """Gives the GitHub account fork makes repositories in. It uses its own
+    token, and refuses when it is not set."""
+    try:
+        return forge.Account()
+    except forge.NoRepoToken:
+        raise Refusal("no_repo_token",
+                      reason="fork uses its own token: set BENCH_REPO_TOKEN "
+                             "to %s (docs/credential.md)" % forge.REPO_CREATE_NEEDS)
+
+
+def _github_name(value, field):
+    if not GITHUB_NAME.match(value):
+        raise Refusal("input", field=field,
+                      reason="a GitHub repository name is letters, digits, ., _ and -, "
+                             "opening with no .")
+    return value
+
+
+def _flag(args, key, default):
+    value = args.get(key, default)
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise Refusal("input", field=key, reason="true or false is necessary")
+    return value
+
+
+def _made(found, existed):
+    return {"full_name": found.get("full_name"), "url": found.get("html_url"),
+            "private": found.get("private"), "existed": existed}
+
+
+def fork(bench, args):
+    """Forks a GitHub repository into the owner's account, waits until the
+    fork is there, and answers it. A fork already there is the answer."""
+    source = _text(args, "source_repo", required=True)
+    source_owner, _, source_name = source.partition("/")
+    if not (GITHUB_NAME.match(source_owner) and GITHUB_NAME.match(source_name)):
+        raise Refusal("input", field="source_repo", reason="the source is owner/name, as GitHub spells it")
+    name = _github_name(_text(args, "name") or source_name, "name")
+    all_branches = _flag(args, "all_branches", False)
+    _text(args, "why")  # Optional: a gate in front of the rig may hold the why itself.
+    account = _account()
+    try:
+        found = account.repository(name)
+        if found is not None:
+            parent = (found.get("parent") or {}).get("full_name") or ""
+            if parent.lower() != source.lower():
+                raise Refusal("name_taken", repo=found.get("full_name"),
+                              reason="the repository is there, and it is no fork of %s" % source)
+            return _made(found, True)
+        made = account.fork(source, name, not all_branches).get("name") or name
+        for _ in range(FORK_WAIT_TRIES):
+            found = account.repository(made)
+            if found is not None:
+                return _made(found, False)
+            time.sleep(FORK_WAIT_SECONDS)
+    except forge.ForgeError as exc:
+        lacks = isinstance(exc, forge.TokenLacksRepoCreate)
+        raise Refusal("token_lacks_repo_create" if lacks else "forge", source_repo=source,
+                      reason=git.scrub(str(exc)))
+    raise Refusal("fork_pending", repo="%s/%s" % (account.owner, made),
+                  reason="GitHub took the fork, and it did not show in a minute: call fork again")
+
+
 def dispatch(bench, args):
     """Starts one workflow_dispatch workflow of a repository on a ref. Answers
     the run that dispatch started, or run_id null when no run showed within
@@ -5363,6 +5434,34 @@ TOOL_SPECS = [
             "type": "object",
             "properties": {"repo": _REPO, "seat": _SEAT, "sitting": _SITTING},
             "required": ["repo"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fork",
+        "function": fork,
+        "description": (
+            "Forks a public GitHub repository into the rig's account (BENCH_REPO_OWNER, "
+            "never an argument), its default branch only unless all_branches is true, "
+            "waits up to a minute for the fork, and answers {full_name, url, private, "
+            "existed}. A fork of source_repo already there is the answer, existed: true. "
+            "A write: a gate should hold it for a person's tap. The refusals are input, "
+            "no_repo_token, token_lacks_repo_create, name_taken, fork_pending and forge."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "source_repo": {"type": "string", "description": "The repository to fork, owner/name, "
+                                                                "e.g. ashmerra/wehavephones."},
+                "name": {"type": "string", "description": "The fork's name. The default is the "
+                                                         "source's name."},
+                "all_branches": {"type": "boolean", "default": False,
+                                 "description": "True forks every branch, not the default one only."},
+                "why": {"type": "string", "description": "One sentence: why this fork is made. "
+                        "Optional: a gate in front of this server may hold the why itself."},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
+            "required": ["source_repo"],
             "additionalProperties": False,
         },
     },

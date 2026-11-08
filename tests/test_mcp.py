@@ -117,7 +117,7 @@ class TestHttp(TransportCase):
         status, answer = self.post({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual(status, 200)
         tools = answer["result"]["tools"]
-        self.assertEqual(len(tools), 36)
+        self.assertEqual(len(tools), 37)
         hints = {tool["name"]: tool.get("annotations", {}).get("readOnlyHint") for tool in tools}
         self.assertTrue(hints["status"])
         self.assertTrue(hints["read"])
@@ -130,15 +130,15 @@ class TestHttp(TransportCase):
             "edit_many", "pull", "conflicts", "submit", "feedback", "log", "discard", "merge", "update_branch",
             "compare_heads", "rerun", "test", "test_result", "enroll", "repos", "unenroll", "train_build", "train_checks",
             "train_open", "train_status", "train_land", "train_delete", "secret_set",
-            "secret_list", "dispatch", "run_status"]))
+            "secret_list", "dispatch", "run_status", "fork"]))
         for tool in tools:
             self.assertTrue(tool["description"])
             schema = tool["inputSchema"]
             self.assertEqual(schema["type"], "object")
             self.assertIn("seat", schema["properties"])
             self.assertIn("sitting", schema["properties"])
-            if tool["name"] == "repos":
-                # The tool takes the marks only.
+            if tool["name"] in ("repos", "fork"):
+                # repos takes the marks only; fork names a GitHub repository, no enrolled one.
                 self.assertNotIn("repo", schema["properties"])
                 continue
             self.assertIn("repo", schema["properties"])
@@ -210,7 +210,7 @@ class TestStdio(unittest.TestCase):
         mcp.serve_stdio(self.bench, io.StringIO("\n".join(lines) + "\n"), output)
         answers = [json.loads(row) for row in output.getvalue().splitlines()]
         self.assertEqual([answer["id"] for answer in answers], [1, 2, 3])
-        self.assertEqual(len(answers[1]["result"]["tools"]), 36)
+        self.assertEqual(len(answers[1]["result"]["tools"]), 37)
         self.assertTrue(answers[2]["result"]["structuredContent"]["result"]["created"])
 
 
