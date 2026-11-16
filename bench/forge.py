@@ -144,7 +144,8 @@ class NoSecretsToken(ForgeError):
 
 
 class NoRepoToken(ForgeError):
-    """BENCH_REPO_TOKEN is not set: fork and create_repo have no token."""
+    """Neither X-Bench-Repo-Token nor BENCH_REPO_TOKEN is given: fork and create_repo
+    have no token."""
 
 
 class TokenLacksRepoCreate(ForgeError):
@@ -1364,8 +1365,8 @@ REPO_CREATE_NEEDS = ("a fine-grained token of the owner's account, on all its re
 
 class Account(GitHub):
     """The GitHub account fork and create_repo make repositories in: the owner is
-    BENCH_REPO_OWNER, never an argument, and the token BENCH_REPO_TOKEN,
-    which no other call uses."""
+    BENCH_REPO_OWNER, never an argument, and the token the call's
+    X-Bench-Repo-Token header or else BENCH_REPO_TOKEN, which no other call uses."""
 
     root = "https://api.github.com"
 
@@ -1373,7 +1374,7 @@ class Account(GitHub):
         current = settings.load()
         token = current.secret("repo_token")
         if not token:
-            raise NoRepoToken("no repo token: set BENCH_REPO_TOKEN")
+            raise NoRepoToken("no repo token: send X-Bench-Repo-Token or set BENCH_REPO_TOKEN")
         GitHub.__init__(self, current.repo_owner, None)
         self.token = token
 

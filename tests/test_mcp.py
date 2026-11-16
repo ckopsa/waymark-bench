@@ -13,7 +13,7 @@ import urllib.request
 from unittest import mock
 
 from bench import __main__ as entry
-from bench import git, mcp
+from bench import forge, git, mcp
 from bench.tools import Bench
 
 from . import util
@@ -96,6 +96,38 @@ class TestSecretHeader(TransportCase):
         self.assertIn("tool=repos", captured.getvalue())
         self.assertNotIn("header-secret", captured.getvalue())
         self.assertNotIn("header-secret", json.dumps(answer))
+
+
+class TestRepoTokenHeader(TransportCase):
+    """The X-Bench-Repo-Token header: the token of fork and create_repo."""
+
+    def setUp(self):
+        TransportCase.setUp(self)
+        patcher = mock.patch.dict(os.environ, {"BENCH_ENV_FILE": os.path.join(self.root, "none.env"),
+                                               "BENCH_REPO_TOKEN": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.seen = []
+        original = forge.http
+        forge.http = self.fake_http
+        self.addCleanup(setattr, forge, "http", original)
+
+    def fake_http(self, method, url, headers, body=None):
+        self.seen.append(headers.get("Authorization"))
+        return 403, '{"message":"Bad credentials"}'
+
+    def test_the_header_reaches_github_and_is_in_no_log_line_and_no_answer(self):
+        captured = io.StringIO()
+        with mock.patch("sys.stderr", captured):
+            status, answer = self.post({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                        "params": {"name": "create_repo",
+                                                   "arguments": {"name": "marco-orgs"}}},
+                                       {"X-Bench-Repo-Token": "header-repo-token"})
+        self.assertEqual(status, 200)
+        self.assertIn("Bearer header-repo-token", self.seen)
+        self.assertIn("tool=create_repo", captured.getvalue())
+        self.assertNotIn("header-repo-token", captured.getvalue())
+        self.assertNotIn("header-repo-token", json.dumps(answer))
 
 
 class TestHttp(TransportCase):

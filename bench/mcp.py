@@ -20,6 +20,9 @@ MAX_BODY = 4 * 1024 * 1024
 # The header the engine resolves from the person's secret row: the git
 # token of the call when BENCH_GIT_TOKEN is unset. Never logged or echoed.
 SECRET_HEADER = "X-Secret-Ref"
+# The header a house fills from its secret row: the token of fork and
+# create_repo, over BENCH_REPO_TOKEN when present. Never logged or echoed.
+REPO_TOKEN_HEADER = "X-Bench-Repo-Token"
 
 
 # The tools that change nothing: no worktree, clone, landing, CI run or
@@ -159,9 +162,12 @@ def make_handler(server):
                 self._send(400, error(None, -32700, "the body is not JSON"))
                 return
             token = settings.CALL_GIT_TOKEN.set((self.headers.get(SECRET_HEADER) or "").strip() or None)
+            repo_token = settings.CALL_REPO_TOKEN.set(
+                (self.headers.get(REPO_TOKEN_HEADER) or "").strip() or None)
             try:
                 self._answer(message)
             finally:
+                settings.CALL_REPO_TOKEN.reset(repo_token)
                 settings.CALL_GIT_TOKEN.reset(token)
 
         def _answer(self, message):

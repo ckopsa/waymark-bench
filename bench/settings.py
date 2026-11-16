@@ -22,6 +22,10 @@ another file). The credentials are secrets: they never print, and
 When BENCH_GIT_TOKEN is unset, the git token of one HTTP call is the
 value of its X-Secret-Ref header (see mcp.py): the engine resolves it
 from the person's secret row. It is a secret like the others.
+
+The repo token of one HTTP call is the value of its X-Bench-Repo-Token
+header (see mcp.py) when it is present, and BENCH_REPO_TOKEN only when
+it is absent: the engine resolves it from a house's secret row.
 """
 
 import contextvars
@@ -51,7 +55,9 @@ class Settings(BaseSettings):
 
     def secret(self, name):
         """Gives the value of one secret, or None. The environment's git token wins over
-        the call's."""
+        the call's; the call's repo token wins over the environment's."""
+        if name == "repo_token" and CALL_REPO_TOKEN.get():
+            return CALL_REPO_TOKEN.get()
         value = getattr(self, name)
         value = value.get_secret_value() if value is not None else None
         if not value and name == "git_token":
@@ -71,6 +77,10 @@ class Settings(BaseSettings):
 # The git token the engine sent on the current call, or None. The HTTP
 # transport sets it for the call and resets it after.
 CALL_GIT_TOKEN = contextvars.ContextVar("bench_call_git_token", default=None)
+
+# The repo token the engine sent on the current call, or None. The HTTP
+# transport sets it for the call and resets it after.
+CALL_REPO_TOKEN = contextvars.ContextVar("bench_call_repo_token", default=None)
 
 
 def load(env_file=None):
