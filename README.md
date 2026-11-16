@@ -427,9 +427,18 @@ to a minute for the fork, and answers `{full_name, url, private, existed}`.
 A fork of `source_repo` already there is the answer, `existed: true`; a
 repository of the name that is no such fork is refused `name_taken`. It is
 a write a gate should hold for a person's tap. It uses its own token,
-`BENCH_REPO_TOKEN` (docs/credential.md): it refuses `no_repo_token` when
-it is not set, and `token_lacks_repo_create`, naming the permission it
-needs, when GitHub refuses it.
+`BENCH_REPO_TOKEN` (docs/credential.md), or the call's `X-Bench-Repo-Token`
+header, which wins over the variable when it is present: it refuses
+`no_repo_token`, naming both, when neither is given, and
+`token_lacks_repo_create`, naming the permission it needs, when GitHub
+refuses it. The header's value is never logged, echoed or written to disk.
+
+A house that keeps the token out of the rig's environment holds it as a
+Waymark `secret` row: a fine-grained token of the owner's account, on all
+its repositories, with Administration read and write, Contents read and
+Metadata read. It restates its `bench` mcp_server row with
+`headers: [{name: X-Bench-Repo-Token, x-secret-ref: <secret id>}]`, and the
+engine puts the value in at each tools/call.
 
 `create_repo {name, private, description, why}` makes an empty GitHub
 repository in the same account, private unless `private` is false, with an

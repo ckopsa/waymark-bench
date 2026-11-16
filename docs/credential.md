@@ -49,7 +49,9 @@ refuses `token_lacks_repo_create`, and the refusal names what it needs.
 
 Make it a fine-grained token of the owner's account, on all its
 repositories, with only Administration (read and write), Contents (read) and
-Metadata (read). It reaches the rig as a Nomad variable, as the other two do.
+Metadata (read). It reaches the rig as a Nomad variable, as the other two do,
+or on each call in the `X-Bench-Repo-Token` header, which a house fills from
+its own Waymark `secret` row; the header wins over the variable when present.
 
 ## The secrets token
 

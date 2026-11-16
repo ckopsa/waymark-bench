@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from bench import config as config_module, forge, tools
+from bench import config as config_module, forge, settings, tools
 from bench.tools import Bench
 
 API = "https://api.github.com"
@@ -190,6 +190,43 @@ class TestTheRepoToken(RepoCase):
         answer, refused = tools.call(self.bench, "fork", {"source_repo": "ashmerra/wehavephones"})
         self.assertEqual(answer["refused"], "token_lacks_repo_create")
         self.assertIn("Administration: read and write", answer["reason"])
+        self.assertNotIn("repo-token", json.dumps(answer))
+
+
+class TestTheRepoTokenHeader(RepoCase):
+    """The call's X-Bench-Repo-Token, as the HTTP transport sets it."""
+
+    def in_a_call(self, value, name, args):
+        token = settings.CALL_REPO_TOKEN.set(value)
+        try:
+            return tools.call(self.bench, name, args)
+        finally:
+            settings.CALL_REPO_TOKEN.reset(token)
+
+    def test_the_header_is_used_and_the_environment_ignored(self):
+        with mock.patch.dict(os.environ, {"BENCH_REPO_TOKEN": "env-token"}):
+            answer, refused = self.in_a_call("repo-token", "create_repo", {"name": "marco-orgs"})
+        self.assertNotIn("refused", answer)
+        self.assertEqual({call[3] for call in self.calls}, {"Bearer repo-token"})
+
+    def test_without_the_header_the_environment_is_used(self):
+        answer, refused = self.in_a_call(None, "create_repo", {"name": "marco-orgs"})
+        self.assertNotIn("refused", answer)
+        self.assertEqual({call[3] for call in self.calls}, {"Bearer repo-token"})
+
+    def test_with_neither_the_refusal_names_both(self):
+        with mock.patch.dict(os.environ, {"BENCH_REPO_TOKEN": ""}):
+            answer, refused = self.in_a_call(None, "fork", {"source_repo": "ashmerra/wehavephones"})
+        self.assertEqual(answer["refused"], "no_repo_token")
+        self.assertIn("X-Bench-Repo-Token", answer["reason"])
+        self.assertIn("BENCH_REPO_TOKEN", answer["reason"])
+        self.assertEqual(self.calls, [])
+
+    def test_a_refused_header_token_is_not_echoed(self):
+        self.post_status = 403
+        with mock.patch.dict(os.environ, {"BENCH_REPO_TOKEN": ""}):
+            answer, refused = self.in_a_call("repo-token", "create_repo", {"name": "marco-orgs"})
+        self.assertEqual(answer["refused"], "token_lacks_repo_create")
         self.assertNotIn("repo-token", json.dumps(answer))
 
 

@@ -3474,8 +3474,9 @@ def _account():
         return forge.Account()
     except forge.NoRepoToken:
         raise Refusal("no_repo_token",
-                      reason="fork and create_repo use their own token: set BENCH_REPO_TOKEN "
-                             "to %s (docs/credential.md)" % forge.REPO_CREATE_NEEDS)
+                      reason="fork and create_repo use their own token: send it in the "
+                             "X-Bench-Repo-Token header, or set BENCH_REPO_TOKEN, to %s "
+                             "(docs/credential.md)" % forge.REPO_CREATE_NEEDS)
 
 
 def _github_name(value, field):
