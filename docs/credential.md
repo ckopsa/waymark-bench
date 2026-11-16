@@ -27,6 +27,7 @@ each token can be made whole, and no larger.
 | `secret_list` | read the names of the repository's Actions secrets | the secrets token. Secrets: read | not used |
 | `secret_set` | read the Actions public key, write one Actions secret | the secrets token. Secrets: read and write | not used |
 | `fork` | read the token's user, fork a repository into the owner's account | the repo token. Administration: read and write, Contents: read (all repositories) | `repo` |
+| `create_repo` | read the token's user, make a repository with an initial commit in the owner's account, rename its first branch to main | the repo token. Administration: read and write, Contents: read (all repositories) | `repo` |
 
 In short: a classic main token needs `repo` and `workflow`. A fine-grained
 main token needs these repository permissions: Contents (read and write),
@@ -39,10 +40,10 @@ repository to the token when you enroll it.
 
 ## The repo token
 
-`fork` makes repositories in the account `BENCH_REPO_OWNER` names (`ckopsa`
+`fork` and `create_repo` make repositories in the account `BENCH_REPO_OWNER` names (`ckopsa`
 by default). Making a repository is a permission on the account, not on one
 repository, so it uses a third token, `BENCH_REPO_TOKEN`, and no other tool
-ever uses it. When it is not set, `fork` refuses `no_repo_token`; the main
+ever uses it. When it is not set, the two refuse `no_repo_token`; the main
 token never stands in for it. When GitHub refuses it (401 or 403), it
 refuses `token_lacks_repo_create`, and the refusal names what it needs.
 

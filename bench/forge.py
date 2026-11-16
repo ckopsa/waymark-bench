@@ -144,7 +144,7 @@ class NoSecretsToken(ForgeError):
 
 
 class NoRepoToken(ForgeError):
-    """BENCH_REPO_TOKEN is not set: fork has no token."""
+    """BENCH_REPO_TOKEN is not set: fork and create_repo have no token."""
 
 
 class TokenLacksRepoCreate(ForgeError):
@@ -1363,7 +1363,7 @@ REPO_CREATE_NEEDS = ("a fine-grained token of the owner's account, on all its re
 
 
 class Account(GitHub):
-    """The GitHub account fork makes repositories in: the owner is
+    """The GitHub account fork and create_repo make repositories in: the owner is
     BENCH_REPO_OWNER, never an argument, and the token BENCH_REPO_TOKEN,
     which no other call uses."""
 
@@ -1409,6 +1409,22 @@ class Account(GitHub):
         if organization:
             body["organization"] = organization
         return self.call("POST", "/repos/%s/forks" % source, body)
+
+    def create(self, name, private, description):
+        """Makes the repository name in the owner's account, with an initial
+        commit on main, and answers it."""
+        body = {"name": name, "private": private, "auto_init": True}
+        if description:
+            body["description"] = description
+        organization = self._organization()
+        made = self.call("POST", "/orgs/%s/repos" % organization if organization else "/user/repos", body)
+        branch = (made or {}).get("default_branch")
+        if branch and branch != "main":
+            # auto_init commits on the account's default branch: the rig's repositories open on main.
+            self.call("POST", "/repos/%s/%s/branches/%s/rename" % (self.owner, name, branch),
+                      {"new_name": "main"})
+            made = self.repository(name) or made
+        return made
 
 
 # ------------------------------------------------------------------ factory
