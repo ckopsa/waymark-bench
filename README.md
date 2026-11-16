@@ -1,13 +1,13 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives thirty-seven
+for each repository and a git worktree for each branch. It gives thirty-eight
 tools: `prepare`, `status`, `diff`, `find`, `read`, `symbols`, `read_symbol`, `history`, `check`, `edit`,
 `edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`,
 `compare_heads`, `rerun`, `test`,
 `test_result`, `enroll`, `repos`, `unenroll`, `train_build`, `train_checks`,
 `train_open`, `train_status`, `train_land`, `train_delete`, `secret_set`,
-`secret_list`, `dispatch`, `run_status` and `fork`. It needs Python
+`secret_list`, `dispatch`, `run_status`, `fork` and `create_repo`. It needs Python
 3.11, git, and three libraries: pydantic-settings, for the settings,
 PyYAML, so `check` can parse the changed `.github` YAML files, and PyNaCl,
 so `secret_set` can seal a value with a repository's Actions public key.
@@ -430,6 +430,24 @@ a write a gate should hold for a person's tap. It uses its own token,
 `BENCH_REPO_TOKEN` (docs/credential.md): it refuses `no_repo_token` when
 it is not set, and `token_lacks_repo_create`, naming the permission it
 needs, when GitHub refuses it.
+
+`create_repo {name, private, description, why}` makes an empty GitHub
+repository in the same account, private unless `private` is false, with an
+initial commit on `main` so it can be cloned and enrolled, and answers
+`{full_name, url, private, existed}`. A repository of the name already there
+is the answer, `existed: true`, and nothing changes; a fork or an archived
+repository of the name, or a name GitHub will not make, is refused
+`name_taken`. It uses the repo token as `fork` does, with the same
+`no_repo_token` and `token_lacks_repo_create`; any other GitHub refusal is
+`forge`. Enrolling the new repository stays the engine's `enroll`.
+
+Creating a repository is a person's tap, never a seat's own act. The powers
+entry a house gives it on its `bench` row:
+
+```json
+{"power": "bench.repo_create", "tools": ["create_repo"],
+ "approval": "person", "shown": ["name", "private"]}
+```
 
 `dispatch {repo, workflow, ref, inputs, why}` starts one
 `workflow_dispatch` workflow of an enrolled repository: `workflow` is the

@@ -1,5 +1,5 @@
-"""The tests of fork: the owner from the settings, its own token, the wait
-for the fork, and the answer when the fork is there."""
+"""The tests of fork and create_repo: the owner from the settings, their own
+token, the wait for the fork, and the answer when the repository is there."""
 
 import json
 import os
@@ -52,10 +52,13 @@ class RepoCase(unittest.TestCase):
         if method == "POST":
             if self.post_status:
                 return self.post_status, '{"message":"Resource not accessible by personal access token"}'
-            owner = body.get("organization") or self.login
-            made = self.add(owner, body["name"], False, path[len("/repos/"):-len("/forks")])
-            self.hidden[made["full_name"]] = 2
-            return 202, json.dumps(made)
+            if path.endswith("/forks"):
+                owner = body.get("organization") or self.login
+                made = self.add(owner, body["name"], False, path[len("/repos/"):-len("/forks")])
+                self.hidden[made["full_name"]] = 2
+                return 202, json.dumps(made)
+            owner = path.split("/")[2] if path.startswith("/orgs/") else self.login
+            return 201, json.dumps(self.add(owner, body["name"], body["private"]))
         return 404, "{}"
 
     def add(self, owner, name, private, parent=None):
@@ -112,7 +115,69 @@ class TestFork(RepoCase):
         self.assertEqual(self.calls, [])
 
 
+class TestCreateRepo(RepoCase):
+
+    def test_create_repo_makes_a_private_repository_with_an_initial_commit(self):
+        answer, refused = tools.call(self.bench, "create_repo", {"name": "marco-orgs"})
+        self.assertFalse(refused, answer)
+        self.assertEqual(answer, {"full_name": "ckopsa/marco-orgs",
+                                  "url": "https://github.com/ckopsa/marco-orgs",
+                                  "private": True, "existed": False})
+        self.assertEqual(self.posts(), [("/user/repos", {"name": "marco-orgs", "private": True,
+                                                         "auto_init": True})])
+        self.assertEqual({token for *_, token in self.calls}, {"Bearer repo-token"})
+
+    def test_private_false_and_a_description_reach_github(self):
+        answer, refused = tools.call(self.bench, "create_repo", {"name": "marco-orgs", "private": False,
+                                                                 "description": "The Marco house's orgs."})
+        self.assertFalse(refused, answer)
+        self.assertFalse(answer["private"])
+        self.assertEqual(self.posts()[0][1]["description"], "The Marco house's orgs.")
+
+    def test_a_repository_already_there_is_the_answer_and_nothing_is_posted(self):
+        self.add("ckopsa", "marco-orgs", True)
+        answer, refused = tools.call(self.bench, "create_repo", {"name": "marco-orgs"})
+        self.assertFalse(refused, answer)
+        self.assertTrue(answer["existed"])
+        self.assertEqual(self.posts(), [])
+
+    def test_a_fork_of_the_name_is_refused_name_taken(self):
+        self.add("ckopsa", "marco-orgs", False, "ashmerra/marco-orgs")
+        answer, refused = tools.call(self.bench, "create_repo", {"name": "marco-orgs"})
+        self.assertEqual(answer["refused"], "name_taken")
+        self.assertEqual(self.posts(), [])
+
+    def test_a_name_github_refuses_to_make_is_refused_name_taken(self):
+        self.post_status = 422
+        answer, refused = tools.call(self.bench, "create_repo", {"name": "marco-orgs"})
+        self.assertEqual(answer["refused"], "name_taken")
+
+    def test_the_owner_is_the_setting_and_an_organization_is_the_path(self):
+        self.assertNotIn("owner", tools.TOOLS["create_repo"]["schema"]["properties"])
+        with mock.patch.dict(os.environ, {"BENCH_REPO_OWNER": "house-org"}):
+            answer, refused = tools.call(self.bench, "create_repo", {"name": "marco-orgs"})
+        self.assertFalse(refused, answer)
+        self.assertEqual(answer["full_name"], "house-org/marco-orgs")
+        self.assertEqual(self.posts()[0][0], "/orgs/house-org/repos")
+
+    def test_a_name_github_cannot_spell_is_refused_input(self):
+        for name in (".hidden", "a/b", "../x"):
+            answer, refused = tools.call(self.bench, "create_repo", {"name": name})
+            self.assertEqual(answer["refused"], "input", name)
+        self.assertEqual(self.calls, [])
+
+
 class TestTheRepoToken(RepoCase):
+
+    def test_without_it_create_repo_refuses_and_a_token_that_may_not_create_is_named(self):
+        with mock.patch.dict(os.environ, {"BENCH_REPO_TOKEN": ""}):
+            answer, refused = tools.call(self.bench, "create_repo", {"name": "marco-orgs"})
+        self.assertEqual(answer["refused"], "no_repo_token")
+        self.assertEqual(self.calls, [])
+        self.post_status = 403
+        answer, refused = tools.call(self.bench, "create_repo", {"name": "marco-orgs"})
+        self.assertEqual(answer["refused"], "token_lacks_repo_create")
+        self.assertNotIn("repo-token", json.dumps(answer))
 
     def test_without_it_fork_refuses_and_the_main_token_never_stands_in(self):
         with mock.patch.dict(os.environ, {"BENCH_REPO_TOKEN": ""}):

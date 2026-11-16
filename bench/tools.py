@@ -3468,13 +3468,13 @@ def secret_list(bench, args):
 
 
 def _account():
-    """Gives the GitHub account fork makes repositories in. It uses its own
+    """Gives the GitHub account fork and create_repo make repositories in. It uses its own
     token, and refuses when it is not set."""
     try:
         return forge.Account()
     except forge.NoRepoToken:
         raise Refusal("no_repo_token",
-                      reason="fork uses its own token: set BENCH_REPO_TOKEN "
+                      reason="fork and create_repo use their own token: set BENCH_REPO_TOKEN "
                              "to %s (docs/credential.md)" % forge.REPO_CREATE_NEEDS)
 
 
@@ -3531,6 +3531,33 @@ def fork(bench, args):
                       reason=git.scrub(str(exc)))
     raise Refusal("fork_pending", repo="%s/%s" % (account.owner, made),
                   reason="GitHub took the fork, and it did not show in a minute: call fork again")
+
+
+def create_repo(bench, args):
+    """Makes an empty repository in the owner's account, with an initial commit
+    on main, and answers it. A repository of the name already there is the
+    answer, and nothing changes; a fork or an archived one is no such repository."""
+    name = _github_name(_text(args, "name", required=True), "name")
+    private = _flag(args, "private", True)
+    description = _text(args, "description")
+    _text(args, "why")  # Optional: a gate in front of the rig may hold the why itself.
+    account = _account()
+    try:
+        found = account.repository(name)
+        if found is not None:
+            if found.get("fork") or found.get("parent") or found.get("archived"):
+                raise Refusal("name_taken", repo=found.get("full_name"),
+                              reason="the repository is there, and it is a fork or archived: "
+                                     "it is not the rig's to reuse")
+            return _made(found, True)
+        return _made(account.create(name, private, description), False)
+    except forge.ForgeError as exc:
+        if exc.status == 422:
+            raise Refusal("name_taken", repo="%s/%s" % (account.owner, name),
+                          reason="GitHub holds the name: %s" % git.scrub(str(exc)))
+        lacks = isinstance(exc, forge.TokenLacksRepoCreate)
+        raise Refusal("token_lacks_repo_create" if lacks else "forge", repo="%s/%s" % (account.owner, name),
+                      reason=git.scrub(str(exc)))
 
 
 def dispatch(bench, args):
@@ -5462,6 +5489,32 @@ TOOL_SPECS = [
                 "seat": _SEAT, "sitting": _SITTING,
             },
             "required": ["source_repo"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "create_repo",
+        "function": create_repo,
+        "description": (
+            "Makes an empty GitHub repository in the rig's account (BENCH_REPO_OWNER, "
+            "never an argument), with an initial commit on main so it can be cloned and "
+            "enrolled, and answers {full_name, url, private, existed}. A repository of the "
+            "name already there is the answer, existed: true, and nothing changes. A write: "
+            "a gate should hold it for a person's tap. The refusals are input, "
+            "no_repo_token, token_lacks_repo_create, name_taken and forge."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The repository's name, e.g. marco-orgs."},
+                "private": {"type": "boolean", "default": True,
+                            "description": "False makes it public. The default is private."},
+                "description": {"type": "string", "description": "The repository's description on GitHub."},
+                "why": {"type": "string", "description": "One sentence: why this repository is made. "
+                        "Optional: a gate in front of this server may hold the why itself."},
+                "seat": _SEAT, "sitting": _SITTING,
+            },
+            "required": ["name"],
             "additionalProperties": False,
         },
     },
