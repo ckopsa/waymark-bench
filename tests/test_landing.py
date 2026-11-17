@@ -728,6 +728,76 @@ class TestHouseMerge(LandingCase):
         self.assertFalse(refused, answer)
         self.assertEqual(answer["state"], "current")
 
+    def close(self, pr=OPEN_PR, **args):
+        def answer(method, url, headers, body=None):
+            path = url.split("/repos/o/r", 1)[-1]
+            self.calls.append((method, path, body))
+            if method == "GET" and path == "/pulls/7":
+                return 200, json.dumps(pr)
+            return (204, "") if method == "DELETE" else (200, "{}")
+        forge.http = answer
+        args.setdefault("number", 7)
+        return self.call("close_pull_request", **args)
+
+    def writes(self):
+        return [call for call in self.calls if call[0] != "GET"]
+
+    def test_close_posts_the_comment_then_closes(self):
+        answer, refused = self.close(head_sha="abc123", comment="Superseded by #8.")
+        self.assertFalse(refused, answer)
+        self.assertEqual((answer["state"], answer["number"]), ("closed", 7))
+        self.assertEqual(self.writes(), [
+            ("POST", "/issues/7/comments", {"body": "Superseded by #8."}),
+            ("PATCH", "/pulls/7", {"state": "closed"})])
+
+    def test_close_of_a_moved_head_is_head_moved_and_writes_nothing(self):
+        answer, refused = self.close(head_sha="def456", comment="gone")
+        self.assertTrue(refused, answer)
+        self.assertEqual(answer["refused"], "head_moved")
+        self.assertEqual(self.writes(), [])
+
+    def test_close_of_a_closed_pull_request_answers_closed_and_writes_nothing(self):
+        answer, refused = self.close(pr=dict(OPEN_PR, state="closed"), comment="gone")
+        self.assertFalse(refused, answer)
+        self.assertEqual(answer["state"], "closed")
+        self.assertEqual(self.writes(), [])
+
+    def test_close_of_a_merged_pull_request_answers_merged_and_changes_nothing(self):
+        merged = dict(OPEN_PR, state="closed", merged=True, merged_at="2026-11-17T00:00:00Z")
+        answer, refused = self.close(pr=merged, comment="gone", delete_branch=True)
+        self.assertFalse(refused, answer)
+        self.assertEqual(answer["state"], "merged")
+        self.assertEqual(self.writes(), [])
+
+    def test_close_deletes_a_bench_branch_of_this_repository_when_asked(self):
+        head = {"ref": "bench/t1", "sha": "abc123",
+                "repo": {"full_name": "o/r", "default_branch": "main"}}
+        answer, refused = self.close(pr=dict(OPEN_PR, head=head), delete_branch=True)
+        self.assertFalse(refused, answer)
+        self.assertTrue(answer["branch_deleted"])
+        self.assertEqual(self.writes(), [("PATCH", "/pulls/7", {"state": "closed"}),
+                                         ("DELETE", "/git/refs/heads/bench/t1", None)])
+
+    def test_close_keeps_a_branch_outside_the_prefix_another_repository_or_a_default(self):
+        for head in ({"ref": "work", "sha": "abc123", "repo": {"full_name": "o/r"}},
+                     {"ref": "bench/t1", "sha": "abc123", "repo": {"full_name": "fork/r"}},
+                     {"ref": "bench/main", "sha": "abc123",
+                      "repo": {"full_name": "o/r", "default_branch": "bench/main"}}):
+            self.calls = []
+            answer, refused = self.close(pr=dict(OPEN_PR, head=head), delete_branch=True)
+            self.assertFalse(refused, answer)
+            self.assertFalse(answer["branch_deleted"], head)
+            self.assertTrue(answer["kept_because"])
+            self.assertEqual(self.writes(), [("PATCH", "/pulls/7", {"state": "closed"})])
+
+    def test_close_refuses_a_bad_input_before_the_forge(self):
+        for args, field in (({"number": 0}, "number"), ({"delete_branch": "yes"}, "delete_branch")):
+            self.calls = []
+            answer, refused = self.close(**args)
+            self.assertTrue(refused, answer)
+            self.assertEqual((answer["refused"], answer["field"]), ("input", field))
+            self.assertEqual(self.calls, [])
+
     def test_empty_required_checks_is_refused_before_the_forge(self):
         self.forge_with(runs=check_runs(("tests", "completed", "success")))
         answer = self.refusal(required_checks=[])

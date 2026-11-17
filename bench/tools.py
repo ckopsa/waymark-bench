@@ -3248,6 +3248,37 @@ def update_branch(bench, args):
     return dict(answer, repo=repo.name, number=number)
 
 
+# The prefix of the work branches the bench opens; close_pull_request deletes no other.
+BENCH_BRANCH_PREFIX = "bench/"
+
+
+def close_pull_request(bench, args):
+    """Closes one pull request without merging it."""
+    repo = bench.repo(args.get("repo"))
+    number = args.get("number")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise Refusal("input", field="number", reason="the pull request number is necessary")
+    head_sha = _text(args, "head_sha")
+    comment = _text(args, "comment")
+    delete_branch = args.get("delete_branch")
+    if delete_branch is None:
+        delete_branch = False
+    if not isinstance(delete_branch, bool):
+        raise Refusal("input", field="delete_branch", reason="true or false is necessary")
+    _text(args, "why")  # Optional: a gate in front of the rig may hold the why itself.
+    protected = {repo.default_branch}
+    if repo.land:
+        protected.add(repo.land.target)
+    try:
+        answer = forge.client(repo).close_pull_request(
+            number, head_sha, comment, delete_branch, BENCH_BRANCH_PREFIX, protected)
+    except forge.ForgeError as exc:
+        raise Refusal("forge", reason=git.scrub(str(exc)))
+    if answer.get("refused"):
+        raise Refusal(answer.pop("refused"), **answer)
+    return dict(answer, repo=repo.name, number=number)
+
+
 SHA_CHARS = re.compile(r"^[0-9a-f]{7,40}$")
 
 
@@ -5359,6 +5390,47 @@ TOOL_SPECS = [
                 "sitting": _SITTING,
             },
             "required": ["repo", "number", "head_sha"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "close_pull_request",
+        "function": close_pull_request,
+        "description": (
+            "Closes one pull request without merging it, e.g. one emptied or superseded by "
+            "another: never a merge, never a force-push. The comment, when given, is posted on "
+            "the pull request first, so the reason is on GitHub. The answers: closed - it is "
+            "closed, now or before, e.g. {\"state\": \"closed\", \"number\": 7}; merged - it "
+            "was merged and nothing changed, e.g. {\"state\": \"merged\"}. With delete_branch, "
+            "the head branch is deleted only when it is in the same repository, starts with "
+            "bench/ and is not a default branch; the answer says branch_deleted, and "
+            "kept_because when it was kept. A write: a gate should hold it for a person's "
+            "tap. The refusals are repo (not enrolled), input, head_moved and forge (no "
+            "credential, or not GitHub)."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "repo": _REPO,
+                "number": {"type": "integer", "minimum": 1,
+                           "description": "The pull request number, e.g. 7."},
+                "head_sha": {"type": "string",
+                             "description": "Optional. The head commit the engine saw. An "
+                                            "open pull request whose head is another commit "
+                                            "is refused with head_moved."},
+                "comment": {"type": "string",
+                            "description": "Optional. Posted on the pull request before it "
+                                           "is closed, e.g. \"Superseded by #8.\""},
+                "delete_branch": {"type": "boolean", "default": False,
+                                  "description": "True deletes the head branch too, when it is "
+                                                 "in this repository and starts with bench/."},
+                "why": {"type": "string", "description": "One sentence: why this pull request "
+                        "is closed. Optional: a gate in front of this server may hold the why "
+                        "itself."},
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "number"],
             "additionalProperties": False,
         },
     },

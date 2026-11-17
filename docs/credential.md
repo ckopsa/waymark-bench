@@ -21,6 +21,7 @@ each token can be made whole, and no larger.
 | `feedback`, `merge` | read check runs | Checks: read | `repo` |
 | `feedback`, `merge` | read commit statuses | Commit statuses: read | `repo` |
 | `merge` | merge the pull request | Contents: read and write, Pull requests: read and write | `repo` |
+| `close_pull_request` | comment on and close the pull request, delete its `bench/` head branch when asked | Pull requests: read and write, Contents: read and write (only to delete the branch) | `repo` |
 | `rerun` | re-run the failed jobs of an interrupted workflow run | Actions: read and write | `repo` |
 | `dispatch` | start a `workflow_dispatch` workflow, read its runs | Actions: read and write | `repo` |
 | `run_status` | read one workflow run and its jobs | Actions: read | `repo` |

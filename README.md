@@ -1,10 +1,10 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives thirty-eight
+for each repository and a git worktree for each branch. It gives thirty-nine
 tools: `prepare`, `status`, `diff`, `find`, `read`, `symbols`, `read_symbol`, `history`, `check`, `edit`,
 `edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`,
-`compare_heads`, `rerun`, `test`,
+`close_pull_request`, `compare_heads`, `rerun`, `test`,
 `test_result`, `enroll`, `repos`, `unenroll`, `train_build`, `train_checks`,
 `train_open`, `train_status`, `train_land`, `train_delete`, `secret_set`,
 `secret_list`, `dispatch`, `run_status`, `fork` and `create_repo`. It needs Python
@@ -356,6 +356,21 @@ head will move and the checks run again) or `current` (already up to
 date), and refuses a conflict (`not_mergeable`), any other GitHub
 refusal (`update_refused`) and a forge that is not GitHub
 (`unsupported`).
+
+`close_pull_request` closes a pull request without merging it - one
+emptied or superseded by another. Give `number` and, optionally,
+`head_sha` (an open pull request whose head moved is refused
+`head_moved`), `comment` (posted on the pull request before the close, so
+the reason is on GitHub) and `delete_branch` (default false). It answers
+`{state: closed, number}`, also for one already closed; one already
+merged answers `{state: merged}` and nothing changes. With
+`delete_branch`, the head branch is deleted only when it is in the same
+repository, starts with `bench/` and is not a default branch (the
+repository's, or the landing target); the answer says `branch_deleted`,
+and `kept_because` when it was kept. It never merges and never
+force-pushes. It refuses `repo`, `input`, `head_moved` and `forge` (no
+credential, or not GitHub). It is a write: a gate should hold it for a
+person's tap.
 
 `compare_heads` tells whether the head an update moved to still carries a
 person's yes: give `approved` (the head they approved), `head` (the head
