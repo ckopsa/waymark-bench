@@ -574,6 +574,10 @@ class Bitbucket(Client):
         return {"refused": "unsupported",
                 "reason": "the rig updates a pull request's branch only on github"}
 
+    def close_pull_request(self, number, head_sha=None, comment=None, delete_branch=False,
+                           branch_prefix="", protected=()):
+        raise ForgeError("the rig closes a pull request only on github")
+
     def rerun_failed_jobs(self, run_id):
         raise ForgeError("the rig re-runs a pipeline only on github")
 
@@ -1355,6 +1359,54 @@ class GitHub(Client):
         if "conflict" in lowered:
             return {"refused": "not_mergeable", "reason": message}
         return {"refused": "update_refused", "reason": "github answered 422: %s" % message[:300]}
+
+    def close_pull_request(self, number, head_sha=None, comment=None, delete_branch=False,
+                           branch_prefix="", protected=()):
+        """Closes one pull request without merging it; never a merge, never a
+        force. Gives {state: closed|merged, ...} or {refused, reason}. The
+        comment is posted before the close. A merged pull request changes
+        nothing; one already closed is not closed again. With delete_branch,
+        the head branch is deleted only when it is in this repository, starts
+        with branch_prefix and is neither in protected nor the default branch."""
+        data = self.request("GET", self.url("/pulls/%s" % number))
+        if data.get("merged") or data.get("merged_at"):
+            return {"state": "merged"}
+        head = data.get("head") or {}
+        if data.get("state") != "closed":
+            if head_sha and head.get("sha") != head_sha:
+                return {"refused": "head_moved", "head": head.get("sha"),
+                        "reason": "the head is %s, not %s: something was pushed since" % (
+                            head.get("sha"), head_sha)}
+            if comment:
+                self.request("POST", self.url("/issues/%s/comments" % number), {"body": comment})
+            self.request("PATCH", self.url("/pulls/%s" % number), {"state": "closed"})
+        answer = {"state": "closed"}
+        if delete_branch:
+            answer.update(self._delete_head(head, branch_prefix, protected))
+        return answer
+
+    def _delete_head(self, head, branch_prefix, protected):
+        """Deletes a closed pull request's head branch when the rules allow it.
+        Gives {branch, branch_deleted} and, when it is kept, why."""
+        ref = head.get("ref") or ""
+        home = head.get("repo") or {}
+        kept = None
+        if (home.get("full_name") or "").lower() != ("%s/%s" % (self.owner, self.name)).lower():
+            kept = "the head branch is in another repository"
+        elif not branch_prefix or not ref.startswith(branch_prefix):
+            kept = "the head branch does not start with %r" % branch_prefix
+        elif ref in protected or ref == home.get("default_branch"):
+            kept = "the head branch is a default branch"
+        if kept:
+            return {"branch": ref, "branch_deleted": False, "kept_because": kept}
+        try:
+            self.request("DELETE", self.url("/git/refs/heads/%s" % urllib.parse.quote(ref)))
+        except ForgeError as exc:
+            if exc.status not in (404, 422):  # 422: the branch is already gone
+                raise
+            return {"branch": ref, "branch_deleted": False,
+                    "kept_because": "the head branch is already gone"}
+        return {"branch": ref, "branch_deleted": True}
 
 
 # What the repo token needs to make a repository in the owner's account.
