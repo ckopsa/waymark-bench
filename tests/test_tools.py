@@ -1,6 +1,8 @@
 """One test for each tool, and one test for each refusal."""
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -237,6 +239,42 @@ class TestPrepare(BenchCase):
         self.assertEqual(tools.written_paths(path), {"docs/a.txt"})
         self.ok("submit", branch="work", message="our line", trailers=["Seat: test"])
         self.assertEqual(tools.written_paths(path), set())
+
+
+class TestBaseRefs(BenchCase):
+    """A fetch brings each local base branch of the bare clone to origin's."""
+
+    def heads(self, *names):
+        bare = self.bench.bare_dir("demo")
+        return [(util.git(["rev-parse", "refs/heads/" + name], cwd=bare).strip(),
+                 util.git(["rev-parse", "refs/remotes/origin/" + name], cwd=bare).strip())
+                for name in names]
+
+    def test_a_stale_local_base_is_fast_forwarded_after_a_fetch(self):
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "dev", "docs/dev.txt", "dev, first\n")
+        self.prepared()
+        util.push_change(other, "dev", "docs/dev.txt", "dev, second\n")
+        util.push_change(other, "main", "docs/new.txt", "main, second\n")
+        self.ok("prepare", branch="work")
+        for local, remote in self.heads("main", "dev"):
+            self.assertEqual(local, remote)
+
+    def test_a_diverged_local_base_is_left_with_a_warning(self):
+        self.prepared()
+        bare = self.bench.bare_dir("demo")
+        mine = util.git(["commit-tree", "refs/heads/main^{tree}", "-p", "refs/heads/main",
+                         "-m", "a local commit"], cwd=bare).strip()
+        util.git(["update-ref", "refs/heads/main", mine], cwd=bare)
+        other = util.clone(self.root, self.clone_url)
+        util.push_change(other, "main", "docs/new.txt", "main, second\n")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.ok("prepare", branch="work")
+        [(local, remote)] = self.heads("main")
+        self.assertEqual(local, mine)
+        self.assertNotEqual(remote, mine)
+        self.assertIn("bench warning: repo=demo branch=main", err.getvalue())
 
 
 class TestStatus(BenchCase):

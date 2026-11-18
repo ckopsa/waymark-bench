@@ -352,7 +352,37 @@ class Bench:
     def fetch(self, repo):
         bare = self.ensure_bare(repo)
         git.run(["fetch", "--prune", "origin"], cwd=bare, timeout=600)
+        self.follow_bases(repo, bare)
         return bare
+
+    def follow_bases(self, repo, bare):
+        """Fast-forwards each local base branch to origin/<base> after a fetch:
+        dev, main, master, the repository's default branch and its landing
+        target. A base that is not an ancestor of origin's is left, with a
+        warning. A base a worktree has checked out is left to prepare, which
+        moves the worktree with it. Gives the bases it moved."""
+        bases = {"dev", "main", "master", repo.default_branch}
+        if repo.land is not None:
+            bases.add(repo.land.target)
+        _, listed, _ = git.run(["worktree", "list", "--porcelain"], cwd=bare, check=False)
+        checked_out = {line.split(" ", 1)[1] for line in listed.splitlines()
+                       if line.startswith("branch ")}
+        moved = []
+        for base in sorted(bases):
+            local, remote = "refs/heads/" + base, "refs/remotes/origin/" + base
+            if not (git.ref_exists(local, cwd=bare) and git.ref_exists(remote, cwd=bare)):
+                continue
+            old, new = git.rev_parse(local, cwd=bare), git.rev_parse(remote, cwd=bare)
+            if old == new or local in checked_out:
+                continue
+            code = git.run(["merge-base", "--is-ancestor", old, new], cwd=bare, check=False)[0]
+            if code != 0:
+                print("bench warning: repo=%s branch=%s is not an ancestor of origin/%s; "
+                      "left as it is" % (repo.name, base, base), file=sys.stderr)
+                continue
+            git.run(["update-ref", local, new, old], cwd=bare)
+            moved.append(base)
+        return moved
 
     def worktree(self, repo, branch, must_exist=True):
         """Gives the path of a worktree."""
@@ -2521,7 +2551,8 @@ def _against_of(bench, repo, worktree, target, fetch=False):
     """
     bare = bench.bare_dir(repo.name)
     if fetch:
-        git.run(["fetch", "--prune", "origin"], cwd=bare, check=False, timeout=600)
+        if git.run(["fetch", "--prune", "origin"], cwd=bare, check=False, timeout=600)[0] == 0:
+            bench.follow_bases(repo, bare)
     try:
         target_ref = base_ref_of(bare, target)
     except Refusal:

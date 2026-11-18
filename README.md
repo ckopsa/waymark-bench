@@ -200,7 +200,11 @@ the merge, so the worktree is left as it was. A dirty worktree is
 refused (`dirty`). The engine calls it; it is in no powers entry.
 
 `read` with a `ref` reads the ref as the last fetch left it. `prepare`
-and `pull` fetch.
+and `pull` fetch. After every fetch the local base branches (`dev`,
+`main`, `master`, the default branch and the landing target) are
+fast-forwarded to `origin/<base>`, so a read of `dev` reads origin's.
+A base that is not an ancestor of origin's is left, with a warning in
+the log; one a worktree has checked out moves with that worktree.
 
 ## Definitions by name
 
