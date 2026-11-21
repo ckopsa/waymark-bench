@@ -697,7 +697,9 @@ transport is stdio. The command is
 `BENCH_GIT_TOKEN`. The powers entries of the row name `find`, `read`,
 `check`, `edit` and `pull`. `check` lints the files a change touched
 before submit: balanced forms for Clojure, with clj-kondo's errors when
-the rig has it, a compile check for Python, and `node --check` for `.js`
+the rig has it (a repository with no `.clj-kondo` of its own whose files
+require `waymark10.dsl` is linted with the config waymark10 exports, read
+from the rig's clone of ckopsa/waymark), a compile check for Python, and `node --check` for `.js`
 and `.mjs` files (`unavailable` says so when the rig has no node). It never writes. The tools `prepare`, `status`, `submit`, `feedback`,
 `discard`, `enroll`, `repos` and `unenroll` are the engine's own. The engine calls `prepare` before a
 sitting, so the model finds the worktree made.
