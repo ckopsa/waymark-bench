@@ -2084,6 +2084,59 @@ class TestCheck(BenchCase):
             {"path": ".github/workflows/ci.yml", "line": 5, "text": "runs-on: ubuntu-latest",
              "allowed": False}])
 
+    KIT_CONFIG = "{:lint-as {waymark10.dsl/defguard clojure.core/defn}}\n"
+    ORG_GUARDS = ("(ns house.guards\n  (:require [waymark10.dsl :as g]))\n\n"
+                  "(g/defguard owner-retires [x] x)\n\n(defn f [] owner-retires)\n")
+
+    def kit_committed(self, path):
+        """Commits a waymark10 kit config on work and lets demo stand in for ckopsa/waymark."""
+        util.write(os.path.join(path, tools.KONDO_KIT_PATH, "config.edn"), self.KIT_CONFIG)
+        tools.git.run(["add", "-A"], cwd=path)
+        tools.git.run(["commit", "-m", "kit"], cwd=path)
+        self.enterContext(mock.patch.object(tools, "KONDO_KIT_REPO", "demo"))
+        self.enterContext(mock.patch.object(self.bench.config.repos["demo"], "default_branch", "work"))
+
+    def test_an_org_without_kondo_config_gets_the_kits_config(self):
+        path = self.prepared()
+        self.kit_committed(path)
+        util.write(os.path.join(path, "orgs/house/guards.clj"), self.ORG_GUARDS)
+        scratch = tempfile.mkdtemp(dir=self.root)
+        config_dir, note = tools.kondo_kit_dir(self.bench, path, ["orgs/house/guards.clj"], scratch)
+        self.assertIsNone(note)
+        with open(os.path.join(config_dir, "kit", "config.edn"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), self.KIT_CONFIG)
+        with open(os.path.join(config_dir, "config.edn"), encoding="utf-8") as handle:
+            self.assertIn("\"kit\"", handle.read())
+
+    def test_a_repository_with_its_own_kondo_config_keeps_it(self):
+        path = self.prepared()
+        self.kit_committed(path)
+        util.write(os.path.join(path, "orgs/house/guards.clj"), self.ORG_GUARDS)
+        os.makedirs(os.path.join(path, ".clj-kondo"))
+        self.assertEqual(tools.kondo_kit_dir(self.bench, path, ["orgs/house/guards.clj"], self.root),
+                         (None, None))
+
+    def test_a_file_without_waymark10_dsl_needs_no_kit(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "src/core.clj"), self.ODD_LET)
+        self.assertEqual(tools.kondo_kit_dir(self.bench, path, ["src/core.clj"], self.root),
+                         (None, None))
+
+    def test_the_kit_wanted_and_not_on_the_rig_is_said(self):
+        path = self.prepared()
+        util.write(os.path.join(path, "orgs/house/guards.clj"), self.ORG_GUARDS)
+        config_dir, note = tools.kondo_kit_dir(self.bench, path, ["orgs/house/guards.clj"], self.root)
+        self.assertIsNone(config_dir)
+        self.assertIn("not on the rig", note)
+
+    @unittest.skipUnless(shutil.which("clj-kondo"), "clj-kondo is not on PATH")
+    def test_clj_kondo_resolves_a_waymark10_def_name_with_the_kit(self):
+        path = self.prepared()
+        self.kit_committed(path)
+        util.write(os.path.join(path, "orgs/house/guards.clj"), self.ORG_GUARDS)
+        answer = self.ok("check", branch="work", paths=["orgs/house/guards.clj"])
+        self.assertEqual([f for f in answer["findings"] if "Unresolved symbol" in f["message"]], [])
+
     @unittest.skipUnless(shutil.which("clj-kondo"), "clj-kondo is not on PATH")
     def test_clj_kondo_names_an_unbalanced_let_binding(self):
         path = self.prepared()

@@ -1397,10 +1397,61 @@ def changed_paths(bench, repo, branch, worktree):
     return [name for name in names if not deny_pattern(name, repo.deny)]
 
 
-def kondo_errors(program, worktree, paths):
-    """Gives the errors clj-kondo finds in paths; its warnings stay out."""
+# A repository of orgs carries no clj-kondo config of its own, so a bare lint
+# leaves every name a waymark10.dsl def form makes unresolved. ckopsa/waymark's
+# own config imports the one waymark10 exports; the rig reads that one from its
+# clone of ckopsa/waymark, at that repository's default branch.
+KONDO_KIT_REPO = "ckopsa/waymark"
+KONDO_KIT_PATH = "waymark10/resources/clj-kondo.exports/waymark10/waymark10"
+KONDO_KIT_NS = re.compile(r"\bwaymark10\.dsl\b")
+
+
+def kondo_kit_dir(bench, worktree, paths, scratch):
+    """Gives (config_dir, note). config_dir is a clj-kondo config dir under scratch that
+    imports waymark10's exported config, when the worktree has no .clj-kondo of its own and
+    one of paths requires waymark10.dsl; note says why the kit was wanted and not had."""
+    if os.path.isdir(os.path.join(worktree, ".clj-kondo")):
+        return None, None
+    wanted = False
+    for rel in paths:
+        with open(os.path.join(worktree, rel), "r", encoding="utf-8", errors="replace") as handle:
+            if KONDO_KIT_NS.search(handle.read()):
+                wanted = True
+                break
+    if not wanted:
+        return None, None
+    entry = bench.config.repos.get(KONDO_KIT_REPO)
+    if entry is None or not bench.bare_exists(KONDO_KIT_REPO):
+        return None, ("%s is not on the rig: the Clojure files that require waymark10.dsl "
+                      "were linted without its clj-kondo config" % KONDO_KIT_REPO)
+    bare = bench.bare_dir(KONDO_KIT_REPO)
+    config_dir = os.path.join(scratch, ".clj-kondo")
+    try:
+        ref = base_ref_of(bare, entry.default_branch)
+        names = git.out(["ls-tree", "-r", "--name-only", ref, "--", KONDO_KIT_PATH],
+                        cwd=bare).splitlines()
+        for name in names:
+            target = os.path.join(config_dir, "kit", os.path.relpath(name, KONDO_KIT_PATH))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(git.out(["show", "%s:%s" % (ref, name)], cwd=bare))
+    except (Refusal, git.GitError, OSError) as exc:
+        return None, "waymark10's clj-kondo config could not be read from %s: %s" % (
+            KONDO_KIT_REPO, exc)
+    if not names:
+        return None, "%s holds no %s: the Clojure files that require waymark10.dsl were " \
+                     "linted without its clj-kondo config" % (KONDO_KIT_REPO, KONDO_KIT_PATH)
+    with open(os.path.join(config_dir, "config.edn"), "w", encoding="utf-8") as handle:
+        handle.write("{:config-paths [\"kit\"]}\n")
+    return config_dir, None
+
+
+def kondo_errors(program, worktree, paths, config_dir=None):
+    """Gives the errors clj-kondo finds in paths; its warnings stay out. config_dir, when
+    given, stands in for the worktree's own .clj-kondo."""
+    extra = ["--config-dir", config_dir] if config_dir else []
     done = subprocess.run(
-        [program, "--lint"] + paths + ["--config", "{:output {:format :json}}"],
+        [program, "--lint"] + paths + extra + ["--config", "{:output {:format :json}}"],
         cwd=worktree, capture_output=True, text=True, timeout=120, check=False)
     report = json.loads(done.stdout or "{}")
     return [
@@ -1838,10 +1889,14 @@ def check(bench, args):
                 unavailable.append("clj-kondo not installed on the rig: the Clojure files had the "
                                    "balance check only")
             else:
-                try:
-                    findings.extend(kondo_errors(program, worktree, clojure))
-                except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                    unavailable.append("clj-kondo did not answer: %s" % exc)
+                with tempfile.TemporaryDirectory(prefix="bench-kondo-") as scratch:
+                    config_dir, note = kondo_kit_dir(bench, worktree, clojure, scratch)
+                    if note:
+                        unavailable.append(note)
+                    try:
+                        findings.extend(kondo_errors(program, worktree, clojure, config_dir))
+                    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                        unavailable.append("clj-kondo did not answer: %s" % exc)
         # The step checks the whole worktree, so the paths of the call do not
         # decide it: every file the branch changed does.
         changed = ([rel for _, rel in places] if not given
