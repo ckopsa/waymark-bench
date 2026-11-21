@@ -39,6 +39,22 @@ jobs:
         env:
           NODE_MAJOR: ${{ steps.node.outputs.major }}
         run: node --version | grep -E "^v${NODE_MAJOR}\."
+      # The clj-kondo the Dockerfile's CLJ_KONDO_VERSION pins, so the check
+      # tests that run the real linter, the waymark10 kit config included,
+      # run here and do not skip. It is read from the Dockerfile's
+      # `ARG CLJ_KONDO_VERSION=` line and named nowhere else.
+      - name: Install clj-kondo at the Dockerfile's version
+        run: |
+          version="$(sed -n 's/^ARG CLJ_KONDO_VERSION=\([0-9][0-9.]*\)$/\1/p' Dockerfile)"
+          if [ -z "$version" ]; then
+            echo "The Dockerfile has no 'ARG CLJ_KONDO_VERSION=<version>' line." >&2
+            exit 1
+          fi
+          curl -fsSL -o /tmp/clj-kondo.zip \
+            "https://github.com/clj-kondo/clj-kondo/releases/download/v${version}/clj-kondo-${version}-linux-amd64.zip"
+          sudo unzip -o /tmp/clj-kondo.zip clj-kondo -d /usr/local/bin
+          sudo chmod +x /usr/local/bin/clj-kondo
+          clj-kondo --version | grep -F "v${version}"
       - uses: astral-sh/setup-uv@v5
       - name: Install the rig and its dependency
         run: uv sync
