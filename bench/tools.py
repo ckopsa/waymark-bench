@@ -2142,6 +2142,117 @@ def edit_many(bench, args):
     return _edit(bench, args, edits, problems)
 
 
+COPY_MAX_FILES = 5000
+COPY_MAX_BINARY_BYTES = 1048576
+
+
+def _copy_matches(name, globs):
+    """Tells if a source path matches one glob, or sits under a directory a glob names."""
+    for pattern in globs:
+        bare = pattern.rstrip("/")
+        if fnmatch.fnmatch(name, pattern) or name == bare or name.startswith(bare + "/"):
+            return True
+    return False
+
+
+def _source_commit(bare, ref):
+    """Gives the commit a ref of the source's clone names: a branch first, then a tag or a sha."""
+    for spec in ("refs/remotes/origin/" + ref, ref):
+        code, out, _ = git.run(["rev-parse", "--verify", "--quiet", spec + "^{commit}"],
+                               cwd=bare, check=False)
+        if code == 0 and out.strip():
+            return out.strip()
+    raise Refusal("not_found", from_ref=ref, reason="the ref is not in the source's clone",
+                  remedy="name a branch, a tag or a commit of from_repo")
+
+
+def copy_tree(bench, args):
+    """Copies files of one repository at a ref into another's worktree, uncommitted.
+
+    The source is read from its bare clone and never written; the bytes go
+    from clone to worktree and never through the caller. Every file is
+    judged before a byte is written: one refusal writes none of them.
+    """
+    source = bench.repo(_text(args, "from_repo", required=True))
+    from_ref = check_branch(_text(args, "from_ref", default=source.default_branch))
+    repo = bench.repo(args.get("repo"))
+    branch = check_branch(_text(args, "branch", required=True))
+    paths = _globs(args, "paths")
+    if not paths:
+        raise Refusal("input", field="paths", reason="paths is a list of one glob or more")
+    exclude = _globs(args, "exclude") or []
+    to_path = clean_path(_text(args, "to_path", default="."))
+    allow_protected = bool(args.get("allow_protected"))
+    allow = _globs(args, "allow")
+    ceiling = None
+    if args.get("max_lines") is not None:
+        ceiling = _int(args, "max_lines", 0, 0, 10000000)
+    with bench.lock(source.name):
+        bare = bench.fetch(source)
+        commit = _source_commit(bare, from_ref)
+        listing = git.out(["ls-tree", "-r", "-l", "-z", commit], cwd=bare, timeout=600)
+        files, skipped = [], []
+        for entry in listing.split("\0"):
+            if not entry:
+                continue
+            meta, name = entry.split("\t", 1)
+            mode, kind, sha, size = meta.split()
+            if not _copy_matches(name, paths) or _copy_matches(name, exclude):
+                continue
+            if kind != "blob" or mode == "120000":
+                skipped.append({"path": name, "reason": "a submodule or a symlink is not copied"})
+                continue
+            if deny_pattern(name, source.deny):
+                skipped.append({"path": name, "reason": "the source's deny globs hold it"})
+                continue
+            files.append((name, mode, sha, int(size)))
+        if not files:
+            raise Refusal("not_found", from_repo=source.name, from_ref=from_ref, paths=paths,
+                          reason="no file of the source matches paths")
+        if len(files) > COPY_MAX_FILES:
+            raise Refusal("too_many", files=len(files), max_files=COPY_MAX_FILES,
+                          reason="at most %d files in one copy: narrow paths" % COPY_MAX_FILES)
+        blobs = []
+        lines = 0
+        for name, mode, sha, size in files:
+            data = git.blob(sha, cwd=bare)
+            binary = b"\0" in data[:8000]
+            if binary and size > COPY_MAX_BINARY_BYTES:
+                raise Refusal("too_large", path=name, bytes=size, max_bytes=COPY_MAX_BINARY_BYTES,
+                              reason="a binary file over the limit is not copied: exclude it")
+            if not binary:
+                lines += data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
+            blobs.append((name, mode, data))
+    if ceiling is not None and lines > ceiling:
+        raise Refusal("over_ceiling", lines=lines, max_lines=ceiling, files=len(blobs),
+                      reason="the copy is over the line ceiling: narrow paths")
+    with bench.lock(repo.name):
+        worktree = bench.worktree(repo, branch)
+        bench.no_landing(repo, branch)
+        planned = []
+        for name, mode, data in blobs:
+            dest = name if to_path == "." else to_path + "/" + name
+            full, rel = bench.resolve(repo, worktree, dest, for_write=True,
+                                      allow_protected=allow_protected, allow=allow)
+            if os.path.isdir(full):
+                raise Refusal("exists", path=rel, reason="a directory stands where the file would go")
+            planned.append((full, rel, mode, data))
+        replaced = 0
+        for full, rel, mode, data in planned:
+            if os.path.isfile(full):
+                replaced += 1
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb") as handle:
+                handle.write(data)
+            if mode == "100755":
+                os.chmod(full, 0o755)
+        note_written(worktree, [rel for _, rel, _, _ in planned])
+    return {"repo": repo.name, "branch": branch, "from_repo": source.name, "from_ref": from_ref,
+            "commit": commit, "files": len(planned), "lines": lines,
+            "bytes": sum(len(item[3]) for item in planned), "replaced": replaced,
+            "paths": [rel for _, rel, _, _ in planned[:50]], "skipped": skipped[:50]}
+
+
 def _refused_items(problems):
     """One refusal for a list's bad edits: the first at the top, each in items."""
     problems = sorted(problems, key=lambda problem: problem["item"])
@@ -5125,6 +5236,49 @@ TOOL_SPECS = [
                 "sitting": _SITTING,
             },
             "required": ["repo", "branch", "edits"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "copy",
+        "function": copy_tree,
+        "description": (
+            "Copies files from one enrolled repository at a ref into the worktree of another's "
+            "branch, without the bytes passing through the caller. paths and exclude are globs "
+            "of the source's paths (a directory name takes all under it); each file lands at "
+            "to_path/<its source path>. The source is only read. The files are left uncommitted, "
+            "as an edit's are: submit makes the one commit. Every file is judged before a byte "
+            "is written: a binary over 1 MiB, more than 5000 files, a path the target's deny or "
+            "allow refuses, a write under .github/ or .claude/ without allow_protected, or more "
+            "lines than max_lines refuses the whole copy. The answer gives files, lines and "
+            "bytes copied, and the source commit."
+        ),
+        "schema": {
+            "type": "object",
+            "properties": {
+                "from_repo": {"type": "string", "description": "The enrolled repository to copy from."},
+                "from_ref": {"type": "string",
+                             "description": "A branch, tag or commit of from_repo; its default "
+                                            "branch when left out."},
+                "paths": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                          "description": "Globs of the source paths to copy; a directory name "
+                                         "takes all under it."},
+                "exclude": {"type": "array", "items": {"type": "string"},
+                            "description": "Globs of the source paths to leave out."},
+                "repo": _REPO,
+                "branch": _BRANCH,
+                "to_path": {"type": "string",
+                            "description": "The target directory the files land under; the root "
+                                           "when left out."},
+                "max_lines": {"type": "integer",
+                              "description": "The target's line ceiling: a copy of more lines is refused."},
+                "allow_protected": {"type": "boolean",
+                                    "description": "True to permit a write under .github/ or .claude/."},
+                "allow": _ALLOW,
+                "seat": _SEAT,
+                "sitting": _SITTING,
+            },
+            "required": ["repo", "branch", "from_repo", "paths"],
             "additionalProperties": False,
         },
     },

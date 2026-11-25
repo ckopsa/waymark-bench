@@ -107,6 +107,21 @@ def out(argv, cwd=None, timeout=DEFAULT_TIMEOUT):
     return run(argv, cwd=cwd, timeout=timeout)[1]
 
 
+def blob(sha, cwd, timeout=DEFAULT_TIMEOUT):
+    """Gives the bytes of one blob as they are: no text decoding, so a binary file survives."""
+    config = settings.load()
+    command = ["git"] + config_args(None, config) + ["cat-file", "blob", sha]
+    try:
+        proc = subprocess.run(command, cwd=cwd, env=environment(None), timeout=timeout,
+                              capture_output=True)
+    except subprocess.TimeoutExpired:
+        raise GitError(["cat-file", "blob"], -1, "timeout after %s seconds" % timeout)
+    if proc.returncode != 0:
+        raise GitError(["cat-file", "blob", sha], proc.returncode,
+                       scrub(proc.stderr.decode("utf-8", "replace")).strip())
+    return proc.stdout
+
+
 def line(argv, cwd=None, timeout=DEFAULT_TIMEOUT):
     """Runs one git command and gives the first line of the output."""
     return out(argv, cwd=cwd, timeout=timeout).strip()

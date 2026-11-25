@@ -1,9 +1,9 @@
 # waymark-bench
 
 The bench rig. It is a small MCP server over git. It holds a bare clone
-for each repository and a git worktree for each branch. It gives thirty-nine
+for each repository and a git worktree for each branch. It gives forty
 tools: `prepare`, `status`, `diff`, `find`, `read`, `symbols`, `read_symbol`, `history`, `check`, `edit`,
-`edit_many`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`,
+`edit_many`, `copy`, `pull`, `conflicts`, `submit`, `feedback`, `log`, `discard`, `merge`, `update_branch`,
 `close_pull_request`, `compare_heads`, `rerun`, `test`,
 `test_result`, `enroll`, `repos`, `unenroll`, `train_build`, `train_checks`,
 `train_open`, `train_status`, `train_land`, `train_delete`, `secret_set`,
@@ -720,6 +720,25 @@ no glob matches is not in the answer, and it is not in `dropped`.
 
 The rig holds no seat and no rule between the calls. The engine judges
 the grant, and the rig obeys the arguments of the call.
+
+## Copying from another repository
+
+`copy` takes `from_repo`, `from_ref` (a branch, tag or commit; the source's
+default branch when left out), `paths` and `exclude` (globs of the source's
+paths; a directory name takes all under it), and the target's `repo`,
+`branch` and `to_path`. It fetches the source, reads the files from its bare
+clone at that ref, and writes them into the target's worktree at
+`to_path/<source path>`, so the bytes never pass through the caller. The
+source is only read. The files are left uncommitted: `submit` makes the one
+commit. Every file is judged first, and one refusal writes none: a binary
+over 1 MiB (`too_large`), more than 5000 files (`too_many`), a path the
+target's deny or `allow` refuses, a write under `.github/` or `.claude/`
+without `allow_protected`, or more lines than `max_lines` (`over_ceiling`).
+A symlink, a submodule, or a path the source's deny globs hold is skipped
+and named in `skipped`. The answer gives `files`, `lines`, `bytes`,
+`replaced` and the source `commit`. Whether a caller may read the source and
+write the target is the engine's judgment, per repository: the rig holds no
+grants.
 
 ## Many edits in one call
 

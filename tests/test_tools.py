@@ -687,6 +687,53 @@ class TestRead(BenchCase):
         self.assertNotIn("note", self.ok("read", branch="work", path="docs/long.txt", limit=10))
 
 
+class TestCopy(BenchCase):
+    """copy: files of one repository at a ref, into another's worktree."""
+
+    def second(self):
+        self.ok("enroll", repo="second", clone_url=self.clone_url)
+        self.ok("prepare", repo="second", branch="work")
+        return self.bench.wt_dir("second", "work")
+
+    def test_copy_writes_the_files_under_to_path(self):
+        path = self.second()
+        answer = self.ok("copy", repo="second", branch="work", from_repo="demo",
+                         from_ref="main", paths=["docs"], to_path="vendor")
+        self.assertEqual(answer["from_repo"], "demo")
+        self.assertIn("vendor/docs/a.txt", answer["paths"])
+        self.assertEqual(answer["files"], len(answer["paths"]))
+        self.assertGreaterEqual(answer["lines"], 3)
+        with open(os.path.join(path, "vendor/docs/a.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "alpha\nbravo\ncharlie\n")
+
+    def test_copy_leaves_out_what_exclude_names(self):
+        self.second()
+        answer = self.ok("copy", repo="second", branch="work", from_repo="demo",
+                         paths=["src", "docs"], exclude=["docs/*"], to_path="vendor")
+        self.assertIn("vendor/src/app.py", answer["paths"])
+        self.assertFalse([name for name in answer["paths"] if name.startswith("vendor/docs/")])
+
+    def test_copy_over_max_lines_writes_nothing(self):
+        path = self.second()
+        answer = self.refused("copy", repo="second", branch="work", from_repo="demo",
+                              paths=["docs"], to_path="vendor", max_lines=1)
+        self.assertEqual(answer["refused"], "over_ceiling")
+        self.assertFalse(os.path.exists(os.path.join(path, "vendor")))
+
+    def test_copy_under_github_is_protected(self):
+        path = self.second()
+        answer = self.refused("copy", repo="second", branch="work", from_repo="demo",
+                              paths=["docs"], to_path=".github")
+        self.assertEqual(answer["refused"], "protected")
+        self.assertFalse(os.path.exists(os.path.join(path, ".github", "docs")))
+
+    def test_copy_refuses_a_ref_the_source_lacks(self):
+        self.second()
+        answer = self.refused("copy", repo="second", branch="work", from_repo="demo",
+                              from_ref="no-such-branch", paths=["docs"])
+        self.assertEqual(answer["refused"], "not_found")
+
+
 class TestEdit(BenchCase):
 
     def test_edit_replaces_one_text(self):
